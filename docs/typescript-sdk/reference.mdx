@@ -254,6 +254,7 @@ interface ServeOptions {
   onMessage?: PipelineMessageHandler | string;
   onMetrics?: (data: Record<string, unknown>) => Promise<void>;
   recording?: boolean;
+  localRecording?: boolean | string;  // SDK-side stereo WAV recording; string = output directory
   voicemailMessage?: string;
   pricing?: Record<string, Record<string, unknown>>;
   dashboard?: boolean;
@@ -263,6 +264,8 @@ interface ServeOptions {
   manageWebhook?: boolean;  // default true; ignored when tunnel: true
 }
 ```
+
+`localRecording` enables carrier-neutral SDK-side recording: an interleaved stereo WAV (left = caller, right = agent, PCM16 16 kHz) written incrementally per call. Pass a directory string to choose the output directory. The final path is surfaced as `recording_path` in the `onCallEnd` payload. Independent of the carrier-side `recording` flag. See [Local Recording](/typescript-sdk/features#local-recording-carrier-neutral).
 
 ### LocalCallOptions
 

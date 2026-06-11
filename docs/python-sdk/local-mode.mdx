@@ -66,6 +66,7 @@ await phone.serve(agent, port=8000)
 | `agent` | `Agent` | *required* | The agent configuration to use for all calls. Create with `phone.agent()`. |
 | `port` | `int` | `8000` | TCP port to bind to (1-65535). |
 | `recording` | `bool` | `False` | Enable call recording via the Twilio Recordings API. |
+| `local_recording` | `bool \| str` | `False` | Carrier-neutral SDK-side recording: stereo WAV per call (left = caller, right = agent, PCM16 16 kHz). Pass a directory string to set the output directory. See [Local Recording](/python-sdk/features#local-recording-carrier-neutral). |
 | `on_call_start` | `Callable \| None` | `None` | Async callback fired when a call connects. |
 | `on_call_end` | `Callable \| None` | `None` | Async callback fired when a call ends. |
 | `on_transcript` | `Callable \| None` | `None` | Async callback fired for each utterance. |

@@ -41,6 +41,7 @@ await phone.serve({ agent, port: 8000 });
 | `onMessage` | `(data) => Promise<string>` | No | — | Pipeline mode only. Receives user transcript, returns response text. Can also be a URL string for remote webhook/WebSocket integration. |
 | `onMetrics` | `(data) => Promise<void>` | No | — | Called after each conversational turn with per-turn latency and cost metrics. |
 | `recording` | `boolean` | No | `false` | Enable call recording (Twilio only). |
+| `localRecording` | `boolean \| string` | No | `false` | Carrier-neutral SDK-side recording: stereo WAV per call (left = caller, right = agent, PCM16 16 kHz). Pass a directory string to set the output directory. See [Local Recording](/typescript-sdk/features#local-recording-carrier-neutral). |
 | `voicemailMessage` | `string` | No | — | Default voicemail message for AMD. |
 | `pricing` | `Record<string, Record<string, unknown>>` | No | — | Custom pricing overrides for cost calculation. |
 | `dashboard` | `boolean` | No | `true` | When `true`, serve a dashboard UI at `/dashboard`. |
