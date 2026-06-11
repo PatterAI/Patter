@@ -1670,8 +1670,8 @@ class Patter:
     def agent(
         self,
         system_prompt: str,
-        voice: str = "alloy",
-        model: str = "gpt-realtime-mini",
+        voice: str | None = None,
+        model: str | None = None,
         language: str = "en",
         first_message: str = "",
         llm_error_message: str | None = None,
@@ -1690,6 +1690,8 @@ class Patter:
         audio_filter: AudioFilter | None = None,
         background_audio: BackgroundAudioPlayer | None = None,
         barge_in_threshold_ms: int = 300,
+        barge_in_mode: str = "cancel",
+        barge_in_confirm_ms: int = 1500,
         aggressive_first_flush: bool = False,
         disable_phone_preamble: bool = False,
         echo_cancellation: bool = False,
@@ -1720,8 +1722,12 @@ class Patter:
 
         Args:
             system_prompt: Instructions for the AI agent.
-            voice: TTS voice name (e.g. ``"alloy"``, ``"echo"``).
-            model: OpenAI Realtime model ID.
+            voice: TTS voice name (e.g. ``"alloy"``, ``"echo"``). When omitted,
+                the ``engine=`` marker's voice applies (default ``"alloy"``);
+                an explicit value always wins over the engine.
+            model: OpenAI Realtime model ID. When omitted, the ``engine=``
+                marker's model applies (default ``"gpt-realtime-mini"``); an
+                explicit value always wins over the engine.
             language: BCP-47 language code, e.g. ``"en"``.
             first_message: If set, the agent speaks this immediately on connect.
             long_turn_message: Pipeline mode only. Opt-in short filler spoken
@@ -1785,9 +1791,11 @@ class Patter:
             # Realtime has no composed stack, so the model variant is the whole
             # story — resolve it the same way the engine unpacking below does
             # (an explicit model= kwarg wins; otherwise the engine's model).
-            _rt_model = model
-            if _rt_model == "gpt-realtime-mini" and getattr(engine, "model", None):
-                _rt_model = engine.model
+            _rt_model = (
+                model
+                if model is not None
+                else (getattr(engine, "model", None) or "gpt-realtime-mini")
+            )
             _stack = {**_stack, "llm_model": model_token("openai", _rt_model)}
         _feature_key = (
             _family + "|" + ",".join(f"{k}={v}" for k, v in sorted(_stack.items()))
@@ -1874,6 +1882,15 @@ class Patter:
                     + f". Got: {provider!r}"
                 )
 
+        # --- Validate barge_in_mode (parity with TS ``bargeInMode`` union) ---
+        _valid_barge_in_modes = ("cancel", "pause_resume")
+        if barge_in_mode not in _valid_barge_in_modes:
+            raise ValueError(
+                "barge_in_mode must be one of: "
+                + ", ".join(_valid_barge_in_modes)
+                + f". Got: {barge_in_mode!r}"
+            )
+
         # --- Engine dispatch ---
         openai_engine_key: str = ""
         elevenlabs_engine_key: str = ""
@@ -1890,12 +1907,13 @@ class Patter:
                 )
             engine_kind, engine_fields = self._unpack_engine(engine)
             provider = engine_kind
-            # Engine-supplied voice/model win over the method defaults, but we
-            # let any *explicit* voice=/model= kwarg pass through unchanged —
-            # users sometimes pass the engine AND a specific voice.
-            if voice == "alloy" and engine_fields.get("voice"):
+            # Engine-supplied voice/model fill the slots the caller left unset
+            # (sentinel ``None``); an *explicit* voice=/model= kwarg always
+            # wins — even when its value equals the documented default.
+            # Mirrors TS ``opts.model ?? engineModel ?? default``.
+            if voice is None and engine_fields.get("voice"):
                 voice = engine_fields["voice"]
-            if model == "gpt-realtime-mini" and engine_fields.get("model"):
+            if model is None and engine_fields.get("model"):
                 model = engine_fields["model"]
             if engine_kind in ("openai_realtime", "openai_realtime_2"):
                 openai_engine_key = engine_fields.get("api_key", "")
@@ -1947,11 +1965,23 @@ class Patter:
             provider in ("openai_realtime", "openai_realtime_2")
             and not self._local_config.openai_key
         ):
-            raise ValueError(
-                "OpenAI Realtime mode requires an OpenAI API key. Pass "
-                "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
-                "in the environment."
-            )
+            # The provider= string path has no engine marker to carry the key —
+            # honour OPENAI_API_KEY from the environment (the error message has
+            # always promised it, TS accepts it, and the engine markers already
+            # env-fallback). Backfill the local config so the CALL PATH uses the
+            # key too — accepting here but dialing with an empty key later
+            # would be a dead call instead of a clear error.
+            _env_openai_key = os.environ.get("OPENAI_API_KEY", "")
+            if _env_openai_key:
+                self._local_config = replace(
+                    self._local_config, openai_key=_env_openai_key
+                )
+            else:
+                raise ValueError(
+                    "OpenAI Realtime mode requires an OpenAI API key. Pass "
+                    "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
+                    "in the environment."
+                )
 
         if provider == "pipeline":
             if stt_resolved is None:
@@ -2045,6 +2075,14 @@ class Patter:
                     "modes and will be ignored for this agent."
                 )
 
+        # Apply the documented defaults to slots neither the caller nor an
+        # engine marker filled (sentinel ``None`` distinguishes "unset" from an
+        # explicit value equal to the default).
+        if voice is None:
+            voice = "alloy"
+        if model is None:
+            model = "gpt-realtime-mini"
+
         return Agent(
             system_prompt=system_prompt,
             voice=voice,
@@ -2070,6 +2108,8 @@ class Patter:
             audio_filter=audio_filter,
             background_audio=background_audio,
             barge_in_threshold_ms=barge_in_threshold_ms,
+            barge_in_mode=barge_in_mode,
+            barge_in_confirm_ms=barge_in_confirm_ms,
             aggressive_first_flush=aggressive_first_flush,
             disable_phone_preamble=disable_phone_preamble,
             echo_cancellation=echo_cancellation,

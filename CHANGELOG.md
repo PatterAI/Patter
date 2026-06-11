@@ -1,7 +1,66 @@
 ## Unreleased
 
+### Added
+
+- **TypeScript: `EvalSession` — the eval harness now has full parity with
+  Python.** `import { EvalSession, expect, ScriptedLLMProvider } from
+  "getpatter"` constructs a REAL pipeline-mode `StreamHandler` and injects user
+  turns through the live-call path (transcript commit → dispatch → `LLMLoop` →
+  tool executor → sentence chunker → TTS), faking only the paid/external
+  boundary (`FakeAudioSender`/`FakeSTT`/`FakeTTS` + a deterministic
+  `ScriptedLLMProvider` or any real `LLMProvider`). `await session.userSays("…")`
+  returns a readonly `TurnResult` (`agentText`, `toolCalls`, `historySnapshot`,
+  `interrupted`, `metricsTurn`); `expect(result)` adds chainable
+  `.toolCalled(name, argsSubset?)` / `.noToolCalled()` / `.agentTextContains(…)`
+  plus async `.judge(llmJudge, { intent })`. `EvalCase` gains optional
+  `agent`/`llmProvider` routing through the session (the legacy reply-factory
+  path is unchanged), and `getpatter eval run <suite>` replaces the CLI stub
+  (exit codes 0/1/2, JSON report, `--agent module:export` loader). Defaults and
+  report rows are byte-compatible with Python's. New
+  `libraries/typescript/src/evals/`; `src/cli.ts`, `src/index.ts`.
+
+- **Python: `barge_in_mode` / `barge_in_confirm_ms` are now `Patter.agent()`
+  keywords** (TypeScript parity — `AgentOptions` already exposed `bargeInMode` /
+  `bargeInConfirmMs`). Previously they existed only as `Agent` dataclass fields,
+  forcing callers through `dataclasses.replace(...)` on the returned agent.
+  Same defaults (`"cancel"` / `1500`); invalid modes are rejected with a
+  `ValueError`. Opt-in — existing calls are unaffected.
+  `libraries/python/getpatter/client.py`.
+
 ### Fixed
 
+- **`provider="openai_realtime"` now honours `OPENAI_API_KEY` from the
+  environment — and the env key actually reaches the call path.** Python's
+  validation rejected the provider-string path unless the key was on the
+  config, even though its own error message promised "or set OPENAI_API_KEY in
+  the environment" (the engine markers already env-fallback). TypeScript
+  accepted the env var at validation but then dialed with an empty
+  `localConfig.openaiKey` — a dead call at connect time instead of a clear
+  error. Both SDKs now backfill the local config from the environment when the
+  provider-string path has no configured key, and reject with the same message
+  when no key exists anywhere. Caught by running the cross-SDK parity suite
+  with `OPENAI_API_KEY` set. `libraries/python/getpatter/client.py`,
+  `libraries/typescript/src/client.ts`.
+- **Python: an explicit `voice=` / `model=` on `agent()` now always wins over
+  the `engine=` marker — even when the value equals the documented default.**
+  The kwargs moved to sentinel defaults (`voice: str | None = None`,
+  `model: str | None = None`) so "explicit `gpt-realtime-mini`" is
+  distinguishable from "unset": previously
+  `agent(model="gpt-realtime-mini", engine=OpenAIRealtime(model="gpt-realtime-2"))`
+  silently ran (and reported in telemetry) the engine's model, while the same
+  call in TypeScript ran the explicit one. Resolution is now
+  explicit → engine → default in both SDKs (TS was already correct). Calls
+  that omit `voice=`/`model=` see zero change.
+  `libraries/python/getpatter/client.py`.
+- **Telemetry (TypeScript): a flush completing after `close()` began no longer
+  chains a detached delivery.** The post-flush chain in
+  `libraries/typescript/src/telemetry/client.ts` now stops once `close()` has
+  started (parity with Python's `not self._closed` guard): without it, an event
+  recorded during an in-flight POST could be picked up by a chained flush that
+  `close()` never awaited — a prompt process exit then killed that POST mid-air.
+  `close()` now always drains later-buffered events itself before resolving.
+  Added the previously missing regression tests (both SDKs) for the
+  "event recorded during an in-flight flush is chained, not stranded" 0.6.7 fix.
 - **Telemetry: large flushes are no longer truncated by the collector.** The
   client buffers up to 256 events but the collector accepts at most 64 per
   request — a busy session's flush could silently lose everything past the cap

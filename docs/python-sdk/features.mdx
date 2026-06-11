@@ -33,6 +33,39 @@ for record in recordings:
     print(record.sid, record.duration)
 ```
 
+### Local Recording (Carrier-Neutral)
+
+`local_recording` records each call **on your own machine**, with no carrier API involved. The SDK taps the audio already flowing through the per-call stream handler and writes an interleaved stereo WAV — **left channel = caller, right channel = agent** — as PCM16 at 16 kHz. μ-law 8 kHz carrier audio is upsampled and 24 kHz Realtime audio is downsampled, so the output format is the same on every carrier and engine mode.
+
+```python
+await phone.serve(agent, local_recording=True)
+
+# Or pass a directory string to choose where the WAVs go:
+await phone.serve(agent, local_recording="/var/recordings")
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `local_recording` | `bool \| str` | `False` | SDK-side stereo WAV recording (left = caller, right = agent, PCM16 16 kHz). Pass a directory string to set the output directory. Works on every carrier (Twilio, Telnyx, Plivo) and engine mode. |
+
+Where the file lands:
+
+1. Directory string → `<dir>/<call_id>.wav`.
+2. [Call logging](/python-sdk/call-logging) enabled → `<call_log_dir>/recording.wav`, next to `metadata.json` and `transcript.jsonl` (so it is covered by the same `PATTER_LOG_RETENTION_DAYS` cleanup).
+3. Otherwise → `./recordings/<call_id>.wav` under the current working directory.
+
+The final path is surfaced as `recording_path` in the [`on_call_end`](/python-sdk/events#on_call_end) payload and persisted in the call-log `metadata.json`:
+
+```python
+async def on_call_end(event):
+    if event.get("recording_path"):
+        print(f"Recording saved: {event['recording_path']}")
+```
+
+<Note>
+  The WAV header is finalized on **every** teardown path — including abnormal carrier WebSocket drops — so a truncated call still yields a playable file. `local_recording` is independent of the carrier-side `recording` flag: both can be enabled on the same call.
+</Note>
+
 ---
 
 ## Answering Machine Detection (AMD)

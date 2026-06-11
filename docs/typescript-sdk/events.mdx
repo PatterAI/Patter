@@ -87,6 +87,8 @@ await phone.serve({
   caller: string;        // Caller phone number (E.164)
   callee: string;        // Callee phone number (E.164)
   ended_at: number;      // Unix timestamp in seconds (fractional)
+  recording_path?: string | null;  // Local stereo WAV path; only present when
+                                   // localRecording was enabled on serve()
   transcript: Array<{
     role: string;        // "user" or "assistant"
     text: string;        // Transcript text

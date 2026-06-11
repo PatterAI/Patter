@@ -72,6 +72,7 @@ async def on_call_end(event):
 | `ended_at` | `float` | Unix timestamp when the call ended (e.g. `1710489601.234`). |
 | `transcript` | `list[dict]` | Full conversation transcript. Each entry has `role` (`"user"` or `"assistant"`) and `text`. |
 | `metrics` | `CallMetrics \| None` | Call metrics with cost and latency breakdowns. `None` if metrics collection failed. See [Metrics & Cost Tracking](/python-sdk/metrics). |
+| `recording_path` | `str \| None` | Path to the local stereo WAV. Only present when `local_recording` was enabled on `serve()`; `None` if finalizing the file failed. See [Local Recording](/python-sdk/features#local-recording-carrier-neutral). |
 
 ---
 

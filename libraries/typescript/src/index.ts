@@ -366,6 +366,44 @@ export {
   TelnyxTTSSampleRate,
 } from "./providers/telnyx-tts";
 
+// Evaluation framework — declarative eval cases, an LLM judge, the
+// real-pipeline EvalSession harness, and chainable turn assertions.
+// Mirrors Python `getpatter.evals` (run via `getpatter eval run <suite>`).
+export {
+  EvalRunner,
+  EvalSession,
+  FakeAudioSender,
+  FakeSTT,
+  FakeTTS,
+  LLMJudge,
+  ScriptedLLMProvider,
+  TurnExpectation,
+  evalResultToDict,
+  expect,
+  historyTranscript,
+  loadSuite,
+  textTurn,
+  toolCallTurn,
+} from "./evals";
+export type {
+  AgentCallable,
+  AgentFactory,
+  AgentTextContainsOptions,
+  EvalCase,
+  EvalResult,
+  EvalRunnerOptions,
+  EvalSessionOptions,
+  EvalSuite,
+  EvalTurn,
+  JudgeBackend,
+  JudgeResult,
+  LLMJudgeOptions,
+  ScriptedLLMCall,
+  ToolCallRecord,
+  TranscriptEntry,
+  TurnResult,
+} from "./evals";
+
 // Observability — OTel-compatible tracing (optional peer dep).
 export {
   initTracing,
