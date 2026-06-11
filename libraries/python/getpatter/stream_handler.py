@@ -4882,7 +4882,7 @@ class PipelineStreamHandler(StreamHandler):
 
     # ---------------------------------------------------------------
     # Pause-and-resume false-interruption handling (barge_in_mode =
-    # "pause_resume"). LiveKit-style: PAUSE output on VAD speech_start,
+    # "pause_resume"): PAUSE output on VAD speech_start,
     # KILL on a committed final transcript within the confirm window,
     # RESUME from the first not-fully-heard sentence otherwise.
     # ---------------------------------------------------------------
@@ -5459,8 +5459,7 @@ class PipelineStreamHandler(StreamHandler):
     # ------------------------------------------------------------------
     # PREEMPTIVE GENERATION (opt-in) — speculative dispatch on a confident
     # interim transcript; commit-or-discard at end of utterance. Mirrors TS
-    # ``noteInterimTranscript`` / ``tryReleaseSpeculation`` and LiveKit's
-    # ``preemptive_generation``.
+    # ``noteInterimTranscript`` / ``tryReleaseSpeculation``.
     # ------------------------------------------------------------------
 
     def _can_speculate(self) -> bool:
@@ -7191,7 +7190,7 @@ class PipelineStreamHandler(StreamHandler):
                 last["text"] = text
 
     def _maybe_truncate_completed_turn_history(self) -> None:
-        """LiveKit-style "heard prefix" semantics for a barge-in that lands
+        """Heard-prefix semantics for a barge-in that lands
         AFTER the turn completed, while the carrier is still playing the
         buffered tail.
 

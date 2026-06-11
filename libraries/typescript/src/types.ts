@@ -801,7 +801,7 @@ export interface AgentOptions {
    * - ``'cancel'`` (default): today's behaviour — the in-flight turn is
    *   cancelled immediately (or marked pending when
    *   ``bargeInStrategies`` are configured).
-   * - ``'pause_resume'`` (LiveKit-style false-interruption handling):
+   * - ``'pause_resume'`` (false-interruption handling):
    *   output is PAUSED immediately — the carrier buffer is cleared and
    *   no further TTS audio is sent — while the LLM stream and the TTS
    *   provider stream stay alive (tokens buffer as sentences,
@@ -869,7 +869,7 @@ export interface AgentOptions {
    * paid during the user's own end-of-utterance silence); if it differs,
    * the speculation is discarded silently and the turn dispatches normally
    * on the final. History and metrics record exactly one turn either way.
-   * Same pattern as LiveKit Agents' ``preemptive_generation``. Default:
+   * The standard voice-AI "preemptive generation" pattern. Default:
    * ``false`` — every turn waits for the final transcript, as today.
    * Mirrors Python ``preemptive_generation``.
    */

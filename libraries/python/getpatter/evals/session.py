@@ -57,7 +57,7 @@ Notes
   built-in :class:`~getpatter.services.llm_loop.LLMLoop` path.
 * ``TurnResult.agent_text`` is what the caller HEARD (post-guardrail,
   post-hook, post-text-transform sentences handed to TTS), which is the
-  LiveKit-style observable. ``history_snapshot`` mirrors the dashboard
+  caller-side observable. ``history_snapshot`` mirrors the dashboard
   conversation history, where the streaming path records the raw LLM text.
 """
 

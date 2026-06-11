@@ -825,7 +825,7 @@ export class StreamHandler {
   /**
    * Pause-and-resume false-interruption handling (opt-in
    * ``agent.bargeInMode: 'pause_resume'``; default ``'cancel'`` keeps
-   * today's behaviour byte-identical). LiveKit-style: PAUSE output on
+   * today's behaviour byte-identical): PAUSE output on
    * VAD speech_start (carrier cleared, sends gated on ``outputPaused``),
    * KILL on a committed final transcript within ``bargeInConfirmMs``,
    * RESUME from the first not-fully-heard sentence otherwise. Mirrors
@@ -1166,7 +1166,7 @@ export class StreamHandler {
   }
 
   /**
-   * LiveKit-style "heard prefix" semantics for a barge-in that lands AFTER
+   * Heard-prefix semantics for a barge-in that lands AFTER
    * the turn completed, while the carrier is still playing the buffered
    * tail.
    *
@@ -4116,7 +4116,7 @@ export class StreamHandler {
 
   // ---------------------------------------------------------------------------
   // Pause-and-resume false-interruption handling (bargeInMode: 'pause_resume').
-  // LiveKit-style: PAUSE output on VAD speech_start, KILL on a committed final
+  // PAUSE output on VAD speech_start, KILL on a committed final
   // transcript within the confirm window, RESUME from the first
   // not-fully-heard sentence otherwise. Mirrors Python `_start_pause_resume`.
   // ---------------------------------------------------------------------------
@@ -4526,8 +4526,7 @@ export class StreamHandler {
   // ---------------------------------------------------------------------------
   // PREEMPTIVE GENERATION (opt-in) — speculative dispatch on a confident
   // interim transcript; commit-or-discard at end of utterance. Mirrors Python
-  // ``_note_interim_transcript`` / ``_try_release_speculation`` and LiveKit's
-  // ``preemptive_generation``.
+  // ``_note_interim_transcript`` / ``_try_release_speculation``.
   // ---------------------------------------------------------------------------
 
   /**
