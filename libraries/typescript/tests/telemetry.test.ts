@@ -168,6 +168,56 @@ describe('[integration] telemetry — enabled path', () => {
     expect(typeof event.run_id).toBe('string');
   });
 
+  it('agent() records the realtime model in feature_used, deduped per model', async () => {
+    enableTelemetryEnv();
+    process.env.PATTER_TELEMETRY_ENDPOINT = collector.url;
+    const { Patter, Twilio, OpenAIRealtime } = await import('../src');
+
+    const phone = new Patter({
+      phoneNumber: '+15555550100',
+      carrier: new Twilio({
+        accountSid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+        authToken: 'test-token',
+      }),
+    });
+    phone.agent({
+      systemPrompt: 'hi',
+      engine: new OpenAIRealtime({ apiKey: 'sk-test', model: 'gpt-realtime-2' }),
+    });
+    phone.agent({
+      systemPrompt: 'hi',
+      engine: new OpenAIRealtime({ apiKey: 'sk-test', model: 'gpt-realtime-mini' }),
+    });
+
+    const deadline = Date.now() + 2000;
+    while (
+      collector.events.filter((e) => e.event === 'feature_used').length < 2 &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const featureEvents = collector.events.filter((e) => e.event === 'feature_used');
+    expect(featureEvents.map((e) => e.llm_model).sort()).toEqual([
+      'openai-gpt-realtime-2',
+      'openai-gpt-realtime-mini',
+    ]);
+    for (const e of featureEvents) expect(e.engine).toBe('realtime');
+  });
+
+  it('close() delivers an event whose flush was already started by record()', async () => {
+    enableTelemetryEnv();
+    const client = new TelemetryClient({ sdkVersion: '0.6.6', endpoint: collector.url });
+    client.record('cli_command', { cli_command: 'eval' });
+    // record() schedules an async flush that drains the buffer immediately;
+    // close() must await that in-flight delivery, not just its own (now-empty)
+    // flush — otherwise a CLI that exits right after close() kills the POST
+    // mid-air and every cli_command event is silently lost.
+    await client.close();
+
+    expect(collector.events.map((e) => e.event)).toEqual(['cli_command']);
+  });
+
   it('drops denylisted dimensions', async () => {
     enableTelemetryEnv();
     const client = new TelemetryClient({ sdkVersion: '0.6.3', endpoint: collector.url });
