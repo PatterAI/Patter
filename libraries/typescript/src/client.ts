@@ -50,7 +50,7 @@ import { validateAllToolSchemas } from "./tools/schema-validation";
 import type { ToolDefinition } from "./types";
 import { getLogger } from "./logger";
 import { TelemetryClient } from "./telemetry";
-import { stackDimensions } from "./telemetry/stack";
+import { modelToken, stackDimensions } from "./telemetry/stack";
 import {
   invokedByAgent,
   inContainer,
@@ -593,7 +593,20 @@ export class Patter {
     // *whole* stack signature so a second agent with a different STT/TTS/LLM still
     // records its composition.
     const family = telemetryEngineFamily(opts);
-    const stack = stackDimensions(opts.stt, opts.tts, opts.llm);
+    let stack: Record<string, string> = { ...stackDimensions(opts.stt, opts.tts, opts.llm) };
+    if (family === "realtime") {
+      // Realtime has no composed stack, so the model variant is the whole
+      // story — resolve it the same way the engine merge below does (an
+      // explicit model wins; otherwise the engine's model; else the default).
+      const engineModel = (opts.engine as { model?: string } | undefined)?.model;
+      stack = {
+        ...stack,
+        llm_model: modelToken(
+          "openai",
+          (opts.model as string | undefined) ?? engineModel ?? "gpt-realtime-mini",
+        ),
+      };
+    }
     const featureKey =
       family +
       "|" +

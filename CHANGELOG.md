@@ -1,5 +1,38 @@
 ## Unreleased
 
+## 0.6.7 (2026-06-10)
+
+### Fixed
+
+- **Telemetry: fire-and-forget events no longer vanish before delivery.** Three
+  delivery bugs found by end-to-end testing of the published 0.6.6 packages, fixed
+  in both SDKs: (1) a `TelemetryClient` constructed without holding a reference —
+  the CLI's `cli_command` pattern — was garbage-collected together with its buffered
+  events before the exit flush could send them (the registry is a weak set by
+  design; clients now hold a strong module-level reference from first buffered
+  event until the buffer drains); (2) `aclose()`/`close()` flushed an already-empty
+  buffer while the delivery POST started by `record(...)` was still in flight, so a
+  prompt shutdown killed it mid-air (close now awaits the in-flight flush first);
+  (3) events recorded *while* a flush POST was in flight stranded in the buffer with
+  no flush scheduled (a completed flush now chains another when the buffer is
+  non-empty). Net effect: `getpatter <command>` CLI usage events actually arrive, and
+  constructor-time events (`sdk_initialized`, `first_run`) can no longer shadow
+  agent-time events. `libraries/python/getpatter/telemetry/client.py`,
+  `libraries/typescript/src/telemetry/client.ts`.
+
+### Added
+
+- **Telemetry: Realtime model variant in `feature_used`.** Realtime agents now
+  report which Realtime model they run (`llm_model: "openai-gpt-realtime-2"`,
+  `"openai-gpt-realtime-mini"`, …) through the existing sanitized `llm_model`
+  dimension (custom/fine-tuned names still collapse to `openai-other`), so model mix
+  is visible for the realtime engine family the way it already was for pipeline
+  stacks. The per-process dedupe key includes the model, so two agents on different
+  Realtime models both record. `libraries/python/getpatter/client.py`,
+  `libraries/typescript/src/client.ts`.
+
+## 0.6.6 (2026-06-10)
+
 ### Added
 
 - **Warm transfer — `transfer_call(mode="warm", summary=...)` / `transferCall(..., { mode: 'warm', summary })`.** The built-in `transfer_call` tool (and the programmatic `CallControl.transfer` / `TelephonyBridge.transferCall` surfaces) now accept an optional carrier-neutral `mode` (`"cold"` default — byte-identical to the historical blind redirect — or `"warm"`) plus a `summary`. Warm mode parks the caller in a per-call conference on hold music, dials the human agent with the summary spoken first (`<Say>`), then bridges the two as the AI leg ends — implemented on **Twilio** (conference + REST sequence, with `/webhooks/twilio/conference` lifecycle observability and a `/webhooks/twilio/warm-status` callback that gracefully releases a caller stuck on hold when the human never answers, both signature-validated fail-closed); **Telnyx and Plivo return a clear `{error}` envelope** (logged warning, AI keeps the call) instead of silently degrading to a blind redirect. Invalid modes are rejected with an error envelope on every path. Opt-in — agents that never pass `mode` see zero behavior change. `libraries/python/getpatter/{models,server,stream_handler}.py`, `.../telephony/{twilio,telnyx,plivo}.py`, `.../providers/twilio_adapter.py` + TypeScript mirrors (`src/server.ts`, `src/telephony/plivo.ts`, `src/providers/twilio-adapter.ts`, `src/stream-handler.ts`, new `TransferCallOptions` / `TransferCallResult` types); `docs/{python,typescript}-sdk/tools.mdx`.
