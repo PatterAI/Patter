@@ -23,7 +23,7 @@ import { isCi, isTest } from './env';
 import { installId, runId } from './install-id';
 import { STACK_VENDORS } from './stack';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export const EVENT_SDK_INITIALIZED = 'sdk_initialized';
 export const EVENT_FIRST_RUN = 'first_run';
@@ -137,11 +137,17 @@ const BOOL_DIMENSIONS = new Set<string>([
   'per_tool_timeouts_set',
   'llm_fallback_configured',
 ]);
+// ID dimensions: a random SDK-generated per-call correlation id — never the
+// carrier call SID. The hex32 shape is enforced here as defense in depth (the
+// relay re-checks); a value that fails the shape is DROPPED, never coerced.
+const ID_RE = /^[0-9a-f]{32}$/;
+const ID_DIMENSIONS = new Set<string>(['call_uid']);
 const ALLOWED_DIMENSIONS = new Set<string>([
   ...Object.keys(DIMENSION_VALUES),
   ...NUMERIC_DIMENSIONS,
   ...STRING_DIMENSIONS,
   ...BOOL_DIMENSIONS,
+  ...ID_DIMENSIONS,
 ]);
 
 export type Scalar = string | number | boolean;
@@ -208,6 +214,13 @@ export function buildEvent(
       // Sanitized model / version token: enforce the safe shape; drop anything
       // else (the SDK already guarantees this, but never trust input).
       if (!(typeof value === 'string' && MODEL_TOKEN_RE.test(value))) {
+        continue;
+      }
+    } else if (ID_DIMENSIONS.has(key)) {
+      // Random SDK-generated per-call correlation id — never the carrier call
+      // SID; hex32 shape enforced as defense in depth, relay re-checks. Keep
+      // only a string matching ID_RE; anything else is DROPPED, never coerced.
+      if (!(typeof value === 'string' && ID_RE.test(value))) {
         continue;
       }
     } else if (BOOL_DIMENSIONS.has(key) && typeof value !== 'boolean') {

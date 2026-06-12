@@ -27,6 +27,24 @@
   `ValueError`. Opt-in — existing calls are unaffected.
   `libraries/python/getpatter/client.py`.
 
+### Added
+
+- **Telemetry: `call_uid` — a random per-call correlation id (schema v7).**
+  `call_started` and `call_completed` of the same call now carry the same
+  SDK-generated random id (`uuid4().hex`), so the call lifecycle can be
+  followed across its telemetry events (connect→complete pairing, per-call
+  funnel integrity, retry analysis). It is **never the carrier call SID** and
+  cannot be linked to phone numbers or call content; the hex32 shape is
+  enforced client-side and re-checked by the relay (off-shape values are
+  dropped, never coerced). A call that never connects (`no_answer`/`busy`/
+  `failed`) carries a `call_uid` on its lone `call_completed` event.
+  `libraries/python/getpatter/telemetry/events.py`,
+  `libraries/python/getpatter/telemetry/call_metrics.py`,
+  `libraries/python/getpatter/server.py`,
+  `libraries/typescript/src/telemetry/events.ts`,
+  `libraries/typescript/src/telemetry/call-metrics.ts`,
+  `libraries/typescript/src/server.ts`, `docs/telemetry.mdx`.
+
 ### Fixed
 
 - **Telemetry: `call_completed` is no longer lost when the process exits right

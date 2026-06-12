@@ -3,7 +3,7 @@
  * carrier (Twilio or Telnyx) into the per-call `StreamHandler` and dashboard.
  */
 
-import crypto from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 import * as nodePath from 'node:path';
 import express from 'express';
 import { createServer, Server as HTTPServer } from 'http';
@@ -1225,6 +1225,12 @@ export class EmbeddedServer {
   >();
   /** AMD classification recorded per callId, used by the connected-call path. */
   private readonly amdClass = new Map<string, MachineDetectionResult['classification']>();
+  /**
+   * Random per-call telemetry correlation ids, keyed by carrier callId, so the
+   * `call_started` and `call_completed` events of the same call pair in the
+   * dataset. Insertion-ordered with a small FIFO cap (see `telemetryCallUid`).
+   */
+  private telemetryCallUids = new Map<string, string>();
 
   constructor(
     private readonly config: LocalConfig,
@@ -1370,6 +1376,39 @@ export class EmbeddedServer {
   }
 
   /**
+   * Random per-call telemetry correlation id (never the carrier SID).
+   *
+   * Same ``callId`` → same uid, so ``call_started``/``call_completed`` pair in
+   * the dataset. ``pop=true`` on terminal events keeps the map from leaking; a
+   * small FIFO cap bounds calls that never reach a terminal event. ``pop`` with
+   * a missing entry still returns a fresh uid (a ``no_answer`` call never had a
+   * ``call_started`` — its lone event still gets one). Never throws. Mirrors
+   * Python's ``_telemetry_call_uid``.
+   */
+  private telemetryCallUid(callId: string | undefined | null, pop = false): string | undefined {
+    if (!callId) return undefined;
+    try {
+      if (pop) {
+        const uid = this.telemetryCallUids.get(callId);
+        this.telemetryCallUids.delete(callId);
+        return uid ?? randomUUID().replace(/-/g, '');
+      }
+      let uid = this.telemetryCallUids.get(callId);
+      if (uid === undefined) {
+        if (this.telemetryCallUids.size >= 512) {
+          const first = this.telemetryCallUids.keys().next().value;
+          if (first !== undefined) this.telemetryCallUids.delete(first);
+        }
+        uid = randomUUID().replace(/-/g, '');
+        this.telemetryCallUids.set(callId, uid);
+      }
+      return uid;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Resolve a pending completion with a {@link CallResult}.
    *
    * No-op when no completion is registered for ``callId`` (the common case —
@@ -1392,6 +1431,7 @@ export class EmbeddedServer {
       recordCallCompleted(this.telemetry, {
         outcome: args.outcome,
         carrier: this.config.telephonyProvider,
+        callUid: this.telemetryCallUid(callId, true),
       });
     }
 
@@ -2654,12 +2694,15 @@ export class EmbeddedServer {
       data: Record<string, unknown>,
     ): Promise<void | Record<string, unknown> | undefined> => {
       // Anonymous telemetry: per-call start (engine/provider/carrier +
-      // inbound/outbound; no PII). Pairs with `call_completed` for a
-      // connect→complete funnel. Fail-safe and O(1).
+      // inbound/outbound + random correlation id; no PII). Pairs with
+      // `call_completed` for a connect→complete funnel. Fail-safe and O(1).
       recordCallStarted(telemetry, {
         providerMode: agent.provider ?? undefined,
         telephonyProvider: bridge.telephonyProvider,
         direction: data.direction,
+        callUid: this.telemetryCallUid(
+          typeof data.call_id === 'string' ? data.call_id : undefined,
+        ),
       });
       if (logger.enabled) {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';
@@ -2733,11 +2776,17 @@ export class EmbeddedServer {
 
     const wrappedEnd = async (data: Record<string, unknown>): Promise<void> => {
       // Anonymous telemetry: per-call completion (engine/provider/carrier + raw
-      // duration/latency; no cost, no PII). Fail-safe and O(1).
+      // duration/latency + matching correlation id; no cost, no PII). Fail-safe
+      // and O(1). pop=true so the uid is removed once the call reaches its
+      // terminal event and the map cannot leak.
       recordCallCompleted(this.telemetry, {
         outcome: 'completed',
         metrics: data.metrics,
         direction: data.direction,
+        callUid: this.telemetryCallUid(
+          typeof data.call_id === 'string' ? data.call_id : undefined,
+          true,
+        ),
       });
       if (logger.enabled) {
         const callId = typeof data.call_id === 'string' ? data.call_id : '';

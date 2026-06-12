@@ -90,6 +90,7 @@ def record_call_started(
     provider_mode: str | None = None,
     telephony_provider: str | None = None,
     direction: Any = None,
+    call_uid: str | None = None,
 ) -> None:
     """Emit a ``call_started`` event when a call connects (media stream begins).
 
@@ -111,6 +112,8 @@ def record_call_started(
         d = _direction(direction)
         if d is not None:
             dims["direction"] = d
+        if call_uid is not None:
+            dims["call_uid"] = call_uid
         telemetry.record("call_started", **dims)
     except Exception:
         pass
@@ -123,6 +126,7 @@ def record_call_completed(
     metrics: Any = None,
     carrier: str | None = None,
     direction: Any = None,
+    call_uid: str | None = None,
 ) -> None:
     """Emit a ``call_completed`` event.
 
@@ -141,6 +145,8 @@ def record_call_completed(
         d = _direction(direction)
         if d is not None:
             dims["direction"] = d
+        if call_uid is not None:
+            dims["call_uid"] = call_uid
         if metrics is not None:
             dims["engine"] = _engine_from_mode(getattr(metrics, "provider_mode", None))
             dims["provider"] = _provider_from_metrics(metrics)

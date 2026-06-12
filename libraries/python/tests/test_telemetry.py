@@ -121,7 +121,7 @@ async def test_event_reaches_collector_when_enabled(enabled, collector):
     assert event["sdk"] == "python"
     assert event["sdk_version"] == "0.6.3"
     assert event["runtime"] == "cpython"
-    assert event["schema_version"] == 6
+    assert event["schema_version"] == 7
     assert event["engine"] == "realtime"
     assert event["provider"] == "openai"
     assert event["carrier"] == "twilio"
@@ -963,11 +963,83 @@ def test_build_event_v4_bool_enum_and_version_dims():
 # --- CLI usage + first-run + call funnel + persisted opt-out (schema v6) ------
 
 
-def test_schema_version_is_6():
+def test_schema_version_is_7():
     from getpatter.telemetry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 6
-    assert build_event("first_run", sdk_version="0.6.5")["schema_version"] == 6
+    assert SCHEMA_VERSION == 7
+    assert build_event("first_run", sdk_version="0.6.5")["schema_version"] == 7
+
+
+def test_call_uid_kept_only_when_hex32():
+    # A well-formed random correlation id (32 lowercase hex) survives; every
+    # off-shape value is DROPPED (key absent), never coerced to "other".
+    good = "a" * 32
+    ev = build_event(
+        "call_started", sdk_version="0.6.5", dimensions={"call_uid": good}
+    )
+    assert ev["call_uid"] == good
+
+    for bad in ("not-a-uid", "A" * 32, "a" * 31, "a" * 33, 123, True):
+        ev_bad = build_event(
+            "call_completed",
+            sdk_version="0.6.5",
+            dimensions={"outcome": "completed", "call_uid": bad},
+        )
+        assert "call_uid" not in ev_bad
+        # Never coerced — the off-shape value can't reach the wire at all.
+        assert bad == 123 or str(bad) not in json.dumps(ev_bad)
+
+
+def test_server_telemetry_call_uid_pairing_semantics():
+    # Exercise the REAL EmbeddedServer helper. Constructing the server fully is
+    # cheap enough, but the method only needs the map — use a bare instance so
+    # the test is independent of the heavy __init__ wiring.
+    from getpatter.server import EmbeddedServer
+
+    server = object.__new__(EmbeddedServer)
+    server._telemetry_call_uids = {}
+
+    # Same call_id twice → same uid (so call_started/call_completed pair).
+    uid1 = server._telemetry_call_uid("CAabc")
+    uid2 = server._telemetry_call_uid("CAabc")
+    assert uid1 == uid2
+    assert len(uid1) == 32 and all(c in "0123456789abcdef" for c in uid1)
+
+    # pop=True removes it; a fresh lookup mints a NEW uid.
+    popped = server._telemetry_call_uid("CAabc", pop=True)
+    assert popped == uid1
+    assert "CAabc" not in server._telemetry_call_uids
+    uid3 = server._telemetry_call_uid("CAabc")
+    assert uid3 != uid1
+
+    # pop=True on a call_id that was never seen still returns a fresh uid (a
+    # no_answer call has only its lone terminal event — it still gets a uid).
+    lone = server._telemetry_call_uid("CAnever", pop=True)
+    assert lone is not None and len(lone) == 32
+    assert "CAnever" not in server._telemetry_call_uids
+
+    # Falsy call_id → None (no uid for an unknown call).
+    assert server._telemetry_call_uid("") is None
+    assert server._telemetry_call_uid(None) is None
+
+
+def test_server_telemetry_call_uid_fifo_cap_at_512():
+    # The map is bounded: inserting a 513th distinct call_id evicts the oldest.
+    from getpatter.server import EmbeddedServer
+
+    server = object.__new__(EmbeddedServer)
+    server._telemetry_call_uids = {}
+
+    for i in range(512):
+        server._telemetry_call_uid(f"call-{i}")
+    assert len(server._telemetry_call_uids) == 512
+    assert "call-0" in server._telemetry_call_uids
+
+    # The 513th insert evicts the first-inserted entry (insertion-ordered FIFO).
+    server._telemetry_call_uid("call-512")
+    assert len(server._telemetry_call_uids) == 512
+    assert "call-0" not in server._telemetry_call_uids
+    assert "call-512" in server._telemetry_call_uids
 
 
 def test_build_event_v6_new_events_and_dims():

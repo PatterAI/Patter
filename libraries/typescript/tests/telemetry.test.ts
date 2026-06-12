@@ -240,7 +240,7 @@ describe('[integration] telemetry — enabled path', () => {
     expect(event.sdk).toBe('typescript');
     expect(event.sdk_version).toBe('0.6.3');
     expect(event.runtime).toBe('node');
-    expect(event.schema_version).toBe(6);
+    expect(event.schema_version).toBe(7);
     expect(event.engine).toBe('realtime');
     expect(event.carrier).toBe('twilio');
     expect(typeof event.run_id).toBe('string');
@@ -656,6 +656,49 @@ describe('[integration] telemetry — server wiring fires call_completed', () =>
     expect(e?.outcome).toBe('no_answer');
     expect(e?.carrier).toBe('twilio');
   });
+
+  it('telemetryCallUid pairs call_started/call_completed and pops on terminal events', () => {
+    const server = new EmbeddedServer(makeConfig(), makeAgent());
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const uidOf = (id: unknown, pop?: boolean): string | undefined =>
+      (server as any).telemetryCallUid(id, pop);
+    const HEX32 = /^[0-9a-f]{32}$/;
+
+    // Same callId twice → same uid (so the two events pair in the dataset).
+    const first = uidOf('CAx');
+    expect(first).toMatch(HEX32);
+    expect(uidOf('CAx')).toBe(first);
+
+    // pop=true returns the stored uid AND removes it; a third lookup is fresh.
+    expect(uidOf('CAx', true)).toBe(first);
+    const afterPop = uidOf('CAx');
+    expect(afterPop).toMatch(HEX32);
+    expect(afterPop).not.toBe(first);
+
+    // pop with a never-seen callId still returns a fresh uid (a no_answer call
+    // never had a call_started — its lone event still gets a correlation id).
+    expect(uidOf('CAneverseen', true)).toMatch(HEX32);
+
+    // Falsy callId → undefined (no event carries a uid in that case).
+    expect(uidOf(undefined)).toBeUndefined();
+    expect(uidOf(null)).toBeUndefined();
+    expect(uidOf('')).toBeUndefined();
+
+    // FIFO 512-cap: the oldest entry is evicted, so its next lookup is a new
+    // uid while a later entry keeps its original.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (server as any).telemetryCallUids.clear();
+    const oldestUid = uidOf('call-0');
+    for (let i = 1; i < 512; i++) uidOf(`call-${i}`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((server as any).telemetryCallUids.size).toBe(512);
+    const keptUid = uidOf('call-511'); // still present, unchanged
+    uidOf('call-512'); // 513th distinct id → evicts the oldest ('call-0')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((server as any).telemetryCallUids.size).toBe(512);
+    expect(uidOf('call-0')).not.toBe(oldestUid); // evicted → fresh uid
+    expect(uidOf('call-511')).toBe(keptUid); // survived → same uid
+  });
 });
 
 describe('[unit] telemetry — buildEvent', () => {
@@ -712,6 +755,25 @@ describe('[unit] telemetry — buildEvent', () => {
     expect(event.custom_tool_count_bucket).toBe('2_3');
     expect(event.builtin_tool_count).toBe(1);
     expect(JSON.stringify(event)).not.toContain('SomeCustomerBrand');
+  });
+
+  it('keeps a well-formed call_uid and drops off-shape ids (never coerced)', () => {
+    const good = 'a'.repeat(32);
+    const kept = buildEvent('call_started', {
+      sdkVersion: '0.6.8',
+      dimensions: { call_uid: good },
+    });
+    expect(kept.call_uid).toBe(good);
+
+    // Every off-shape value is DROPPED — the key is absent, never 'other'.
+    for (const bad of ['not-a-uid', 'A'.repeat(32), 'a'.repeat(31), 123]) {
+      const ev = buildEvent('call_started', {
+        sdkVersion: '0.6.8',
+        dimensions: { call_uid: bad as never },
+      });
+      expect(ev).not.toHaveProperty('call_uid');
+      expect(ev.call_uid).not.toBe('other');
+    }
   });
 });
 
@@ -936,10 +998,10 @@ describe('[integration] telemetry — relay-cap chunking (0.6.8)', () => {
   });
 });
 
-describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v6)', () => {
-  it('is on schema v6', () => {
-    expect(SCHEMA_VERSION).toBe(6);
-    expect(buildEvent('first_run', { sdkVersion: '0.6.5' }).schema_version).toBe(6);
+describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v7)', () => {
+  it('is on schema v7', () => {
+    expect(SCHEMA_VERSION).toBe(7);
+    expect(buildEvent('first_run', { sdkVersion: '0.6.5' }).schema_version).toBe(7);
   });
 
   it('buildEvent accepts the new events and coerces off-list values', () => {
