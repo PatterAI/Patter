@@ -2582,10 +2582,14 @@ class Patter:
         teardown, and stale entries leak across ``serve`` /
         ``disconnect`` cycles. See FIX #93.
         """
-        # Ship any telemetry buffered at construction/agent() before teardown.
-        # flush_pending is cheap and keeps the instance reusable (no close), so a
-        # subsequent serve() still emits.
-        self._telemetry.flush_pending()
+        # Ship buffered telemetry and WAIT for delivery (bounded) before
+        # teardown. A fire-and-forget flush here lost the final events of
+        # short-lived scripts: the process exited right after disconnect(),
+        # the loop closed cancelling the flush task mid-POST, and
+        # call_completed (duration/cost/latency) never reached the wire.
+        # drain() keeps the instance reusable (no close) — a subsequent
+        # serve() still emits.
+        await self._telemetry.drain()
 
         # Cancel and drain any in-flight prewarm work BEFORE tearing the
         # server down so the synth tasks see a clean cancellation point

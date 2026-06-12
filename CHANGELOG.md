@@ -29,6 +29,22 @@
 
 ### Fixed
 
+- **Telemetry: `call_completed` is no longer lost when the process exits right
+  after `disconnect()`.** Found live in an E2E call test: `call_started`
+  reached the collector but `call_completed` — the one event carrying
+  duration/cost/latency/outcome — never did, for every short-lived script
+  ("place call, wait, exit", the main outbound use case). `disconnect()` used
+  a fire-and-forget flush; the loop closed right after and cancelled the POST
+  mid-air, and Python's 0.25 s atexit fallback was too short for a cold TLS
+  handshake. Both SDKs now `await telemetry.drain()` in `disconnect()` — a
+  new bounded flush-and-wait that keeps the client reusable (a subsequent
+  `serve()` still emits) — and the Python atexit timeout is bumped to 1 s as
+  a second line of defense for scripts that never call `disconnect()`.
+  `libraries/python/getpatter/telemetry/client.py`,
+  `libraries/python/getpatter/client.py`,
+  `libraries/typescript/src/telemetry/client.ts`,
+  `libraries/typescript/src/client.ts`.
+
 - **Telemetry: `hermes` / `openclaw` CLI usage is no longer invisible (schema
   v6).** The `cli_command` enum was closed over
   `dashboard/eval/telemetry/none/other`, so the wizard commands — the main

@@ -1984,9 +1984,11 @@ export class Patter {
    * entries leak across ``serve`` / ``disconnect`` cycles. See FIX #93.
    */
   async disconnect(): Promise<void> {
-    // Ship any telemetry buffered at construction/agent() before teardown.
-    // flushPending is cheap and keeps the instance reusable (no close).
-    this.telemetry.flushPending();
+    // Ship buffered telemetry and WAIT for delivery before teardown —
+    // mirrors Python: a fire-and-forget flush can lose the final events
+    // (call_completed with duration/cost/latency) when the process exits
+    // right after disconnect(). drain() keeps the instance reusable.
+    await this.telemetry.drain();
 
     // Clear pending TTL eviction timers and drain in-flight prewarm
     // synth tasks BEFORE tearing the server down so the synth tasks

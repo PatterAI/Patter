@@ -228,6 +228,26 @@ async def test_aclose_awaits_in_flight_flush_started_by_record(enabled, collecto
     assert [e["event"] for e in collector.events] == ["cli_command"]
 
 
+async def test_drain_delivers_final_events_and_keeps_client_usable(enabled, collector):
+    """``Patter.disconnect()`` drains via ``drain()``: the final events of a
+    short-lived script (``call_completed`` carrying duration/cost/latency) must
+    be DELIVERED before the loop closes — a fire-and-forget flush was cancelled
+    at loop teardown and the bounded atexit fallback routinely lost them
+    (observed live: call_started reached Axiom, call_completed never did).
+    Unlike ``aclose``, the client must stay usable for a subsequent serve().
+    """
+    client = TelemetryClient(sdk_version="0.6.7", endpoint=collector.url)
+    client.record("call_completed", outcome="completed", carrier="twilio")
+    await client.drain()
+    assert [e["event"] for e in collector.events] == ["call_completed"]
+
+    # Still usable after drain (disconnect() must not kill a reusable instance).
+    client.record("cli_command", cli_command="dashboard")
+    await client.drain()
+    assert [e["event"] for e in collector.events] == ["call_completed", "cli_command"]
+    await client.aclose()
+
+
 class _GatedCollector(_Collector):
     """A real collector that holds its FIRST response until released.
 
@@ -950,7 +970,7 @@ def test_schema_version_is_6():
     assert build_event("first_run", sdk_version="0.6.5")["schema_version"] == 6
 
 
-def test_build_event_v5_new_events_and_dims():
+def test_build_event_v6_new_events_and_dims():
     cli = build_event(
         "cli_command", sdk_version="0.6.5", dimensions={"cli_command": "dashboard"}
     )

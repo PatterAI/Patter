@@ -153,6 +153,22 @@ export class TelemetryClient {
     }
   }
 
+  /**
+   * Flush buffered events and wait for delivery. Unlike `close()` the client
+   * stays usable afterwards — for teardown paths that may serve again
+   * (`Patter.disconnect()`). Bounded by the flush's own per-POST abort timer.
+   * Mirrors Python's `drain()`.
+   */
+  async drain(): Promise<void> {
+    if (!this.enabledFlag || this.debug || this.closed) return;
+    try {
+      if (this.inflight) await this.inflight;
+      if (this.buffer.length > 0) await this.flush();
+    } catch (err) {
+      getLogger().debug('telemetry drain failed', err);
+    }
+  }
+
   /** Flush remaining events (graceful shutdown). Never throws. */
   async close(): Promise<void> {
     if (this.closed) return;
