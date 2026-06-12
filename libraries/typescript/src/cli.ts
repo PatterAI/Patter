@@ -246,10 +246,12 @@ async function main(): Promise<void> {
     }
   }
   if (command === 'hermes') {
+    await emitCliCommand('hermes');
     printHermesStub();
     process.exit(0);
   }
   if (command === 'openclaw') {
+    await emitCliCommand('openclaw');
     printOpenClawStub();
     process.exit(0);
   }

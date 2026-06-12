@@ -29,6 +29,20 @@
 
 ### Fixed
 
+- **Telemetry: `hermes` / `openclaw` CLI usage is no longer invisible (schema
+  v6).** The `cli_command` enum was closed over
+  `dashboard/eval/telemetry/none/other`, so the wizard commands — the main
+  growth surface — collapsed to `other` (Python) or were never emitted at all
+  (TypeScript's `cli.ts` dispatched `hermes`/`openclaw` without recording the
+  event, diverging from Python which records every command). Both SDKs now
+  carry `hermes` and `openclaw` as first-class enum values (byte-identical
+  sets, `SCHEMA_VERSION` 5 → 6) and the TypeScript CLI emits for both commands.
+  Until the relay allowlist ships the same values, they coerce to `other`
+  server-side — safe, no breakage.
+  `libraries/python/getpatter/telemetry/events.py`,
+  `libraries/typescript/src/telemetry/events.ts`,
+  `libraries/typescript/src/cli.ts`.
+
 - **`provider="openai_realtime"` now honours `OPENAI_API_KEY` from the
   environment — and the env key actually reaches the call path.** Python's
   validation rejected the provider-string path unless the key was on the

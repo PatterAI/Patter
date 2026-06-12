@@ -30,7 +30,7 @@ from getpatter.telemetry.env import is_ci, is_test
 from getpatter.telemetry.install_id import install_id, run_id
 from getpatter.telemetry.stack import STACK_VENDORS
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # --- Event names (the only values the ``event`` field may take) -------------
 EVENT_SDK_INITIALIZED = "sdk_initialized"
@@ -81,7 +81,9 @@ DIMENSION_VALUES: dict[str, frozenset[str]] = {
     # call_started / call_completed: inbound vs outbound — a core usage split.
     "direction": frozenset({"inbound", "outbound", "none"}),
     # cli_command: which CLI subcommand was invoked (never args/flags values).
-    "cli_command": frozenset({"dashboard", "eval", "telemetry", "none", "other"}),
+    "cli_command": frozenset(
+        {"dashboard", "eval", "hermes", "openclaw", "telemetry", "none", "other"}
+    ),
     # call_completed: the call's terminal outcome
     "outcome": frozenset({"completed", "error", "no_answer", "busy", "failed"}),
     # call_completed: the terminal error code (mirrors exceptions.ErrorCode, plus

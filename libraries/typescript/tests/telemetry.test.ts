@@ -240,7 +240,7 @@ describe('[integration] telemetry — enabled path', () => {
     expect(event.sdk).toBe('typescript');
     expect(event.sdk_version).toBe('0.6.3');
     expect(event.runtime).toBe('node');
-    expect(event.schema_version).toBe(5);
+    expect(event.schema_version).toBe(6);
     expect(event.engine).toBe('realtime');
     expect(event.carrier).toBe('twilio');
     expect(typeof event.run_id).toBe('string');
@@ -919,10 +919,10 @@ describe('[integration] telemetry — relay-cap chunking (0.6.8)', () => {
   });
 });
 
-describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v5)', () => {
-  it('is on schema v5', () => {
-    expect(SCHEMA_VERSION).toBe(5);
-    expect(buildEvent('first_run', { sdkVersion: '0.6.5' }).schema_version).toBe(5);
+describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v6)', () => {
+  it('is on schema v6', () => {
+    expect(SCHEMA_VERSION).toBe(6);
+    expect(buildEvent('first_run', { sdkVersion: '0.6.5' }).schema_version).toBe(6);
   });
 
   it('buildEvent accepts the new events and coerces off-list values', () => {
@@ -932,6 +932,16 @@ describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v5)', () 
     });
     expect(cli.event).toBe('cli_command');
     expect(cli.cli_command).toBe('dashboard');
+    // The wizard commands are first-class enum values (schema v6) — they must
+    // pass through uncoerced or their usage is invisible in the data.
+    for (const wizard of ['hermes', 'openclaw']) {
+      expect(
+        buildEvent('cli_command', {
+          sdkVersion: '0.6.8',
+          dimensions: { cli_command: wizard },
+        }).cli_command,
+      ).toBe(wizard);
+    }
     // An unknown command can never reach the wire raw.
     expect(
       buildEvent('cli_command', {
