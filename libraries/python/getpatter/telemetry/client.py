@@ -41,7 +41,11 @@ DEFAULT_ENDPOINT = "https://telemetry.getpatter.com/v1/ingest"
 
 _TIMEOUT_S = 3.0
 _FLUSH_TIMEOUT_S = 2.0
-_ATEXIT_TIMEOUT_S = 0.25  # keep process-exit blocking minimal for short-lived runs
+# Bounded process-exit flush. 0.25 s was routinely too short for a cold TLS
+# POST (the final batch of a short-lived script was lost); 1 s delivers it
+# while keeping exit blocking small. Scripts that call disconnect() don't rely
+# on this — disconnect() drains with the loop still alive.
+_ATEXIT_TIMEOUT_S = 1.0
 _BUFFER_MAX = 256
 # The relay rejects batches larger than 64 events per request — a full buffer
 # must ship as multiple POSTs or events 65..256 silently vanish server-side.
@@ -183,6 +187,26 @@ class TelemetryClient:
             self._schedule_flush()
         except Exception:
             logger.debug("telemetry flush_pending failed", exc_info=True)
+
+    async def drain(self, timeout: float = _FLUSH_TIMEOUT_S) -> None:
+        """Flush buffered events and wait (bounded) for delivery.
+
+        Unlike :meth:`aclose` the client stays usable afterwards — for teardown
+        paths that may serve again (``Patter.disconnect()``). Without the wait,
+        a process exiting right after ``disconnect()`` closes the event loop and
+        cancels the fire-and-forget flush task mid-POST — the final events of a
+        short-lived script (typically ``call_completed``, the one carrying
+        duration/cost/latency) were routinely lost.
+        """
+        if not self._enabled or self._debug or self._closed:
+            return
+        try:
+            if self._flush_task is not None and not self._flush_task.done():
+                await asyncio.wait_for(self._flush_task, timeout=timeout)
+            if self._buffer:
+                await asyncio.wait_for(self._flush(), timeout=timeout)
+        except Exception:
+            logger.debug("telemetry drain failed", exc_info=True)
 
     async def aclose(self) -> None:
         """Flush remaining events and release the HTTP client (graceful shutdown)."""

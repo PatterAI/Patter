@@ -296,6 +296,23 @@ describe('[integration] telemetry — enabled path', () => {
     expect(collector.events.map((e) => e.event)).toEqual(['cli_command']);
   });
 
+  it('drain() delivers the final events and keeps the client usable (disconnect path)', async () => {
+    enableTelemetryEnv();
+    const client = new TelemetryClient({ sdkVersion: '0.6.7', endpoint: collector.url });
+    client.record('call_completed', { outcome: 'completed', carrier: 'twilio' });
+    // Patter.disconnect() awaits drain(): the final events of a short-lived
+    // script (call_completed with duration/cost/latency) must be DELIVERED
+    // before teardown, not left to a fire-and-forget flush racing process exit.
+    await client.drain();
+    expect(collector.events.map((e) => e.event)).toEqual(['call_completed']);
+
+    // Unlike close(), the client stays usable for a subsequent serve().
+    client.record('cli_command', { cli_command: 'dashboard' });
+    await client.drain();
+    expect(collector.events.map((e) => e.event)).toEqual(['call_completed', 'cli_command']);
+    await client.close();
+  });
+
   it('an event recorded during an in-flight flush is chained, not stranded', async () => {
     // Regression: record() saw `inflight` and skipped scheduling, so an event
     // recorded while a flush POST was in flight sat in the buffer with no
