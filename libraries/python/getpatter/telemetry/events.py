@@ -30,7 +30,7 @@ from getpatter.telemetry.env import is_ci, is_test
 from getpatter.telemetry.install_id import install_id, run_id
 from getpatter.telemetry.stack import STACK_VENDORS
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # --- Event names (the only values the ``event`` field may take) -------------
 EVENT_SDK_INITIALIZED = "sdk_initialized"
@@ -153,11 +153,17 @@ _MODEL_TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,40}$")
 _BOOL_DIMENSIONS = frozenset(
     {"container", "preambles_used", "per_tool_timeouts_set", "llm_fallback_configured"}
 )
+# ID dimensions: a random SDK-generated per-call correlation id — never the
+# carrier call SID. The hex32 shape is enforced as defense in depth (the SDK
+# already generates a clean ``uuid.uuid4().hex``); the relay re-checks it.
+_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_ID_DIMENSIONS = frozenset({"call_uid"})
 ALLOWED_DIMENSIONS = (
     frozenset(DIMENSION_VALUES)
     | _NUMERIC_DIMENSIONS
     | _STRING_DIMENSIONS
     | _BOOL_DIMENSIONS
+    | _ID_DIMENSIONS
 )
 
 
@@ -219,6 +225,12 @@ def build_event(
             # Sanitized model / version token: enforce the safe shape; drop
             # anything else (the SDK already guarantees this, but never trust input).
             if not (isinstance(value, str) and _MODEL_TOKEN_RE.match(value)):
+                continue
+        elif key in _ID_DIMENSIONS:
+            # Random SDK-generated per-call correlation id — never the carrier
+            # call SID. Kept only if it is a str matching the hex32 shape; an
+            # off-shape value is DROPPED (never coerced). Relay re-checks.
+            if not (isinstance(value, str) and _ID_RE.match(value)):
                 continue
         elif key in _BOOL_DIMENSIONS and not isinstance(value, bool):
             continue
