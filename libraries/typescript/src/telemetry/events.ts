@@ -23,7 +23,7 @@ import { isCi, isTest } from './env';
 import { installId, runId } from './install-id';
 import { STACK_VENDORS } from './stack';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const EVENT_SDK_INITIALIZED = 'sdk_initialized';
 export const EVENT_FIRST_RUN = 'first_run';
@@ -71,7 +71,7 @@ export const DIMENSION_VALUES: Record<string, ReadonlySet<string>> = {
   // call_started / call_completed: inbound vs outbound — a core usage split.
   direction: new Set(['inbound', 'outbound', 'none']),
   // cli_command: which CLI subcommand was invoked (never args/flags values).
-  cli_command: new Set(['dashboard', 'eval', 'telemetry', 'none', 'other']),
+  cli_command: new Set(['dashboard', 'eval', 'hermes', 'openclaw', 'telemetry', 'none', 'other']),
   // call_completed: the call's terminal outcome
   outcome: new Set(['completed', 'error', 'no_answer', 'busy', 'failed']),
   // call_completed: terminal error code (mirrors ErrorCode, plus "other"). Never

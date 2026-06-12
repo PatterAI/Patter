@@ -121,7 +121,7 @@ async def test_event_reaches_collector_when_enabled(enabled, collector):
     assert event["sdk"] == "python"
     assert event["sdk_version"] == "0.6.3"
     assert event["runtime"] == "cpython"
-    assert event["schema_version"] == 5
+    assert event["schema_version"] == 6
     assert event["engine"] == "realtime"
     assert event["provider"] == "openai"
     assert event["carrier"] == "twilio"
@@ -940,14 +940,14 @@ def test_build_event_v4_bool_enum_and_version_dims():
     assert ev2["previous_sdk_version"] == "0.6.3"
 
 
-# --- CLI usage + first-run + call funnel + persisted opt-out (schema v5) ------
+# --- CLI usage + first-run + call funnel + persisted opt-out (schema v6) ------
 
 
-def test_schema_version_is_5():
+def test_schema_version_is_6():
     from getpatter.telemetry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 5
-    assert build_event("first_run", sdk_version="0.6.5")["schema_version"] == 5
+    assert SCHEMA_VERSION == 6
+    assert build_event("first_run", sdk_version="0.6.5")["schema_version"] == 6
 
 
 def test_build_event_v5_new_events_and_dims():
@@ -955,6 +955,15 @@ def test_build_event_v5_new_events_and_dims():
         "cli_command", sdk_version="0.6.5", dimensions={"cli_command": "dashboard"}
     )
     assert cli["event"] == "cli_command" and cli["cli_command"] == "dashboard"
+    # The wizard commands are first-class enum values (schema v6) — they must
+    # pass through uncoerced or their usage is invisible in the data.
+    for wizard in ("hermes", "openclaw"):
+        assert (
+            build_event(
+                "cli_command", sdk_version="0.6.8", dimensions={"cli_command": wizard}
+            )["cli_command"]
+            == wizard
+        )
     # An unknown command coerces to "other"; it can never reach the wire raw.
     assert (
         build_event(
