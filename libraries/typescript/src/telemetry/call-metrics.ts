@@ -76,6 +76,8 @@ export interface RecordCallStartedOptions {
   readonly providerMode?: string;
   readonly telephonyProvider?: string;
   readonly direction?: unknown;
+  /** Random per-call correlation id (never the carrier SID), wire key `call_uid`. */
+  readonly callUid?: string;
 }
 
 /**
@@ -98,6 +100,7 @@ export function recordCallStarted(
     };
     const d = direction(opts.direction);
     if (d !== undefined) dims.direction = d;
+    if (opts.callUid) dims.call_uid = opts.callUid;
     telemetry.record('call_started', dims);
   } catch {
     /* swallow — telemetry is never load-bearing */
@@ -109,6 +112,8 @@ export interface RecordCallCompletedOptions {
   readonly metrics?: unknown;
   readonly carrier?: string;
   readonly direction?: unknown;
+  /** Random per-call correlation id (never the carrier SID), wire key `call_uid`. */
+  readonly callUid?: string;
 }
 
 /**
@@ -126,6 +131,7 @@ export function recordCallCompleted(
     const dims: Record<string, string | number> = { outcome: opts.outcome };
     const d = direction(opts.direction);
     if (d !== undefined) dims.direction = d;
+    if (opts.callUid) dims.call_uid = opts.callUid;
     const metrics = opts.metrics;
     if (metrics && typeof metrics === 'object') {
       const m = metrics as Metricsish;

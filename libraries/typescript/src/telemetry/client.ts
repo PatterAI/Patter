@@ -53,8 +53,9 @@ function showNoticeOnce(): void {
     'Anonymous usage telemetry is on (no PII, no call content). Collected: ' +
       'a random anonymous install id, SDK version, language, OS family, runtime ' +
       'version, coarse feature flags, the composed stack (provider + model per ' +
-      'layer), tool counts, integration category, and per-call duration, latency, ' +
-      'cost, and error codes (no call content, no message text). ' +
+      'layer), tool counts, integration category, a random per-call correlation ' +
+      'id, and per-call duration, latency, cost, and error codes (no call ' +
+      'content, no message text). ' +
       'Disable with PATTER_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1, or telemetry: false. ' +
       'Details: https://docs.getpatter.com/telemetry',
   );

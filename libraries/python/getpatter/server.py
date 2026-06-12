@@ -473,6 +473,11 @@ class EmbeddedServer:
         # lets ``call(wait=True)`` return a structured ``CallResult`` without
         # the caller hand-wiring ``on_call_end`` to an ``asyncio.Event``.
         self._completions: dict[str, asyncio.Future] = {}
+        # Random per-call telemetry correlation ids, keyed by carrier call_id, so
+        # ``call_started`` and ``call_completed`` of the same call pair in the
+        # analytics dataset. NEVER the carrier SID. Insertion-ordered + FIFO-capped
+        # so calls that never reach a terminal event can't leak it unbounded.
+        self._telemetry_call_uids: dict[str, str] = {}
         # Fire-and-forget background tasks (voicemail drops, …). Held so the
         # event loop doesn't GC them mid-flight; pruned on completion.
         self._bg_tasks: set[asyncio.Task] = set()
@@ -641,6 +646,28 @@ class EmbeddedServer:
             except Exception as exc:  # noqa: BLE001 - bookkeeping only
                 logger.debug("alias_prewarm raised: %s", exc)
 
+    def _telemetry_call_uid(self, call_id: str | None, *, pop: bool = False) -> str | None:
+        """Random per-call telemetry correlation id (never the carrier SID).
+
+        Same call_id → same uid, so call_started/call_completed pair in the
+        dataset. ``pop=True`` on terminal events keeps the map from leaking;
+        a small FIFO cap bounds calls that never reach a terminal event.
+        """
+        if not call_id:
+            return None
+        try:
+            if pop:
+                return self._telemetry_call_uids.pop(call_id, None) or uuid.uuid4().hex
+            uid = self._telemetry_call_uids.get(call_id)
+            if uid is None:
+                if len(self._telemetry_call_uids) >= 512:
+                    self._telemetry_call_uids.pop(next(iter(self._telemetry_call_uids)))
+                uid = uuid.uuid4().hex
+                self._telemetry_call_uids[call_id] = uid
+            return uid
+        except Exception:
+            return None
+
     def _resolve_completion(
         self,
         call_id: str,
@@ -670,6 +697,7 @@ class EmbeddedServer:
                     getattr(self, "_telemetry", None),
                     outcome=outcome,
                     carrier=getattr(self.config, "telephony_provider", ""),
+                    call_uid=self._telemetry_call_uid(call_id, pop=True),
                 )
             except Exception:
                 pass
@@ -799,6 +827,7 @@ class EmbeddedServer:
                     provider_mode=getattr(agent, "provider", None),
                     telephony_provider=getattr(self.config, "telephony_provider", None),
                     direction=data.get("direction"),
+                    call_uid=self._telemetry_call_uid(data.get("call_id")),
                 )
             except Exception:
                 pass
@@ -861,6 +890,7 @@ class EmbeddedServer:
                     outcome="completed",
                     metrics=data.get("metrics"),
                     direction=data.get("direction"),
+                    call_uid=self._telemetry_call_uid(data.get("call_id"), pop=True),
                 )
             except Exception:
                 pass
