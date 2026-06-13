@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.6.8 (2026-06-13)
+
 ### Added
 
 - **TypeScript: `EvalSession` — the eval harness now has full parity with
@@ -26,8 +28,6 @@
   Same defaults (`"cancel"` / `1500`); invalid modes are rejected with a
   `ValueError`. Opt-in — existing calls are unaffected.
   `libraries/python/getpatter/client.py`.
-
-### Added
 
 - **Telemetry: `call_uid` — a random per-call correlation id (schema v7).**
   `call_started` and `call_completed` of the same call now carry the same
