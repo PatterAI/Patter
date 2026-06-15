@@ -17,10 +17,19 @@
  * new dependency. Mirrors `getpatter/telemetry/client.py`.
  */
 
+import { createHash } from 'node:crypto';
+
 import { getLogger } from '../logger';
 import { isEnabled } from './consent';
-import { buildEvent, type Dimensions, type TelemetryEvent } from './events';
-import { isTruthy } from './env';
+import {
+  EVENT_CALL_COMPLETED,
+  EVENT_CALL_STARTED,
+  buildEvent,
+  type Dimensions,
+  type TelemetryEvent,
+} from './events';
+import { isTruthy, sampleRate } from './env';
+import { runId } from './install-id';
 
 export const DEFAULT_ENDPOINT = 'https://telemetry.getpatter.com/v1/ingest';
 
@@ -29,6 +38,32 @@ const BUFFER_MAX = 256;
 // The relay rejects batches larger than 64 events per request — a full buffer
 // must ship as multiple POSTs or events 65..256 silently vanish server-side.
 const MAX_EVENTS_PER_POST = 64;
+
+// The ONLY events the client-side sampling gate may drop. Everything else
+// (first_run, config_incomplete, sdk_initialized, cli_command, feature_used,
+// agent_configured) is always delivered — those are low-frequency activation /
+// usage signals, never high-volume call traffic. An *error* call_completed is
+// also force-kept (see record()) so error rates stay unbiased.
+const SAMPLEABLE_EVENTS = new Set<string>([EVENT_CALL_STARTED, EVENT_CALL_COMPLETED]);
+
+/**
+ * A stable per-run value in `[0, 1)` derived from this process's run id.
+ *
+ * Hashing the run id (constant for the process) makes the keep/drop decision
+ * DETERMINISTIC PER RUN: the whole run consistently keeps or drops its
+ * sampleable call events rather than flipping a per-event coin — which would
+ * bias short runs. `Math.random` would NOT be deterministic per run. Any
+ * failure degrades to `0` so the caller keeps the event (fail safe). Mirrors
+ * Python's `_run_keep_ratio`.
+ */
+function runKeepRatio(): number {
+  try {
+    const digest = createHash('sha256').update(runId(), 'utf8').digest('hex').slice(0, 8);
+    return parseInt(digest, 16) / 0xffffffff;
+  } catch {
+    return 0;
+  }
+}
 
 let noticeShown = false;
 // WeakRefs so a client whose owning `Patter` was discarded is garbage-collected
@@ -89,6 +124,14 @@ export class TelemetryClient {
   private inflight: Promise<void> | null = null;
   private closed = false;
   private readonly selfRef: WeakRef<TelemetryClient> = new WeakRef(this);
+  // Client-side sampling gate (computed ONCE at construction):
+  //   * sampleRate — the effective rate in [0, 1] from the env.
+  //   * keepSampled — the deterministic per-run keep/drop decision for the
+  //     high-frequency call events. Because the seed is the run id (constant for
+  //     the process) the whole run consistently keeps or drops them — never a
+  //     per-event coin flip. rate >= 1.0 always keeps. See record().
+  private readonly sampleRate: number;
+  private readonly keepSampled: boolean;
 
   constructor(options: TelemetryClientOptions) {
     this.sdkVersion = options.sdkVersion;
@@ -96,6 +139,8 @@ export class TelemetryClient {
     this.endpoint =
       options.endpoint ?? process.env.PATTER_TELEMETRY_ENDPOINT ?? DEFAULT_ENDPOINT;
     this.debug = isTruthy(process.env.PATTER_TELEMETRY_DEBUG);
+    this.sampleRate = sampleRate();
+    this.keepSampled = this.sampleRate >= 1.0 || runKeepRatio() < this.sampleRate;
 
     if (this.enabledFlag && !this.debug) {
       showNoticeOnce();
@@ -108,13 +153,40 @@ export class TelemetryClient {
     return this.enabledFlag;
   }
 
-  /** Enqueue an event. Fire-and-forget; never throws, never blocks. */
+  /**
+   * Enqueue an event. Fire-and-forget; never throws, never blocks.
+   *
+   * Applies the client-side sampling gate (see constructor): only the
+   * high-frequency `call_started` / `call_completed` events may be dropped, and
+   * only when this run's deterministic decision says so. An error
+   * `call_completed` (`outcome === 'error'` or an `error_code` present) is
+   * ALWAYS kept so error rates stay unbiased. A kept sampled event carries
+   * `sample_rate` so analytics can extrapolate (weight `1/sample_rate`). All
+   * other events bypass the gate entirely.
+   */
   record(name: string, dimensions?: Dimensions): void {
     if (!this.enabledFlag || this.closed) return;
 
+    // -- sampling gate (high-frequency call events only) --------------------
+    let dims = dimensions;
+    if (SAMPLEABLE_EVENTS.has(name) && this.sampleRate < 1.0) {
+      // Force-keep error call_completed events regardless of rate — error rates
+      // would be biased if errors were sampled like clean calls.
+      const isError =
+        name === EVENT_CALL_COMPLETED &&
+        ((dims?.outcome === 'error') || (dims != null && 'error_code' in dims));
+      if (!this.keepSampled && !isError) return; // sampled out for this run
+      // Kept (by the run decision or because it's an error): stamp the rate so
+      // analytics can extrapolate (weight = 1/rate). buildEvent keeps it (the
+      // Schema phase added sample_rate to the numeric allowlist). Stamped only
+      // when rate < 1.0 to keep payloads lean. New object — never mutate the
+      // caller's dimensions.
+      dims = { ...dims, sample_rate: this.sampleRate };
+    }
+
     let event: TelemetryEvent;
     try {
-      event = buildEvent(name, { sdkVersion: this.sdkVersion, dimensions });
+      event = buildEvent(name, { sdkVersion: this.sdkVersion, dimensions: dims });
     } catch (err) {
       getLogger().debug('telemetry buildEvent failed', err);
       return;

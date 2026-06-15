@@ -289,6 +289,8 @@ export class Patter {
   private readonly telemetry: TelemetryClient;
   private readonly telemetrySeenEngines = new Set<string>();
   private readonly telemetrySeenAgentShapes = new Set<string>();
+  /** Activation-blocker signal is emitted at most once per instance. */
+  private telemetryConfigIncompleteEmitted = false;
 
   /**
    * Pre-rendered first-message TTS audio per outbound call_id. Populated
@@ -486,10 +488,22 @@ export class Patter {
       );
     }
 
+    // --- Anonymous usage telemetry (opt-out, default ON) ---
+    // Constructed BEFORE the activation-blocker validation below so the
+    // `config_incomplete` signal can be emitted on the failing path. Separate
+    // from ./observability (user-facing OTel). Fail-safe fire-and-forget.
+    // Disable with PATTER_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1, or telemetry: false.
+    this.telemetry = new TelemetryClient({
+      sdkVersion: VERSION,
+      flag: options.telemetry,
+    });
+
     if (!options.phoneNumber) {
+      this.recordConfigIncomplete('carrier_credentials');
       throw new Error('Local mode requires phoneNumber');
     }
     if (!options.carrier) {
+      this.recordConfigIncomplete('carrier_credentials');
       throw new Error(
         'Local mode requires a `carrier` instance. ' +
           'Pass `carrier: new Twilio({...})`, `carrier: new Telnyx({...})` or ' +
@@ -528,13 +542,9 @@ export class Patter {
       persistRoot: resolvePersistRoot(options.persist),
     };
 
-    // --- Anonymous usage telemetry (opt-out, default ON) ---
-    // Separate from ./observability (user-facing OTel). Fail-safe fire-and-forget.
-    // Disable with PATTER_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1, or telemetry: false.
-    this.telemetry = new TelemetryClient({
-      sdkVersion: VERSION,
-      flag: options.telemetry,
-    });
+    // The telemetry client was constructed above (before the activation-blocker
+    // validation) so `config_incomplete` could be emitted on the failing path.
+    // Here we emit the normal startup events.
     const initDims = {
       carrier: carrierFamily(carrier),
       tunnel:
@@ -586,6 +596,29 @@ export class Patter {
   }
 
   // === Agent definition ===
+
+  /**
+   * Emit the activation-blocker `config_incomplete` signal, at most once.
+   *
+   * Fire-and-forget: records the coarse `missing` category right before a
+   * validation `throw` and then lets that error propagate unchanged. It NEVER
+   * throws and NEVER alters control flow. Deduped per instance so a retry loop or
+   * a second `agent()` call on the same Patter cannot double-emit. Only the
+   * allowlisted enum leaves the process — never the key value, env var name,
+   * carrier credentials, or any PII. `config_incomplete` is in the never-sampled
+   * set, so the telemetry client always delivers it.
+   */
+  private recordConfigIncomplete(
+    missing: 'carrier_credentials' | 'llm_key' | 'engine_config' | 'other',
+  ): void {
+    try {
+      if (this.telemetryConfigIncompleteEmitted) return;
+      this.telemetryConfigIncompleteEmitted = true;
+      this.telemetry.record('config_incomplete', { missing });
+    } catch {
+      // Telemetry must never break construction or agent setup.
+    }
+  }
 
   /** Resolve user-supplied agent options against engine defaults and return the merged config. */
   agent(opts: AgentOptions): AgentOptions {
@@ -708,6 +741,7 @@ export class Patter {
           voice: working.voice ?? engine.voice,
         };
       } else {
+        this.recordConfigIncomplete('engine_config');
         throw new Error(
           "Unknown engine. Expected OpenAIRealtime, OpenAIRealtime2, or ElevenLabsConvAI instance.",
         );
@@ -727,6 +761,7 @@ export class Patter {
     if (working.provider) {
       const valid = ['openai_realtime', 'elevenlabs_convai', 'pipeline'];
       if (!valid.includes(working.provider)) {
+        this.recordConfigIncomplete('engine_config');
         throw new Error(`provider must be one of: ${valid.join(', ')}. Got: '${working.provider}'`);
       }
     }
@@ -746,6 +781,7 @@ export class Patter {
         // call instead of a clear error (parity with Python).
         this.localConfig = { ...this.localConfig, openaiKey: envKey };
       } else {
+        this.recordConfigIncomplete('llm_key');
         throw new Error(
           "OpenAI Realtime mode requires an OpenAI API key. Pass " +
             "engine: new OpenAIRealtime({ apiKey: 'sk-...' }) or set " +

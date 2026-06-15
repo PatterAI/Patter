@@ -405,9 +405,22 @@ class Patter:
             plivo_auth_id = carrier_creds["auth_id"]
             plivo_auth_token = carrier_creds["auth_token"]
 
+        # --- Anonymous usage telemetry (opt-out, default ON) ---
+        # Constructed BEFORE the activation-blocker validation below so the
+        # ``config_incomplete`` signal can be emitted on the failing path. Separate
+        # from getpatter.observability (user-facing OTel). Fire-and-forget and
+        # fail-safe: it can never block or break a call. Disable with
+        # PATTER_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1, or telemetry=False.
+        self._telemetry = _build_telemetry_client(telemetry)
+        self._telemetry_seen_engines: set[str] = set()
+        self._telemetry_seen_agent_shapes: set[tuple] = set()
+        # Activation-blocker signal is emitted at most once per instance.
+        self._telemetry_config_incomplete_emitted = False
+
         # --- Local mode validation (only when a carrier is provided) ---
         if carrier_kind is not None:
             if not phone_number:
+                self._record_config_incomplete("carrier_credentials")
                 raise ValueError(
                     "Local mode requires phone_number (e.g., phone_number='+15550001234')."
                 )
@@ -426,13 +439,9 @@ class Patter:
             persist_root=_resolve_persist_root(persist),
         )
 
-        # --- Anonymous usage telemetry (opt-out, default ON) ---
-        # Separate from getpatter.observability (user-facing OTel). Fire-and-forget
-        # and fail-safe: it can never block or break a call. Disable with
-        # PATTER_TELEMETRY_DISABLED=1, DO_NOT_TRACK=1, or telemetry=False.
-        self._telemetry = _build_telemetry_client(telemetry)
-        self._telemetry_seen_engines: set[str] = set()
-        self._telemetry_seen_agent_shapes: set[tuple] = set()
+        # The telemetry client + dedup state were constructed above (before the
+        # activation-blocker validation) so ``config_incomplete`` could be emitted
+        # on the failing path. Here we emit the normal startup events.
         # Environment dims only when telemetry is ENABLED: the helper's
         # ``previous_version`` probe writes ``~/.getpatter/version`` (and
         # ``days_since_install_bucket`` mkdirs the state root), violating the
@@ -1211,7 +1220,11 @@ class Patter:
             "_prewarmed_conn_tasks",
         ):
             mapping = getattr(self, attr, None)
-            if isinstance(mapping, dict) and old_id in mapping and new_id not in mapping:
+            if (
+                isinstance(mapping, dict)
+                and old_id in mapping
+                and new_id not in mapping
+            ):
                 mapping[new_id] = mapping.pop(old_id)
 
     def pop_prewarmed_connections(self, call_id: str) -> dict[str, Any] | None:
@@ -1667,6 +1680,26 @@ class Patter:
             f"or None; got {type(tts).__name__}"
         )
 
+    def _record_config_incomplete(self, missing: str) -> None:
+        """Emit the activation-blocker ``config_incomplete`` signal, at most once.
+
+        Fire-and-forget: this records the coarse ``missing`` category right before
+        a validation ``raise`` and then lets that error propagate unchanged. It
+        NEVER throws and NEVER alters control flow. Deduped per instance so a retry
+        loop or a second ``agent()`` call on the same Patter cannot double-emit.
+        Only the allowlisted enum leaves the process — never the key value, env var
+        name, carrier credentials, or any PII. ``config_incomplete`` is in the
+        never-sampled set, so the telemetry client always delivers it.
+        """
+        try:
+            if self._telemetry_config_incomplete_emitted:
+                return
+            self._telemetry_config_incomplete_emitted = True
+            self._telemetry.record("config_incomplete", missing=missing)
+        except Exception:
+            # Telemetry must never break construction or agent setup.
+            pass
+
     def agent(
         self,
         system_prompt: str,
@@ -1977,6 +2010,7 @@ class Patter:
                     self._local_config, openai_key=_env_openai_key
                 )
             else:
+                self._record_config_incomplete("llm_key")
                 raise ValueError(
                     "OpenAI Realtime mode requires an OpenAI API key. Pass "
                     "engine=OpenAIRealtime(api_key='sk-...') or set OPENAI_API_KEY "
@@ -1985,6 +2019,7 @@ class Patter:
 
         if provider == "pipeline":
             if stt_resolved is None:
+                self._record_config_incomplete("engine_config")
                 raise ValueError(
                     "Pipeline mode requires an STT provider instance. "
                     "Pass stt=DeepgramSTT(api_key='...') (or another supported "

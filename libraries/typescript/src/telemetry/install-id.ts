@@ -165,6 +165,23 @@ export function daysSinceInstallBucket(): string {
   return '30_plus';
 }
 
+/**
+ * Seconds since this install was created, from the install-id file mtime.
+ * Reuses the same mtime seam as `daysSinceInstallBucket`. Returns `undefined`
+ * on an unreadable / read-only filesystem (the caller buckets that to
+ * `'unknown'`). Best-effort and never throws. Mirrors `install_age_seconds`
+ * in `install_id.py`.
+ */
+export function installAgeSeconds(): number | undefined {
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(statePath()).mtimeMs;
+  } catch {
+    return undefined;
+  }
+  return Math.max(0, (Date.now() - mtimeMs) / 1000);
+}
+
 function firstRunPath(): string {
   return path.join(path.dirname(statePath()), 'first-run');
 }

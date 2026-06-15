@@ -23,7 +23,7 @@ import { isCi, isTest } from './env';
 import { installId, runId } from './install-id';
 import { STACK_VENDORS } from './stack';
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export const EVENT_SDK_INITIALIZED = 'sdk_initialized';
 export const EVENT_FIRST_RUN = 'first_run';
@@ -32,6 +32,9 @@ export const EVENT_FEATURE_USED = 'feature_used';
 export const EVENT_AGENT_CONFIGURED = 'agent_configured';
 export const EVENT_CALL_STARTED = 'call_started';
 export const EVENT_CALL_COMPLETED = 'call_completed';
+// Activation-blocker signal: emitted once when required runtime config is missing
+// so the instance cannot proceed. In the NEVER-sampled set (always delivered).
+export const EVENT_CONFIG_INCOMPLETE = 'config_incomplete';
 
 const ALLOWED_EVENTS = new Set<string>([
   EVENT_SDK_INITIALIZED,
@@ -41,6 +44,7 @@ const ALLOWED_EVENTS = new Set<string>([
   EVENT_AGENT_CONFIGURED,
   EVENT_CALL_STARTED,
   EVENT_CALL_COMPLETED,
+  EVENT_CONFIG_INCOMPLETE,
 ]);
 
 /**
@@ -106,15 +110,46 @@ export const DIMENSION_VALUES: Record<string, ReadonlySet<string>> = {
   turn_detection: new Set(['default', 'custom', 'none']),
   // call_completed: how many conversational turns the call had.
   turn_count_bucket: new Set(['0', '1', '2_3', '4_6', '7_12', '13_plus']),
+  // config_incomplete: coarse category of the absent required runtime config
+  // blocking activation. Never the key value, env var name, or any PII.
+  missing: new Set(['carrier_credentials', 'llm_key', 'engine_config', 'other']),
+  // call_completed: which layer the terminal error originated in (derived from
+  // CallMetrics.errorCode/outcome). "none" when the call ended cleanly.
+  error_layer: new Set(['stt', 'llm', 'tts', 'carrier', 'config', 'internal', 'none', 'other']),
+  // call_completed: coarse reason the call ended (derived from terminal
+  // outcome/error/AMD state). hangup_local/hangup_remote only when the side is
+  // reliably known; else fall back to completed (clean end) or other.
+  disconnect_reason: new Set([
+    'hangup_local',
+    'hangup_remote',
+    'error',
+    'timeout',
+    'no_answer',
+    'busy',
+    'completed',
+    'other',
+  ]),
+  // call_started / call_completed: coarse age of the install at call time
+  // (install-id file mtime vs now). "unknown" when the timestamp can't be read.
+  time_to_first_call_bucket: new Set(['lt_1h', '1h_1d', '1d_7d', 'gt_7d', 'unknown']),
 };
 
 // Numeric dimensions pass through without value coercion. latency_ms (whole ms)
-// and duration_seconds (whole seconds) are raw operational metrics.
+// and duration_seconds (whole seconds) are raw operational metrics. The per-stage
+// call_completed latencies (stt_latency_ms, llm_ttft_ms, tts_first_byte_ms,
+// eou_latency_ms) are read off the existing CallMetrics latency breakdown — whole
+// ints, omitted when the stage didn't run. sample_rate is the client-side
+// sampling rate in (0,1] for high-frequency call events (weight = 1/sample_rate).
 const NUMERIC_DIMENSIONS = new Set<string>([
   'builtin_tool_count',
   'latency_ms',
   'duration_seconds',
   'cost_usd',
+  'stt_latency_ms',
+  'llm_ttft_ms',
+  'tts_first_byte_ms',
+  'eou_latency_ms',
+  'sample_rate',
 ]);
 // feature_used (pipeline): sanitized per-layer model token (e.g.
 // "deepgram-nova-3", "anthropic-claude-haiku-4-5"). NOT a closed enum — produced

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from getpatter.telemetry.install_id import install_age_seconds
+
 
 def _engine_from_mode(mode: str | None) -> str:
     if mode in ("openai_realtime", "openai_realtime_2"):
@@ -84,6 +86,115 @@ def _latency_ms(metrics: Any) -> float | None:
     return getattr(p95, "agent_response_ms", None) if p95 is not None else None
 
 
+def _whole_ms(value: Any) -> int | None:
+    """Coerce a millisecond latency to a whole non-negative int, or ``None``.
+
+    ``None`` when the source is absent OR ``0`` (a stage that did not run — e.g.
+    realtime/convai have no separate STT/TTS span, so those breakdown fields
+    stay ``0.0`` and are omitted rather than reported as a false zero).
+    """
+    if value is None:
+        return None
+    try:
+        ms = max(0, int(round(float(value))))
+    except (TypeError, ValueError):
+        return None
+    return ms if ms > 0 else None
+
+
+def _per_stage_latencies(metrics: Any) -> dict[str, int]:
+    """Read the per-stage latency breakdown off the existing p95 accumulator.
+
+    Read-only — no new audio-path instrumentation. Maps the
+    ``LatencyBreakdown`` fields onto the wire dims, omitting any stage whose
+    source is ``None`` or ``0`` (stage did not run). Same source object as
+    ``latency_ms`` (``metrics.latency_p95``).
+    """
+    p95 = getattr(metrics, "latency_p95", None)
+    if p95 is None:
+        return {}
+    mapping = {
+        "stt_latency_ms": getattr(p95, "stt_ms", None),
+        "llm_ttft_ms": getattr(p95, "llm_ttft_ms", None),
+        "tts_first_byte_ms": getattr(p95, "tts_ms", None),
+        "eou_latency_ms": getattr(p95, "endpoint_ms", None),
+    }
+    out: dict[str, int] = {}
+    for key, raw in mapping.items():
+        whole = _whole_ms(raw)
+        if whole is not None:
+            out[key] = whole
+    return out
+
+
+# Coarse, deterministic error_code -> error_layer mapping. NEVER the message;
+# the layer is inferred only from the structured code. ``provider_error`` is not
+# attributable to a specific stage from the code alone, so it maps to ``other``.
+# Keep byte-for-byte identical to ``ERROR_LAYER_BY_CODE`` in ``call-metrics.ts``.
+_ERROR_LAYER_BY_CODE: dict[str, str] = {
+    "auth": "llm",
+    "rate_limit": "llm",
+    "timeout": "llm",
+    "provider_error": "other",
+    "connection": "other",
+    "webhook_verification": "carrier",
+    "provision": "carrier",
+    "config": "config",
+    "input_validation": "config",
+    "internal": "internal",
+}
+
+
+def _error_layer(error_code: str) -> str:
+    """Map a terminal ``error_code`` to its coarse originating layer.
+
+    ``"none"`` on a clean completion (no code); the value allowlist coerces
+    anything off the enum to ``"other"``.
+    """
+    if not error_code:
+        return "none"
+    return _ERROR_LAYER_BY_CODE.get(error_code, "other")
+
+
+def _disconnect_reason(outcome: str, error_code: str) -> str:
+    """Map the terminal outcome (+ error_code) to a coarse disconnect reason.
+
+    Derived only from already-known state. ``hangup_local`` / ``hangup_remote``
+    are NOT set here because the hanging-up side is not reliably known on this
+    path; clean ends collapse to ``completed`` and the value allowlist coerces
+    anything off-list to ``other``. Keep identical to ``disconnectReason`` in
+    ``call-metrics.ts``.
+    """
+    if outcome == "no_answer":
+        return "no_answer"
+    if outcome == "busy":
+        return "busy"
+    if outcome == "error":
+        return "timeout" if error_code == "timeout" else "error"
+    if outcome == "failed":
+        return "timeout" if error_code == "timeout" else "error"
+    if outcome == "completed":
+        return "completed"
+    return "other"
+
+
+def _time_to_first_call_bucket(age_seconds: float | None) -> str:
+    """Bucket the install age (seconds) into a coarse time-to-first-call band.
+
+    ``unknown`` when the age can't be read. Keep boundaries byte-for-byte
+    identical to ``timeToFirstCallBucket`` in ``call-metrics.ts``.
+    """
+    if age_seconds is None:
+        return "unknown"
+    if age_seconds < 3600:
+        return "lt_1h"
+    if age_seconds < 86400:
+        return "1h_1d"
+    if age_seconds < 604800:
+        return "1d_7d"
+    return "gt_7d"
+
+
 def record_call_started(
     telemetry: Any,
     *,
@@ -114,6 +225,10 @@ def record_call_started(
             dims["direction"] = d
         if call_uid is not None:
             dims["call_uid"] = call_uid
+        # F4: how long after install this call fires (coarse bucket).
+        dims["time_to_first_call_bucket"] = _time_to_first_call_bucket(
+            install_age_seconds()
+        )
         telemetry.record("call_started", **dims)
     except Exception:
         pass
@@ -166,6 +281,9 @@ def record_call_completed(
             turns = getattr(metrics, "turns", None)
             if turns is not None:
                 dims["turn_count_bucket"] = _turn_count_bucket(len(turns))
+            # F2: per-stage latency, read-only off the same p95 breakdown as
+            # latency_ms. Each dim is omitted when its stage didn't run.
+            dims.update(_per_stage_latencies(metrics))
             # A connected call that ended with a terminal error: surface the code
             # and flip the outcome to "error" (the value allowlist coerces an
             # unknown code to "other").
@@ -173,8 +291,24 @@ def record_call_completed(
             if error_code:
                 dims["error_code"] = error_code
                 dims["outcome"] = "error"
+            # F3: coarse error layer + disconnect reason, derived deterministically
+            # from the (now-final) outcome and error_code. error_layer is "none"
+            # on a clean completion.
+            dims["error_layer"] = _error_layer(error_code)
+            dims["disconnect_reason"] = _disconnect_reason(dims["outcome"], error_code)
         elif carrier is not None:
             dims["carrier"] = _carrier_family(carrier)
+            # F3: non-connected failures (no_answer/busy/failed) carry no metrics,
+            # so there is no error_code — map the disconnect reason from the
+            # outcome alone; error_layer stays "carrier" only when the carrier
+            # itself failed (outcome "failed"), else "none".
+            dims["error_layer"] = "carrier" if outcome == "failed" else "none"
+            dims["disconnect_reason"] = _disconnect_reason(outcome, "")
+        # F4: how long after install this call fires (coarse bucket) — on both
+        # call_started and call_completed for the activation-funnel join.
+        dims["time_to_first_call_bucket"] = _time_to_first_call_bucket(
+            install_age_seconds()
+        )
         telemetry.record(
             "call_completed", **{k: v for k, v in dims.items() if v is not None}
         )

@@ -45,6 +45,33 @@ def is_truthy(value: str | None) -> bool:
     }
 
 
+def sample_rate() -> float:
+    """Client-side sampling rate for high-frequency call events, in ``[0, 1]``.
+
+    Read from ``PATTER_TELEMETRY_SAMPLE`` and clamped to ``[0, 1]``. Defaults to
+    ``1.0`` (no sampling — every event kept) when the var is unset, empty,
+    non-numeric, ``< 0``, or ``> 1``. Fail-safe: this never raises — a bad value
+    degrades to ``1.0`` so a misconfigured env can never silently drop data.
+
+    Only the high-frequency ``call_started`` / ``call_completed`` events are
+    gated by this rate (see :class:`TelemetryClient`); activation and error
+    events are always delivered regardless. Mirrors ``sampleRate`` in ``env.ts``.
+    """
+    raw = os.getenv("PATTER_TELEMETRY_SAMPLE")
+    if raw is None:
+        return 1.0
+    try:
+        rate = float(raw.strip())
+    except (TypeError, ValueError):
+        return 1.0
+    # NaN/inf or out of range → fail safe to 1.0 (keep everything). A value of
+    # exactly 0.0 is honored (drop all sampleable events); only invalid input
+    # degrades to the no-sampling default.
+    if rate != rate or rate < 0.0 or rate > 1.0:
+        return 1.0
+    return rate
+
+
 def is_ci() -> bool:
     """True when running under a recognised CI provider."""
     return any(is_truthy(os.getenv(name)) for name in _CI_ENV_VARS)

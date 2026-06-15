@@ -165,6 +165,21 @@ def days_since_install_bucket() -> str:
     return "30_plus"
 
 
+def install_age_seconds() -> float | None:
+    """Seconds since this install was created, from the install-id file mtime.
+
+    Reuses the same mtime seam as :func:`days_since_install_bucket`. Returns
+    ``None`` on an unreadable / read-only filesystem (the caller buckets that to
+    ``"unknown"``). Best-effort and never raises. Mirrors ``installAgeSeconds``
+    in ``install-id.ts``.
+    """
+    try:
+        mtime = _state_path().stat().st_mtime
+    except OSError:
+        return None
+    return max(0.0, time.time() - mtime)
+
+
 def is_first_run() -> bool:
     """Return ``True`` exactly once per install — on the run that first marks it.
 

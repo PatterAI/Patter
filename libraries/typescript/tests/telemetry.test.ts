@@ -240,7 +240,7 @@ describe('[integration] telemetry — enabled path', () => {
     expect(event.sdk).toBe('typescript');
     expect(event.sdk_version).toBe('0.6.3');
     expect(event.runtime).toBe('node');
-    expect(event.schema_version).toBe(7);
+    expect(event.schema_version).toBe(8);
     expect(event.engine).toBe('realtime');
     expect(event.carrier).toBe('twilio');
     expect(typeof event.run_id).toBe('string');
@@ -998,10 +998,10 @@ describe('[integration] telemetry — relay-cap chunking (0.6.8)', () => {
   });
 });
 
-describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v7)', () => {
-  it('is on schema v7', () => {
-    expect(SCHEMA_VERSION).toBe(7);
-    expect(buildEvent('first_run', { sdkVersion: '0.6.5' }).schema_version).toBe(7);
+describe('[unit] CLI usage + first-run + call funnel + opt-out (schema v8)', () => {
+  it('is on schema v8', () => {
+    expect(SCHEMA_VERSION).toBe(8);
+    expect(buildEvent('first_run', { sdkVersion: '0.6.5' }).schema_version).toBe(8);
   });
 
   it('buildEvent accepts the new events and coerces off-list values', () => {
