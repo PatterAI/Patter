@@ -21,7 +21,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.conftest import make_agent
-from tests.unit.test_twilio_bridge_unit import _make_mock_ws, _start_message, _stop_message
+from tests.unit.test_twilio_bridge_unit import (
+    _make_mock_ws,
+    _start_message,
+    _stop_message,
+)
 
 CALL_SID = "CA" + "a" * 32
 ACCOUNT_SID = "AC" + "0" * 32
@@ -284,9 +288,7 @@ async def _capture_twilio_transfer_fn(**bridge_kwargs):
         patch("getpatter.telephony.twilio.OpenAIRealtimeStreamHandler") as handler_cls,
         patch("getpatter.telephony.twilio.create_metrics_accumulator") as metrics,
         patch("getpatter.telephony.twilio.resolve_agent_prompt", return_value="p"),
-        patch(
-            "getpatter.telephony.twilio.fetch_deepgram_cost", new_callable=AsyncMock
-        ),
+        patch("getpatter.telephony.twilio.fetch_deepgram_cost", new_callable=AsyncMock),
     ):
         handler = AsyncMock()
         handler.audio_sender = None
@@ -454,6 +456,76 @@ class TestTelnyxPlivoWarmUnsupported:
         http.post.assert_not_awaited()
 
 
+@pytest.mark.unit
+@pytest.mark.mocked
+class TestTelnyxClientStateTransfer:
+    """Telnyx cold transfer can carry an opt-in ``client_state`` that Telnyx
+    base64-encodes and echoes on the transferred leg's webhooks. Mocks ONLY
+    the carrier REST boundary (``httpx``)."""
+
+    async def _capture_telnyx_transfer_fn(self):
+        from getpatter.telephony.telnyx import telnyx_stream_bridge
+
+        ws = AsyncMock()
+        ws.accept = AsyncMock()
+        ws.query_params = {"caller": "+15551234567", "callee": "+15559876543"}
+        start = json.dumps(
+            {
+                "event": "start",
+                "stream_id": "s1",
+                "start": {"call_control_id": "cc-123", "media_format": {}},
+            }
+        )
+        stop = json.dumps({"event": "stop"})
+        ws.receive_text = AsyncMock(side_effect=[start, stop, Exception("stop")])
+        ws.send_text = AsyncMock()
+
+        with (
+            patch(
+                "getpatter.telephony.telnyx.OpenAIRealtimeStreamHandler"
+            ) as handler_cls,
+            patch("getpatter.telephony.telnyx.create_metrics_accumulator") as metrics,
+            patch("getpatter.telephony.telnyx.resolve_agent_prompt", return_value="p"),
+            patch(
+                "getpatter.telephony.telnyx.fetch_deepgram_cost",
+                new_callable=AsyncMock,
+            ),
+        ):
+            handler = AsyncMock()
+            handler.audio_sender = None
+            handler.stt = None
+            handler_cls.return_value = handler
+            metrics.return_value = MagicMock()
+            await telnyx_stream_bridge(
+                websocket=ws,
+                agent=make_agent(provider="openai_realtime"),
+                openai_key="sk-test",
+                telnyx_key="key-test",
+            )
+            return handler_cls.call_args.kwargs["transfer_fn"]
+
+    @pytest.mark.asyncio
+    async def test_cold_without_client_state_posts_bare_to(self) -> None:
+        transfer_fn = await self._capture_telnyx_transfer_fn()
+        http = _mock_http()
+        with patch("httpx.AsyncClient", return_value=http):
+            await transfer_fn("+15550001111")
+        assert http.post.await_count == 1
+        assert http.post.await_args_list[0].kwargs["json"] == {"to": "+15550001111"}
+
+    @pytest.mark.asyncio
+    async def test_cold_with_client_state_base64_encodes_into_body(self) -> None:
+        import base64
+
+        transfer_fn = await self._capture_telnyx_transfer_fn()
+        http = _mock_http()
+        with patch("httpx.AsyncClient", return_value=http):
+            await transfer_fn("+15550001111", client_state="customer_id=VIP42")
+        body = http.post.await_args_list[0].kwargs["json"]
+        assert body["to"] == "+15550001111"
+        assert base64.b64decode(body["client_state"]).decode() == "customer_id=VIP42"
+
+
 # ---------------------------------------------------------------------------
 # Pipeline built-in transfer handler — mode plumbing
 # ---------------------------------------------------------------------------
@@ -608,6 +680,41 @@ class TestCallControlTransferModes:
         control = _make_call_control(legacy)
         result = await control.transfer("+14155551234")
         assert result is None  # legacy contract
+        assert called == ["+14155551234"]
+        assert control.is_transferred is True
+
+    @pytest.mark.asyncio
+    async def test_cold_client_state_threaded_to_capable_fn(self) -> None:
+        """``client_state`` is forwarded on a cold transfer to a carrier fn
+        whose signature accepts it (Telnyx)."""
+        seen: list = []
+
+        async def capable(number, *, mode="cold", summary="", client_state=None):
+            seen.append((number, client_state))
+
+        control = _make_call_control(capable)
+        result = await control.transfer(
+            "+14155551234", client_state="customer_id=VIP42"
+        )
+        assert result is None  # cold contract
+        assert seen == [("+14155551234", "customer_id=VIP42")]
+        assert control.is_transferred is True
+
+    @pytest.mark.asyncio
+    async def test_cold_client_state_ignored_by_legacy_fn(self) -> None:
+        """A legacy ``(number)``-only carrier fn (Twilio/Plivo) must still be
+        called positionally when ``client_state`` is supplied — byte-identical
+        to the historical contract, no crash."""
+        called: list = []
+
+        async def legacy(number):
+            called.append(number)
+
+        control = _make_call_control(legacy)
+        result = await control.transfer(
+            "+14155551234", client_state="customer_id=VIP42"
+        )
+        assert result is None
         assert called == ["+14155551234"]
         assert control.is_transferred is True
 

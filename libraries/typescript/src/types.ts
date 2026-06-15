@@ -326,6 +326,13 @@ export interface TransferCallOptions {
    * before the caller is bridged (who is calling and what they need).
    */
   readonly summary?: string;
+  /**
+   * Optional opaque context string carried onto the transferred leg
+   * (Telnyx only — base64-encoded and echoed on that leg's subsequent
+   * webhooks). Ignored by carriers that do not support it (Twilio/Plivo),
+   * preserving the historical cold-transfer contract.
+   */
+  readonly clientState?: string;
 }
 
 /**

@@ -338,6 +338,22 @@ describe('[mocked] Telnyx / Plivo warm transfer unsupported', () => {
     const [url] = fetchSpy.mock.calls[0] as [string];
     expect(url).toBe('https://api.telnyx.com/v2/calls/cc-123/actions/transfer');
   });
+
+  it('TelnyxBridge cold transfer without clientState posts a bare { to } body', async () => {
+    const bridge = new TelnyxBridge(makeConfig({ telephonyProvider: 'telnyx', telnyxKey: 'key' }));
+    await bridge.transferCall('cc-123', '+15550001111');
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({ to: '+15550001111' });
+  });
+
+  it('TelnyxBridge cold transfer base64-encodes an opt-in clientState into the body', async () => {
+    const bridge = new TelnyxBridge(makeConfig({ telephonyProvider: 'telnyx', telnyxKey: 'key' }));
+    await bridge.transferCall('cc-123', '+15550001111', { clientState: 'customer_id=VIP42' });
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as { to: string; client_state?: string };
+    expect(body.to).toBe('+15550001111');
+    expect(Buffer.from(body.client_state ?? '', 'base64').toString('utf-8')).toBe('customer_id=VIP42');
+  });
 });
 
 // ---------------------------------------------------------------------------
