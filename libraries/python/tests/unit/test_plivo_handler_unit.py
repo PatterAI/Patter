@@ -431,3 +431,70 @@ async def test_bridge_media_and_playedstream_and_dtmf(
     mock_handler.on_mark.assert_awaited_once_with("audio_1")
     mock_handler.on_dtmf.assert_awaited_once_with("7")
     assert "[DTMF: 7]" in on_transcript.call_args[0][0]["text"]
+
+
+def _start_message_with_headers(
+    extra_headers: str, call_id: str = "CU" + "a" * 30, stream_id: str = "ST1"
+) -> str:
+    """A Plivo ``start`` frame carrying the ``extra_headers`` field that Plivo
+    echoes back from the ``<Stream extraHeaders="...">`` TwiML attribute."""
+    return json.dumps(
+        {
+            "event": "start",
+            "start": {
+                "callId": call_id,
+                "streamId": stream_id,
+                "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000},
+            },
+            "extra_headers": extra_headers,
+        }
+    )
+
+
+@patch("getpatter.telephony.plivo.OpenAIRealtimeStreamHandler")
+@patch("getpatter.telephony.plivo.create_metrics_accumulator")
+@patch("getpatter.telephony.plivo.fetch_deepgram_cost", new_callable=AsyncMock)
+async def test_bridge_extra_headers_populate_custom_params_and_prompt(
+    mock_fetch_dg, mock_create_metrics, mock_handler_cls
+):
+    """Developer-supplied Plivo ``extra_headers`` must reach both the
+    ``on_call_start`` callback (as ``custom_params``) and the resolved system
+    prompt (as ``{placeholder}`` template variables) — parity with Twilio's
+    ``<Parameter>`` customParameters channel. ``resolve_agent_prompt`` is run
+    for real (it is the SDK's own template engine, not an external boundary)."""
+    from getpatter.telephony.plivo import plivo_stream_bridge
+
+    ws = _make_mock_ws(
+        [
+            _start_message_with_headers("customer_id=VIP42,ticket=T7"),
+            json.dumps({"event": "stop"}),
+        ]
+    )
+    mock_handler = AsyncMock()
+    mock_handler.audio_sender = None
+    mock_handler_cls.return_value = mock_handler
+    mock_create_metrics.return_value = MagicMock()
+    on_call_start = AsyncMock(return_value=None)
+
+    agent = make_agent(
+        provider="openai_realtime",
+        system_prompt="Greet {customer_id} about ticket {ticket}.",
+    )
+
+    await plivo_stream_bridge(
+        websocket=ws,
+        agent=agent,
+        openai_key="sk-test",
+        on_call_start=on_call_start,
+        on_call_end=AsyncMock(),
+    )
+
+    # on_call_start sees the parsed headers as custom_params (was {} before).
+    payload = on_call_start.call_args[0][0]
+    assert payload["custom_params"]["customer_id"] == "VIP42"
+    assert payload["custom_params"]["ticket"] == "T7"
+
+    # The resolved prompt substituted the header-derived template variables.
+    resolved = mock_handler_cls.call_args.kwargs["resolved_prompt"]
+    assert "VIP42" in resolved
+    assert "T7" in resolved

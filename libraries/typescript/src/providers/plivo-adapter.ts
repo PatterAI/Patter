@@ -17,6 +17,71 @@ import { getLogger } from '../logger';
 const PLIVO_API_BASE = 'https://api.plivo.com/v1';
 
 /**
+ * Parse Plivo's ``extra_headers`` start-frame field into a record.
+ *
+ * Plivo echoes the ``<Stream extraHeaders="...">`` payload back on the
+ * ``start`` frame in one of several shapes. Port of Python's
+ * ``_parse_plivo_extra_headers``:
+ *   - JSON object — ``{"key": "value"}``
+ *   - Plivo brace form — ``{key: value, key2: value2}``
+ *   - Delimited pairs — ``k=v;k2=v2`` or ``k=v,k2=v2``
+ */
+export function parsePlivoExtraHeaders(raw: string): Record<string, string> {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return {};
+  const headers: Record<string, string> = {};
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const out: Record<string, string> = {};
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          out[String(k)] = String(v);
+        }
+        return out;
+      }
+    } catch {
+      /* fall through to the brace form below */
+    }
+    const inner = trimmed.replace(/^\{+/, '').replace(/\}+$/, '');
+    for (const part of inner.split(',')) {
+      const idx = part.indexOf(':');
+      if (idx !== -1) {
+        headers[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+      }
+    }
+    return headers;
+  }
+  for (const part of trimmed.replace(/;/g, ',').split(',')) {
+    const idx = part.indexOf('=');
+    if (idx !== -1) {
+      headers[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+    }
+  }
+  return headers;
+}
+
+/**
+ * Build the inbound ``customParams`` for a Plivo call from its ``extra_headers``
+ * — Plivo's metadata channel, mirroring Twilio's ``<Parameter>``
+ * customParameters. Developer-supplied headers become prompt template
+ * variables; the internal ``X-PH-caller`` / ``X-PH-callee`` markers are
+ * re-exposed under the canonical ``caller`` / ``callee`` keys (Twilio parity).
+ */
+export function plivoInboundCustomParams(
+  extraHeadersRaw: string,
+  caller: string,
+  callee: string,
+): Record<string, string> {
+  const headers = parsePlivoExtraHeaders(extraHeadersRaw);
+  const params: Record<string, string> = { caller, callee };
+  for (const [k, v] of Object.entries(headers)) {
+    if (k !== 'X-PH-caller' && k !== 'X-PH-callee') params[k] = v;
+  }
+  return params;
+}
+
+/**
  * Speak a voicemail message on a machine-answered Plivo call, then hang up.
  *
  * Mirrors Python's ``handle_amd_result`` in ``telephony/plivo.py``. Uses

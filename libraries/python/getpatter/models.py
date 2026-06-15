@@ -979,15 +979,19 @@ async def _invoke_transfer_fn(
     *,
     mode: str = "cold",
     summary: str = "",
+    client_state: str | None = None,
 ) -> dict | None:
     """Invoke a telephony ``transfer_fn`` with warm-transfer kwargs when its
     signature accepts them.
 
-    Cold mode ALWAYS calls ``transfer_fn(number)`` positionally — byte-
-    identical to the historical contract for every callable (carrier
-    closures default ``mode="cold"`` themselves). Warm mode passes
-    ``mode`` / ``summary`` keywords when the callable's signature accepts
-    them (or absorbs ``**kwargs``); the built-in per-carrier transfer
+    Cold mode calls ``transfer_fn(number)`` positionally — byte-identical to
+    the historical contract for every callable (carrier closures default
+    ``mode="cold"`` themselves). When an opt-in ``client_state`` is supplied
+    AND the callable's signature accepts it (Telnyx), it is forwarded as a
+    keyword; legacy ``(number)``-only callables (Twilio/Plivo) are still
+    invoked positionally, so the historical contract is preserved. Warm mode
+    passes ``mode`` / ``summary`` keywords when the callable's signature
+    accepts them (or absorbs ``**kwargs``); the built-in per-carrier transfer
     functions return either a result dict (``{"status": "transferring",
     ...}`` / ``{"error": ...}``) or ``None``. A ``mode="warm"`` request
     against a legacy callable that only declares ``(number)`` returns a
@@ -1000,6 +1004,17 @@ async def _invoke_transfer_fn(
     if transfer_fn is None:
         return {"error": "transfer is not available on this call"}
     if mode == "cold":
+        if client_state is not None:
+            try:
+                sig = inspect.signature(transfer_fn)
+                accepts_client_state = "client_state" in sig.parameters or any(
+                    p.kind is inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                )
+            except (TypeError, ValueError):  # pragma: no cover - exotic callables
+                accepts_client_state = False
+            if accepts_client_state:
+                return await transfer_fn(number, client_state=client_state)
         return await transfer_fn(number)
     if mode != "warm":
         # Never silently coerce an unknown mode into a blind redirect — the
@@ -1076,7 +1091,12 @@ class CallControl:
         return self._transferred.is_set() or self._hung_up.is_set()
 
     async def transfer(
-        self, number: str, *, mode: Literal["cold", "warm"] = "cold", summary: str = ""
+        self,
+        number: str,
+        *,
+        mode: Literal["cold", "warm"] = "cold",
+        summary: str = "",
+        client_state: str | None = None,
     ) -> dict | None:
         """Transfer the call to another phone number (E.164 format).
 
@@ -1089,6 +1109,11 @@ class CallControl:
                 now; other carriers return an error envelope).
             summary: Warm mode only — short handoff summary announced to the
                 human agent before the caller is bridged.
+            client_state: Optional opaque context string carried onto the
+                transferred leg (Telnyx only — base64-encoded and echoed on
+                that leg's subsequent webhooks). Ignored by carriers that do
+                not support it (Twilio/Plivo), preserving the historical
+                cold-transfer contract.
 
         Returns:
             ``None`` for a cold transfer (legacy contract), or a result dict
@@ -1100,7 +1125,11 @@ class CallControl:
             logger.warning("transfer() not available for this provider mode")
             return None
         result = await _invoke_transfer_fn(
-            self._transfer_fn, number, mode=mode, summary=summary
+            self._transfer_fn,
+            number,
+            mode=mode,
+            summary=summary,
+            client_state=client_state,
         )
         if not (isinstance(result, dict) and result.get("error")):
             self._transferred.set()

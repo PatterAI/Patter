@@ -392,12 +392,24 @@ async def plivo_stream_bridge(
                 stream_id = start_data.get("streamId", "")
                 media_format = start_data.get("mediaFormat", {}) or {}
 
+                # Parse extra_headers once: caller / callee recovery + custom
+                # template variables. Plivo echoes the ``<Stream
+                # extraHeaders="...">`` payload back on the start frame.
+                hdrs = _parse_plivo_extra_headers(data.get("extra_headers", ""))
                 # Recover caller / callee: query string first (Plivo preserves
                 # it on the Stream URL), then the ``extra_headers`` fallback.
                 if not caller or not callee:
-                    hdrs = _parse_plivo_extra_headers(data.get("extra_headers", ""))
                     caller = caller or hdrs.get("X-PH-caller", "")
                     callee = callee or hdrs.get("X-PH-callee", "")
+                # Build custom_params from extra_headers — Plivo's metadata
+                # channel, mirroring Twilio's ``<Parameter>`` customParameters:
+                # developer-supplied headers become prompt template variables.
+                # The internal X-PH-caller / X-PH-callee markers are re-exposed
+                # under the canonical caller / callee keys (Twilio parity).
+                custom_params: dict = {"caller": caller, "callee": callee}
+                for _hk, _hv in hdrs.items():
+                    if _hk not in ("X-PH-caller", "X-PH-callee"):
+                        custom_params[_hk] = _hv
 
                 _mode = (
                     f"engine={getattr(agent, 'provider', 'unknown')}"
@@ -429,7 +441,7 @@ async def plivo_stream_bridge(
                             "caller": caller,
                             "callee": callee,
                             "direction": "inbound",
-                            "custom_params": {},
+                            "custom_params": custom_params,
                             "telephony_provider": "plivo",
                         }
                     )
@@ -451,7 +463,7 @@ async def plivo_stream_bridge(
                     except Exception as _exc:
                         logger.warning("Could not start recording: %s", _exc)
 
-                resolved_prompt = resolve_agent_prompt(agent, {})
+                resolved_prompt = resolve_agent_prompt(agent, custom_params)
                 provider = getattr(agent, "provider", "openai_realtime")
 
                 metrics = create_metrics_accumulator(
@@ -475,7 +487,9 @@ async def plivo_stream_bridge(
                 )
 
                 # --- Plivo-specific call control helpers ---
-                async def _plivo_transfer(number, *, mode: str = "cold", summary: str = ""):
+                async def _plivo_transfer(
+                    number, *, mode: str = "cold", summary: str = ""
+                ):
                     # ``mode="warm"`` is NOT yet implemented on Plivo — the
                     # MPC (multi-party call) flow needs participant-role
                     # coordination the bridge does not plumb today. A clear

@@ -68,6 +68,21 @@
   the same mtime seam as `days_since_install_bucket`. Read-only and best-effort —
   `unknown` on a read-only / unreadable filesystem.
 
+- **Opt-in `client_state` / `clientState` on the programmatic transfer
+  surface (Telnyx).** `CallControl.transfer(number, client_state="…")` (Python)
+  and `bridge.transferCall(callId, number, { clientState: "…" })` (TypeScript)
+  now forward an opaque context string that Telnyx base64-encodes and echoes on
+  the transferred leg's subsequent webhooks — so call context can survive a
+  handoff. Previously the underlying `_telnyx_transfer` / `TelnyxBridge`
+  capability was unreachable (no public option fed it). Optional with no
+  default → the cold-transfer request body stays byte-identical for callers
+  that don't set it, and carriers without the capability (Twilio/Plivo) ignore
+  it. The LLM `transfer_call` tool schema is unchanged (an opaque state string
+  is a developer concern, not an LLM one). `libraries/python/getpatter/models.py`
+  (`CallControl.transfer`, `_invoke_transfer_fn`);
+  `libraries/typescript/src/types.ts` (`TransferCallOptions`),
+  `libraries/typescript/src/server.ts` (`TelnyxBridge.transferCall`).
+
 ### Changed
 
 - **Telemetry `SCHEMA_VERSION` bumped 7 → 8** for the new `config_incomplete`
@@ -78,6 +93,23 @@
   (`libraries/python/getpatter/telemetry/events.py`,
   `libraries/typescript/src/telemetry/events.ts`). No payload a v7 consumer
   understood was removed or renamed — all changes are additive.
+
+### Fixed
+
+- **Plivo `extra_headers` are now exposed to the agent prompt and
+  `on_call_start` (parity with Twilio's `<Parameter>` customParameters).**
+  Developer-supplied headers delivered on the Plivo `start` frame were parsed
+  only for caller/callee recovery and otherwise dropped — `resolve_agent_prompt`
+  and the `on_call_start` callback both received an empty `custom_params`, so
+  `{placeholder}` template variables sourced from inbound metadata never
+  resolved on Plivo calls. They are now parsed unconditionally and forwarded as
+  `custom_params` (internal `X-PH-caller`/`X-PH-callee` markers re-exposed as
+  `caller`/`callee`). The TypeScript Plivo bridge never read `extra_headers` at
+  all; it now passes the same `customParams` into `handleCallStart`.
+  `libraries/python/getpatter/telephony/plivo.py`;
+  `libraries/typescript/src/providers/plivo-adapter.ts` (new
+  `parsePlivoExtraHeaders` / `plivoInboundCustomParams`),
+  `libraries/typescript/src/server.ts`.
 
 ## 0.6.8 (2026-06-13)
 
