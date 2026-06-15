@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import hashlib
 import json
 import logging
 import os
@@ -32,8 +33,13 @@ from collections import deque
 from typing import Any
 
 from getpatter.telemetry.consent import is_enabled
-from getpatter.telemetry.env import is_truthy
-from getpatter.telemetry.events import build_event
+from getpatter.telemetry.env import is_truthy, sample_rate
+from getpatter.telemetry.events import (
+    EVENT_CALL_COMPLETED,
+    EVENT_CALL_STARTED,
+    build_event,
+)
+from getpatter.telemetry.install_id import run_id
 
 logger = logging.getLogger("getpatter.telemetry")
 
@@ -50,6 +56,30 @@ _BUFFER_MAX = 256
 # The relay rejects batches larger than 64 events per request — a full buffer
 # must ship as multiple POSTs or events 65..256 silently vanish server-side.
 _MAX_EVENTS_PER_POST = 64
+
+# The ONLY events the client-side sampling gate may drop. Everything else
+# (first_run, config_incomplete, sdk_initialized, cli_command, feature_used,
+# agent_configured) is always delivered — those are low-frequency activation /
+# usage signals, never high-volume call traffic. An *error* call_completed is
+# also force-kept (see ``_keep_event``) so error rates stay unbiased.
+_SAMPLEABLE_EVENTS = frozenset({EVENT_CALL_STARTED, EVENT_CALL_COMPLETED})
+
+
+def _run_keep_ratio() -> float:
+    """A stable per-run value in ``[0, 1)`` derived from this process's run id.
+
+    Hashing the run id (constant for the process) makes the keep/drop decision
+    DETERMINISTIC PER RUN: the whole run consistently keeps or drops its
+    sampleable call events rather than flipping a per-event coin — which would
+    bias short runs (a 3-call run at rate=0.5 could keep 0 or 3 by luck). Any
+    failure degrades to ``0.0`` so the caller keeps the event (fail safe).
+    """
+    try:
+        digest = hashlib.sha256(run_id().encode("utf-8")).hexdigest()[:8]
+        return int(digest, 16) / 0xFFFFFFFF
+    except Exception:  # pragma: no cover — hashing a str never realistically fails
+        return 0.0
+
 
 # Module-level registry so a single ``atexit`` hook flushes every live client
 # without leaking one handler per instance. A ``WeakSet`` lets a client whose
@@ -136,6 +166,18 @@ class TelemetryClient:
         self._http: Any = None  # httpx.AsyncClient, lazily created
         self._closed = False
 
+        # Client-side sampling gate (computed ONCE at construction):
+        #   * ``_sample_rate`` — the effective rate in ``[0, 1]`` from the env.
+        #   * ``_keep_sampled`` — the deterministic per-run keep/drop decision for
+        #     the high-frequency call events. Because the seed is the run id
+        #     (constant for the process) the whole run consistently keeps or
+        #     drops them — never a per-event coin flip. ``rate >= 1.0`` always
+        #     keeps. See ``_run_keep_ratio`` and ``record``.
+        self._sample_rate = sample_rate()
+        self._keep_sampled = (
+            self._sample_rate >= 1.0 or _run_keep_ratio() < self._sample_rate
+        )
+
         if self._enabled and not self._debug:
             _show_notice_once()
             _register_atexit()
@@ -148,9 +190,34 @@ class TelemetryClient:
     # -- public API ----------------------------------------------------------
 
     def record(self, name: str, **dimensions: Any) -> None:
-        """Enqueue an event. Fire-and-forget; never raises, never blocks."""
+        """Enqueue an event. Fire-and-forget; never raises, never blocks.
+
+        Applies the client-side sampling gate (see ``__init__``): only the
+        high-frequency ``call_started`` / ``call_completed`` events may be
+        dropped, and only when this run's deterministic decision says so. An
+        error ``call_completed`` (``outcome == "error"`` or an ``error_code``
+        present) is ALWAYS kept so error rates stay unbiased. A kept sampled
+        event carries ``sample_rate`` so analytics can extrapolate (weight
+        ``1/sample_rate``). All other events bypass the gate entirely.
+        """
         if not self._enabled or self._closed:
             return
+
+        # -- sampling gate (high-frequency call events only) -----------------
+        if name in _SAMPLEABLE_EVENTS and self._sample_rate < 1.0:
+            # Force-keep error call_completed events regardless of rate — error
+            # rates would be biased if errors were sampled like clean calls.
+            is_error = name == EVENT_CALL_COMPLETED and (
+                dimensions.get("outcome") == "error" or "error_code" in dimensions
+            )
+            if not self._keep_sampled and not is_error:
+                return  # sampled out for this run
+            # Kept (by the run decision or because it's an error): stamp the rate
+            # so analytics can extrapolate (weight = 1/rate). ``build_event``
+            # keeps it (the Schema phase added sample_rate to the numeric
+            # allowlist). Stamped only when rate < 1.0 to keep payloads lean.
+            dimensions = {**dimensions, "sample_rate": self._sample_rate}
+
         try:
             event = build_event(
                 name, sdk_version=self._sdk_version, dimensions=dimensions

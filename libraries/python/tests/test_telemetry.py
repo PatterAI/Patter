@@ -121,7 +121,7 @@ async def test_event_reaches_collector_when_enabled(enabled, collector):
     assert event["sdk"] == "python"
     assert event["sdk_version"] == "0.6.3"
     assert event["runtime"] == "cpython"
-    assert event["schema_version"] == 7
+    assert event["schema_version"] == 8
     assert event["engine"] == "realtime"
     assert event["provider"] == "openai"
     assert event["carrier"] == "twilio"
@@ -963,20 +963,18 @@ def test_build_event_v4_bool_enum_and_version_dims():
 # --- CLI usage + first-run + call funnel + persisted opt-out (schema v6) ------
 
 
-def test_schema_version_is_7():
+def test_schema_version_is_8():
     from getpatter.telemetry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 7
-    assert build_event("first_run", sdk_version="0.6.5")["schema_version"] == 7
+    assert SCHEMA_VERSION == 8
+    assert build_event("first_run", sdk_version="0.6.5")["schema_version"] == 8
 
 
 def test_call_uid_kept_only_when_hex32():
     # A well-formed random correlation id (32 lowercase hex) survives; every
     # off-shape value is DROPPED (key absent), never coerced to "other".
     good = "a" * 32
-    ev = build_event(
-        "call_started", sdk_version="0.6.5", dimensions={"call_uid": good}
-    )
+    ev = build_event("call_started", sdk_version="0.6.5", dimensions={"call_uid": good})
     assert ev["call_uid"] == good
 
     for bad in ("not-a-uid", "A" * 32, "a" * 31, "a" * 33, 123, True):

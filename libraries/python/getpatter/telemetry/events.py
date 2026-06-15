@@ -30,7 +30,7 @@ from getpatter.telemetry.env import is_ci, is_test
 from getpatter.telemetry.install_id import install_id, run_id
 from getpatter.telemetry.stack import STACK_VENDORS
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # --- Event names (the only values the ``event`` field may take) -------------
 EVENT_SDK_INITIALIZED = "sdk_initialized"
@@ -40,6 +40,9 @@ EVENT_FEATURE_USED = "feature_used"
 EVENT_AGENT_CONFIGURED = "agent_configured"
 EVENT_CALL_STARTED = "call_started"
 EVENT_CALL_COMPLETED = "call_completed"
+# Activation-blocker signal: emitted once when required runtime config is missing
+# so the instance cannot proceed. In the NEVER-sampled set (always delivered).
+EVENT_CONFIG_INCOMPLETE = "config_incomplete"
 
 _ALLOWED_EVENTS = frozenset(
     {
@@ -50,6 +53,7 @@ _ALLOWED_EVENTS = frozenset(
         EVENT_AGENT_CONFIGURED,
         EVENT_CALL_STARTED,
         EVENT_CALL_COMPLETED,
+        EVENT_CONFIG_INCOMPLETE,
     }
 )
 
@@ -126,6 +130,34 @@ DIMENSION_VALUES: dict[str, frozenset[str]] = {
     "turn_detection": frozenset({"default", "custom", "none"}),
     # call_completed: how many conversational turns the call had.
     "turn_count_bucket": frozenset({"0", "1", "2_3", "4_6", "7_12", "13_plus"}),
+    # config_incomplete: coarse category of the absent required runtime config
+    # blocking activation. Never the key value, env var name, or any PII.
+    "missing": frozenset({"carrier_credentials", "llm_key", "engine_config", "other"}),
+    # call_completed: which layer the terminal error originated in (derived from
+    # CallMetrics.error_code/outcome). "none" when the call ended cleanly.
+    "error_layer": frozenset(
+        {"stt", "llm", "tts", "carrier", "config", "internal", "none", "other"}
+    ),
+    # call_completed: coarse reason the call ended (derived from terminal
+    # outcome/error/AMD state). hangup_local/hangup_remote only when the side is
+    # reliably known; else fall back to completed (clean end) or other.
+    "disconnect_reason": frozenset(
+        {
+            "hangup_local",
+            "hangup_remote",
+            "error",
+            "timeout",
+            "no_answer",
+            "busy",
+            "completed",
+            "other",
+        }
+    ),
+    # call_started / call_completed: coarse age of the install at call time
+    # (install-id file mtime vs now). "unknown" when the timestamp can't be read.
+    "time_to_first_call_bucket": frozenset(
+        {"lt_1h", "1h_1d", "1d_7d", "gt_7d", "unknown"}
+    ),
 }
 
 # Dimensions that may accompany an event. Enum dimensions are the keys of
@@ -133,8 +165,23 @@ DIMENSION_VALUES: dict[str, frozenset[str]] = {
 # ``latency_ms`` (raw milliseconds) and ``duration_seconds`` (raw seconds) are
 # operational metrics — the coarse-bucket privacy posture (which exists for cost
 # and for names) does not apply to them, so they are sent at full resolution.
+# The per-stage call_completed latencies (``stt_latency_ms``, ``llm_ttft_ms``,
+# ``tts_first_byte_ms``, ``eou_latency_ms``) are read off the existing
+# CallMetrics LatencyBreakdown — whole ints, omitted when the stage didn't run.
+# ``sample_rate`` is the client-side sampling rate in (0,1] for high-frequency
+# call events (analytics weight = 1/sample_rate).
 _NUMERIC_DIMENSIONS = frozenset(
-    {"builtin_tool_count", "latency_ms", "duration_seconds", "cost_usd"}
+    {
+        "builtin_tool_count",
+        "latency_ms",
+        "duration_seconds",
+        "cost_usd",
+        "stt_latency_ms",
+        "llm_ttft_ms",
+        "tts_first_byte_ms",
+        "eou_latency_ms",
+        "sample_rate",
+    }
 )
 # feature_used (pipeline): the sanitized per-layer model token, e.g.
 # ``deepgram-nova-3`` / ``anthropic-claude-haiku-4-5``. NOT a closed enum — the

@@ -1,5 +1,84 @@
 ## Unreleased
 
+### Added
+
+- **Telemetry: `config_incomplete` — activation-blocker signal.** A new event
+  emitted at most once per `Patter` instance when required runtime config is
+  missing so the instance/agent cannot proceed. It carries a single coarse enum
+  dimension `missing` (`carrier_credentials` / `llm_key` / `engine_config` /
+  `other`) naming *what* is absent — never the key value, env var name, carrier
+  credentials, or any PII. Emitted immediately before the existing validation
+  error at each blocker site: a carrier with no phone number (and, in TypeScript,
+  a missing `phoneNumber` / `carrier`) → `carrier_credentials`; OpenAI Realtime
+  mode with no API key → `llm_key`; an incomplete pipeline/engine config (Python
+  pipeline with no STT; TypeScript unknown-engine and invalid-provider) →
+  `engine_config`. Fire-and-forget: it can never throw into, block, or alter the
+  call/control flow — the original error propagates unchanged. In the
+  never-sampled set, so it is always delivered when telemetry is enabled and
+  emits nothing on opt-out. `libraries/python/getpatter/client.py`,
+  `libraries/typescript/src/client.ts`. Parity across both SDKs.
+
+- **`PATTER_TELEMETRY_SAMPLE` — client-side downsampling of high-frequency call
+  telemetry.** New env var, a float in `[0, 1]` read once at telemetry-client
+  construction (Python `getpatter/telemetry/env.py` `sample_rate()` /
+  `getpatter/telemetry/client.py`; TypeScript `src/telemetry/env.ts`
+  `sampleRate()` / `src/telemetry/client.ts`). Defaults to `1.0` (no sampling —
+  every event kept); a missing, empty, non-numeric, `< 0`, or `> 1` value fails
+  safe back to `1.0` and never raises, so a misconfigured env can never silently
+  drop data. The gate applies ONLY to the high-frequency `call_started` /
+  `call_completed` events; `first_run`, `config_incomplete`, `sdk_initialized`,
+  `cli_command`, `feature_used`, `agent_configured`, and any error
+  `call_completed` (`outcome == "error"` or an `error_code` present) are always
+  delivered regardless of rate. The keep/drop decision is **deterministic per
+  run** — derived from a SHA-256 hash of the per-process `run_id` — so a whole
+  run consistently keeps or drops its sampleable call events rather than flipping
+  a per-event coin (which would bias short runs). When a sampled call event is
+  kept at a rate `< 1.0`, the event carries a `sample_rate` dimension so
+  analytics can extrapolate true volume with weight `1 / sample_rate`; at rate
+  `1.0` no `sample_rate` is stamped (payloads stay lean). Lets future
+  high-volume installs cut telemetry egress without losing extrapolation
+  accuracy. Opt-in, additive, parity across both SDKs.
+
+- **Telemetry: per-stage latency on `call_completed`.** The existing
+  `call_completed` event now carries up to four whole-millisecond latency dims
+  read straight off the per-call metrics accumulator (`CallMetrics.latency_p95`,
+  the same source as `latency_ms`): `stt_latency_ms` (`LatencyBreakdown.stt_ms`),
+  `llm_ttft_ms` (`llm_ttft_ms`), `tts_first_byte_ms` (`tts_ms`), and
+  `eou_latency_ms` (`endpoint_ms`). Read-only — no new audio-path
+  instrumentation. A dim is omitted (never sent as `0`) when its stage didn't
+  run, so realtime/convai engines naturally drop `stt_latency_ms` /
+  `tts_first_byte_ms`. `libraries/python/getpatter/telemetry/call_metrics.py`,
+  `libraries/typescript/src/telemetry/call-metrics.ts`.
+
+- **Telemetry: `error_layer` + `disconnect_reason` on `call_completed`.**
+  `error_layer` (`stt`/`llm`/`tts`/`carrier`/`config`/`internal`/`none`/`other`)
+  is derived deterministically from the existing `CallMetrics.error_code` (never
+  the message); `none` on a clean completion. `disconnect_reason`
+  (`error`/`timeout`/`no_answer`/`busy`/`completed`/`other`) is derived from the
+  terminal outcome plus the error code. These populate the previously
+  under-filled error taxonomy from state already known at call end.
+  `libraries/python/getpatter/telemetry/call_metrics.py`,
+  `libraries/typescript/src/telemetry/call-metrics.ts`.
+
+- **Telemetry: `time_to_first_call_bucket` on `call_started` and
+  `call_completed`.** A coarse activation-funnel band
+  (`lt_1h`/`1h_1d`/`1d_7d`/`gt_7d`/`unknown`) computed from the install-id file
+  mtime via a new public `install_age_seconds()` / `installAgeSeconds()` helper
+  (`getpatter/telemetry/install_id.py` / `src/telemetry/install-id.ts`), reusing
+  the same mtime seam as `days_since_install_bucket`. Read-only and best-effort —
+  `unknown` on a read-only / unreadable filesystem.
+
+### Changed
+
+- **Telemetry `SCHEMA_VERSION` bumped 7 → 8** for the new `config_incomplete`
+  event, the per-stage latency / `error_layer` / `disconnect_reason` /
+  `time_to_first_call_bucket` dimensions, and the `sample_rate` dimension added
+  by client-side sampling. The relay applies version-appropriate validation off
+  this number, so it moves in lockstep across both SDKs
+  (`libraries/python/getpatter/telemetry/events.py`,
+  `libraries/typescript/src/telemetry/events.ts`). No payload a v7 consumer
+  understood was removed or renamed — all changes are additive.
+
 ## 0.6.8 (2026-06-13)
 
 ### Added

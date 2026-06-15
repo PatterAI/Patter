@@ -34,6 +34,31 @@ export function isTruthy(value: string | undefined): boolean {
   return v !== '' && v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
 }
 
+/**
+ * Client-side sampling rate for high-frequency call events, in `[0, 1]`.
+ *
+ * Read from `PATTER_TELEMETRY_SAMPLE` and clamped to `[0, 1]`. Defaults to `1.0`
+ * (no sampling — every event kept) when the var is unset, empty, non-numeric,
+ * `< 0`, or `> 1`. Fail-safe: this never throws — a bad value degrades to `1.0`
+ * so a misconfigured env can never silently drop data.
+ *
+ * Only the high-frequency `call_started` / `call_completed` events are gated by
+ * this rate (see `TelemetryClient`); activation and error events are always
+ * delivered regardless. Mirrors `sample_rate` in `env.py`.
+ */
+export function sampleRate(): number {
+  const raw = process.env.PATTER_TELEMETRY_SAMPLE;
+  if (raw === undefined) return 1.0;
+  const trimmed = raw.trim();
+  if (trimmed === '') return 1.0;
+  const rate = Number(trimmed);
+  // NaN/Infinity or out of range → fail safe to 1.0 (keep everything). A value
+  // of exactly 0 is honored (drop all sampleable events); only invalid input
+  // degrades to the no-sampling default.
+  if (!Number.isFinite(rate) || rate < 0 || rate > 1) return 1.0;
+  return rate;
+}
+
 /** True when running under a recognised CI provider. */
 export function isCi(): boolean {
   return CI_ENV_VARS.some((name) => isTruthy(process.env[name]));
