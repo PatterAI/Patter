@@ -119,11 +119,12 @@ agent = phone.agent(
 
 A bare string is shorthand for `{ url: <string> }`.
 
-## Hosted MCP example - Resemble Detect
+## Hosted MCP example - Resemble Detect and Signal
 
 Use this pattern when a caller provides a recording or media URL that should be
-checked for synthetic speech before the agent makes a trust decision. Resemble
-hosts an MCP server, so the agent can discover Detect, Watermark, and
+checked for synthetic speech, or when caller-provided text should be scored for
+fraud and scam intent before the agent makes a trust decision. Resemble hosts an
+MCP server, so the agent can discover Detect, Signal, Watermark, and
 Intelligence tools without a custom wrapper.
 
 ```typescript
@@ -138,16 +139,18 @@ const phone = new Patter({
 const agent = phone.agent({
   engine: new OpenAIRealtime(),
   systemPrompt:
-    "You verify suspicious caller-provided recordings with Resemble Detect. " +
-    "When a media URL is available, call the Resemble MCP detect tool and " +
-    "explain whether the result indicates real or synthetic speech.",
+    "You verify suspicious caller-provided recordings with Resemble Detect " +
+    "and suspicious requests with Resemble Signal. When a media URL is " +
+    "available, call the Detect tool. When a caller asks for a reset code, " +
+    "wire transfer, credential, or account change, call the Signal tool " +
+    "before deciding whether to continue or escalate.",
   mcpServers: [
     {
       url: "https://mcp.resemble.ai/mcp",
       headers: {
         Authorization: `Bearer ${process.env.RESEMBLE_API_KEY}`,
       },
-      name: "resemble-detect",
+      name: "resemble-trust",
     },
   ],
 });
@@ -155,8 +158,9 @@ const agent = phone.agent({
 await phone.serve({ agent, port: 8000 });
 ```
 
-This is a tool-call integration for caller-provided media URLs. It does not
-inspect live caller audio or replace application-specific escalation policy.
+This is a tool-call integration for caller-provided media URLs and text. It
+does not inspect live caller audio or replace application-specific escalation
+policy.
 
 ## Real-world example — Postgres MCP server
 
