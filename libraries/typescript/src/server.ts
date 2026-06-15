@@ -13,7 +13,7 @@ import type { TelemetryClient } from './telemetry/client';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
-import { PlivoAdapter, dropPlivoVoicemail } from './providers/plivo-adapter';
+import { PlivoAdapter, dropPlivoVoicemail, plivoInboundCustomParams } from './providers/plivo-adapter';
 import { TwilioAdapter } from './providers/twilio-adapter';
 import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
 // Re-export so existing imports from './server' keep working after the
@@ -977,10 +977,17 @@ export class TelnyxBridge implements TelephonyBridge {
       return;
     }
     const telnyxKey = this.config.telnyxKey ?? '';
+    // Opt-in client_state: an opaque context string Telnyx base64-encodes and
+    // echoes on the transferred leg's subsequent webhooks. Omitted by default
+    // so the request body stays byte-identical to the historical contract.
+    const body: Record<string, string> = { to: toNumber };
+    if (options?.clientState) {
+      body.client_state = Buffer.from(options.clientState, 'utf-8').toString('base64');
+    }
     await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callId)}/actions/transfer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
-      body: JSON.stringify({ to: toNumber }),
+      body: JSON.stringify(body),
     });
     getLogger().info(`Telnyx call transferred to ${toNumber}`);
   }
@@ -3120,6 +3127,7 @@ export class EmbeddedServer {
         let data: {
           event?: string;
           start?: { callId?: string; streamId?: string; mediaFormat?: { encoding?: string; sampleRate?: number } };
+          extra_headers?: string;
           media?: { payload?: string };
           dtmf?: { digit?: string };
           name?: string;
@@ -3139,7 +3147,11 @@ export class EmbeddedServer {
           handler.setStreamSid(data.start?.streamId ?? '');
           const callId = data.start?.callId ?? '';
           if (callId) this.activeCallIds.set(ws, callId);
-          await handler.handleCallStart(callId);
+          // Plivo's extra_headers are the metadata channel mirroring Twilio's
+          // <Parameter> customParameters: developer-supplied headers become
+          // prompt template variables. Without this they were silently dropped.
+          const customParams = plivoInboundCustomParams(data.extra_headers ?? '', caller, callee);
+          await handler.handleCallStart(callId, customParams);
           // ``recording: true`` parity: Python's Plivo bridge starts the
           // recording here; the generic Twilio-credential-gated helper never
           // covered Plivo, so the flag silently no-op'd in TS.

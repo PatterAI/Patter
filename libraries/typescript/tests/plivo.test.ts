@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { PlivoBridge } from '../src/server';
 import type { LocalConfig } from '../src/server';
 import { Carrier as Plivo, validatePlivoSignature } from '../src/telephony/plivo';
-import { PlivoAdapter } from '../src/providers/plivo-adapter';
+import { PlivoAdapter, parsePlivoExtraHeaders, plivoInboundCustomParams } from '../src/providers/plivo-adapter';
 import crypto from 'node:crypto';
 import { DEFAULT_PRICING, calculateTelephonyCost } from '../src/pricing';
 
@@ -238,5 +238,66 @@ describe('Plivo pricing', () => {
   it('rounds partial minutes up like Twilio', () => {
     // 61 s → 2 minutes → 2 * 0.0055
     expect(calculateTelephonyCost('plivo', 61, DEFAULT_PRICING)).toBeCloseTo(0.011, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extra_headers → custom params (parity with Twilio <Parameter> channel)
+// ---------------------------------------------------------------------------
+
+describe('parsePlivoExtraHeaders', () => {
+  it('parses a JSON object', () => {
+    expect(parsePlivoExtraHeaders('{"customer_id":"VIP42","ticket":"T7"}')).toEqual({
+      customer_id: 'VIP42',
+      ticket: 'T7',
+    });
+  });
+
+  it('parses the Plivo brace form', () => {
+    expect(parsePlivoExtraHeaders('{customer_id: VIP42, ticket: T7}')).toEqual({
+      customer_id: 'VIP42',
+      ticket: 'T7',
+    });
+  });
+
+  it('parses delimited key=value pairs with , or ;', () => {
+    expect(parsePlivoExtraHeaders('customer_id=VIP42;ticket=T7')).toEqual({
+      customer_id: 'VIP42',
+      ticket: 'T7',
+    });
+  });
+
+  it('returns an empty record for blank input', () => {
+    expect(parsePlivoExtraHeaders('')).toEqual({});
+    expect(parsePlivoExtraHeaders('   ')).toEqual({});
+  });
+});
+
+describe('plivoInboundCustomParams', () => {
+  it('exposes developer headers as template variables alongside caller/callee', () => {
+    const params = plivoInboundCustomParams(
+      'customer_id=VIP42,ticket=T7',
+      '+15551234567',
+      '+15559876543',
+    );
+    expect(params).toEqual({
+      caller: '+15551234567',
+      callee: '+15559876543',
+      customer_id: 'VIP42',
+      ticket: 'T7',
+    });
+  });
+
+  it('drops the internal X-PH-caller/X-PH-callee markers (re-exposed as caller/callee)', () => {
+    const params = plivoInboundCustomParams(
+      'X-PH-caller=+15551234567,X-PH-callee=+15559876543,segment=gold',
+      '+15551234567',
+      '+15559876543',
+    );
+    expect(params).toEqual({
+      caller: '+15551234567',
+      callee: '+15559876543',
+      segment: 'gold',
+    });
   });
 });
