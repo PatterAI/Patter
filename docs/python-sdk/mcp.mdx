@@ -123,6 +123,52 @@ const agent = phone.agent({
 
 A bare string is shorthand for `{"url": <string>}`.
 
+## Hosted MCP example - Resemble Detect
+
+Use this pattern when a caller provides a recording or media URL that should be
+checked for synthetic speech before the agent makes a trust decision. Resemble
+hosts an MCP server, so the agent can discover Detect, Watermark, and
+Intelligence tools without a custom wrapper.
+
+```python
+import asyncio
+import os
+
+from getpatter import OpenAIRealtime, Patter, Twilio
+
+phone = Patter(
+    carrier=Twilio(),
+    phone_number="+15550001234",
+    webhook_url="api.example.com",
+)
+
+agent = phone.agent(
+    engine=OpenAIRealtime(),
+    system_prompt=(
+        "You verify suspicious caller-provided recordings with Resemble Detect. "
+        "When a media URL is available, call the Resemble MCP detect tool and "
+        "explain whether the result indicates real or synthetic speech."
+    ),
+    mcp_servers=[
+        {
+            "url": "https://mcp.resemble.ai/mcp",
+            "headers": {
+                "Authorization": f"Bearer {os.environ['RESEMBLE_API_KEY']}",
+            },
+            "name": "resemble-detect",
+        },
+    ],
+)
+
+async def main():
+    await phone.serve(agent, port=8000)
+
+asyncio.run(main())
+```
+
+This is a tool-call integration for caller-provided media URLs. It does not
+inspect live caller audio or replace application-specific escalation policy.
+
 ## Real-world example — Postgres MCP server
 
 Connect a phone agent to a Postgres MCP server so the caller can query an orders table by phone number.
