@@ -191,6 +191,8 @@ export { LLM as CerebrasLLM } from "./llm/cerebras";
 export type { CerebrasLLMOptions } from "./llm/cerebras";
 export { LLM as GoogleLLM } from "./llm/google";
 export type { GoogleLLMOptions } from "./llm/google";
+export { LLM as LiteLLMLLM } from "./llm/litellm";
+export type { LiteLLMLLMOptions } from "./llm/litellm";
 // Agent-runtime LLM providers (Patter as the voice shell in front of an
 // OpenAI-compatible agent runtime / local inference gateway).
 export { LLM as OpenAICompatibleLLM, OpenAICompatibleLLMProvider } from "./llm/openai-compatible";
@@ -213,10 +215,12 @@ import { LLM as HermesLLMClass } from "./llm/hermes";
 import { LLM as OpenClawLLMClass } from "./llm/openclaw";
 import { LLM as OpenAICompatibleLLMClass } from "./llm/openai-compatible";
 import { LLM as CustomLLMClass } from "./llm/custom";
+import { LLM as LiteLLMLLMClass } from "./llm/litellm";
 export const hermes = Object.freeze({ LLM: HermesLLMClass });
 export const openclaw = Object.freeze({ LLM: OpenClawLLMClass });
 export const openaiCompatible = Object.freeze({ LLM: OpenAICompatibleLLMClass });
 export const custom = Object.freeze({ LLM: CustomLLMClass });
+export const litellm = Object.freeze({ LLM: LiteLLMLLMClass });
 
 // Voice Activity Detection (server-side) — Silero ONNX.
 export { SileroVAD } from "./providers/silero-vad";

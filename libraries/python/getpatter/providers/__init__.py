@@ -99,6 +99,12 @@ def _load_google_llm():
     return GoogleLLMProvider
 
 
+def _load_litellm():
+    from getpatter.providers.litellm_llm import LiteLLMProvider
+
+    return LiteLLMProvider
+
+
 def __getattr__(name: str):
     """Lazy-load optional LLM providers to avoid importing heavy vendor SDKs."""
     loaders = {
@@ -106,6 +112,7 @@ def __getattr__(name: str):
         "GroqLLMProvider": _load_groq_llm,
         "CerebrasLLMProvider": _load_cerebras_llm,
         "GoogleLLMProvider": _load_google_llm,
+        "LiteLLMProvider": _load_litellm,
     }
     if name in loaders:
         return loaders[name]()
@@ -130,4 +137,5 @@ __all__ = [
     "GroqLLMProvider",
     "CerebrasLLMProvider",
     "GoogleLLMProvider",
+    "LiteLLMProvider",
 ]
