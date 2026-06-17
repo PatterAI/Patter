@@ -20,6 +20,7 @@ __all__ = [
     "groq",
     "cerebras",
     "google",
+    "litellm",
     "openai_compatible",
     "custom",
     "hermes",

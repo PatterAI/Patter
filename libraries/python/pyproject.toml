@@ -125,6 +125,10 @@ cerebras = [
 google = [
     "google-genai>=1.55",
 ]
+# LiteLLM unified AI gateway (100+ LLM providers via one interface).
+litellm = [
+    "litellm>=1.80.0,<2.0",
+]
 # Background audio player (hold music + ambient cues). Mixes bundled .ogg
 # clips with the outbound PCM stream. Requires numpy for PCM math and
 # soundfile for .ogg decoding.
