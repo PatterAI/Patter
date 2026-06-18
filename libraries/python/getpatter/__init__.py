@@ -383,6 +383,7 @@ from getpatter.providers.telnyx_tts import (  # noqa: E402
     TelnyxTTSVoice,
 )
 from getpatter.providers.gemini_live import (  # noqa: E402
+    GEMINI_LIVE_3_1_FLASH_PREVIEW,
     GeminiLiveApiVersion,
     GeminiLiveEventType,
     GeminiLiveModel,
@@ -600,6 +601,7 @@ __all__ = [
     "ElevenLabsOutputFormat",
     "ElevenLabsWSField",
     "ElevenLabsWSServerError",
+    "GEMINI_LIVE_3_1_FLASH_PREVIEW",
     "GeminiLiveApiVersion",
     "GeminiLiveEventType",
     "GeminiLiveModel",

@@ -30,6 +30,7 @@ class GeminiLiveModel(StrEnum):
     NATIVE_AUDIO_PREVIEW_09_2025 = "gemini-2.5-flash-native-audio-preview-09-2025"
     LIVE_2_5_FLASH_PREVIEW = "gemini-live-2.5-flash-preview"
     LIVE_2_0_FLASH_EXP = "gemini-2.0-flash-exp"
+    FLASH_3_1_LIVE_PREVIEW = "gemini-3.1-flash-live-preview"
 
 
 class GeminiLiveVoice(StrEnum):
@@ -82,6 +83,9 @@ class GeminiLiveEventType(StrEnum):
 DEFAULT_INPUT_SAMPLE_RATE_HZ = GeminiLiveSampleRate.HZ_16000.value
 DEFAULT_OUTPUT_SAMPLE_RATE_HZ = GeminiLiveSampleRate.HZ_24000.value
 
+#: Convenience alias for the default Gemini 3.1 Live model.
+GEMINI_LIVE_3_1_FLASH_PREVIEW: str = GeminiLiveModel.FLASH_3_1_LIVE_PREVIEW.value
+
 
 class GeminiLiveAdapter:
     """Bridges a bidirectional audio stream to Google Gemini Live.
@@ -120,6 +124,7 @@ class GeminiLiveAdapter:
             GeminiLiveSampleRate, int
         ] = GeminiLiveSampleRate.HZ_24000,
         temperature: float = 0.8,
+        api_version: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -130,6 +135,13 @@ class GeminiLiveAdapter:
         self.input_sample_rate = input_sample_rate
         self.output_sample_rate = output_sample_rate
         self.temperature = temperature
+        # Auto-detect API version: legacy native-audio models need v1alpha;
+        # gemini-3.1-flash-live-preview and newer use the SDK default (v1beta).
+        self._api_version: str = api_version or (
+            GeminiLiveApiVersion.V1ALPHA.value
+            if "native-audio" in str(model)
+            else GeminiLiveApiVersion.V1BETA.value
+        )
         self._client: Any = None
         self._session: Any = None
         self._session_cm: Any = None
@@ -162,7 +174,7 @@ class GeminiLiveAdapter:
 
         self._client = genai.Client(
             api_key=self.api_key,
-            http_options={"api_version": GeminiLiveApiVersion.V1ALPHA.value},
+            http_options={"api_version": self._api_version},
         )
 
         speech_config = genai_types.SpeechConfig(
@@ -225,7 +237,7 @@ class GeminiLiveAdapter:
             return
         mime_type = f"audio/pcm;rate={self.input_sample_rate}"
         await self._session.send_realtime_input(
-            media={"data": audio, "mime_type": mime_type},
+            audio={"data": audio, "mime_type": mime_type},
         )
 
     async def send_text(self, text: str) -> None:
