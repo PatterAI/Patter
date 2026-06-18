@@ -106,7 +106,7 @@ export {
 export { TestSession } from "./test-mode";
 export { ElevenLabsConvAIAdapter } from "./providers/elevenlabs-convai";
 export { OpenAIRealtimeAdapter } from "./providers/openai-realtime";
-export { GeminiLiveAdapter, GEMINI_DEFAULT_INPUT_SR, GEMINI_DEFAULT_OUTPUT_SR } from "./providers/gemini-live";
+export { GeminiLiveAdapter, GEMINI_DEFAULT_INPUT_SR, GEMINI_DEFAULT_OUTPUT_SR, GEMINI_LIVE_3_1_FLASH_PREVIEW } from "./providers/gemini-live";
 export type { GeminiLiveEventHandler } from "./providers/gemini-live";
 export { UltravoxRealtimeAdapter, ULTRAVOX_DEFAULT_API_BASE, ULTRAVOX_DEFAULT_SR } from "./providers/ultravox-realtime";
 export type { UltravoxEventHandler } from "./providers/ultravox-realtime";
@@ -258,6 +258,8 @@ export type { Realtime2Options as OpenAIRealtime2Options } from "./engines/opena
 export { OpenAIRealtime2Adapter } from "./providers/openai-realtime-2";
 export { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 export type { ConvAIOptions as ElevenLabsConvAIOptions } from "./engines/elevenlabs";
+export { GeminiLive } from "./engines/gemini";
+export type { GeminiLiveOptions } from "./engines/gemini";
 
 // Tunnel markers.
 export { CloudflareTunnel, Ngrok, Static as StaticTunnel } from "./tunnels";

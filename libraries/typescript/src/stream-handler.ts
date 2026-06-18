@@ -10,6 +10,7 @@
 import { WebSocket as WSWebSocket } from 'ws';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
+import { GeminiLiveAdapter } from './providers/gemini-live';
 import { DeepgramSTT } from './providers/deepgram-stt';
 import { createTTS } from './provider-factory';
 import type { STTAdapter, TTSAdapter, STTTranscript } from './provider-factory';
@@ -38,7 +39,7 @@ import {
   startSpan,
 } from './observability/tracing';
 
-type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
+type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter;
 
 // ---------------------------------------------------------------------------
 // Tool-call preambles (OpenAI Realtime)
@@ -5654,6 +5655,10 @@ export class StreamHandler {
             ? (this.adapter as unknown as { sendFirstMessage: (t: string) => Promise<void> }).sendFirstMessage.bind(this.adapter)
             : this.adapter.sendText.bind(this.adapter);
         await sender(this.deps.agent.firstMessage);
+      } else if (this.adapter instanceof GeminiLiveAdapter) {
+        // Gemini has no dedicated sendFirstMessage; sendText(role=user)
+        // primes the opening turn so the model speaks first.
+        await this.adapter.sendText(this.deps.agent.firstMessage);
       }
       // ElevenLabs ConvAI sends firstMessage via connection config (handled in adapter.connect())
     }
@@ -5683,7 +5688,16 @@ export class StreamHandler {
     interruption: async () => this.onAdapterSpeechInterrupt(),
     error: async (eventData) => this.onAdapterError(eventData),
     function_call: async (eventData) => {
-      if (this.adapter instanceof OpenAIRealtimeAdapter) {
+      if (
+        this.adapter instanceof OpenAIRealtimeAdapter ||
+        this.adapter instanceof GeminiLiveAdapter
+      ) {
+        // GeminiLiveAdapter shares the same function_call event shape
+        // ({call_id, name, arguments}) and exposes sendFunctionResult with
+        // the identical signature, so the OpenAI tool round-trip applies
+        // unchanged. The OpenAI-only niceties inside handleFunctionCall
+        // (reassurance / progress sendText) are themselves instanceof-gated
+        // and silently skipped for Gemini.
         await this.handleFunctionCall(eventData as { call_id: string; name: string; arguments: string });
       } else if (this.adapter instanceof ElevenLabsConvAIAdapter) {
         await this.handleConvAIClientTool(

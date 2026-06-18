@@ -13,6 +13,7 @@ import type { TelemetryClient } from './telemetry/client';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
+import { GeminiLiveAdapter } from './providers/gemini-live';
 import { PlivoAdapter, dropPlivoVoicemail } from './providers/plivo-adapter';
 import { TwilioAdapter } from './providers/twilio-adapter';
 import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
@@ -83,7 +84,7 @@ export interface LocalConfig {
   persistRoot?: string | null;
 }
 
-type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
+type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter;
 
 export const TRANSFER_CALL_TOOL = {
   name: 'transfer_call',
@@ -586,6 +587,26 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   const handoffNames = agent.handoffs ? Object.keys(agent.handoffs) : [];
   if (handoffNames.length > 0) {
     tools.push(buildHandoffTool(handoffNames));
+  }
+  // Gemini Live mode: construct GeminiLiveAdapter from the engine marker's
+  // own credentials/voice/model. Mirrors the ElevenLabs branch above — a
+  // distinct (non-OpenAI) adapter built from the engine's own apiKey — but
+  // placed here because Gemini advertises the same tool list (agent tools +
+  // transfer_call/end_call/handoff) as the OpenAI path.
+  if (agent.provider === 'gemini_live') {
+    if (!engine || engine.kind !== 'gemini_live') {
+      throw new Error(
+        "Gemini Live mode requires `agent.engine = new GeminiLive({...})`.",
+      );
+    }
+    return new GeminiLiveAdapter(engine.apiKey, {
+      ...(agent.model ?? engine.model ? { model: agent.model ?? engine.model } : {}),
+      ...(agent.voice ?? engine.voice ? { voice: agent.voice ?? engine.voice } : {}),
+      ...(agent.language ? { language: agent.language } : {}),
+      ...(engine.temperature !== undefined ? { temperature: engine.temperature } : {}),
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
   }
   const isOpenAIEngine = engine && (engine.kind === 'openai_realtime' || engine.kind === 'openai_realtime_2');
   const openaiKey = isOpenAIEngine ? engine.apiKey : (config.openaiKey ?? '');

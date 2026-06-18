@@ -15,6 +15,7 @@ export type CarrierKind = "twilio" | "telnyx" | "plivo";
 import type { Realtime } from "./engines/openai";
 import type { Realtime2 } from "./engines/openai-2";
 import type { ConvAI } from "./engines/elevenlabs";
+import type { GeminiLive } from "./engines/gemini";
 import type { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import type { Tool as ToolInstance } from "./public-api";
 import type { STTAdapter, TTSAdapter } from "./provider-factory";
@@ -708,13 +709,13 @@ export interface AgentOptions {
    * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,
    * pipeline mode is selected if ``stt`` and ``tts`` are provided.
    */
-  readonly engine?: Realtime | Realtime2 | ConvAI;
+  readonly engine?: Realtime | Realtime2 | ConvAI | GeminiLive;
   /**
    * Provider mode. Normally derived from ``engine`` / ``stt`` + ``tts``. Pass
    * ``'pipeline'`` explicitly when building a pipeline-mode agent without
    * an engine instance.
    */
-  readonly provider?: 'openai_realtime' | 'elevenlabs_convai' | 'pipeline';
+  readonly provider?: 'openai_realtime' | 'elevenlabs_convai' | 'gemini_live' | 'pipeline';
   /** Pre-instantiated STT adapter (e.g. ``new DeepgramSTT({ apiKey })``). */
   readonly stt?: STTAdapter;
   /** Pre-instantiated TTS adapter (e.g. ``new ElevenLabsTTS({ apiKey })``). */
