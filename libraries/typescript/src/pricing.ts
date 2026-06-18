@@ -623,6 +623,7 @@ export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
     'gemini-2.5-pro': { input: 1.25, output: 10.0 },
     'gemini-2.5-flash': { input: 0.30, output: 2.50 },
     'gemini-live-2.5-flash-native-audio': { input: 0.30, output: 2.50 },
+    'gemini-3.1-flash-live-preview': { input: 0.30, output: 2.50 },
   },
   groq: {
     // Rates as of 2026-05-08; verify against groq.com/pricing.

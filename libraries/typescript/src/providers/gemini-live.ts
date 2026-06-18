@@ -22,6 +22,9 @@ import { sanitizeGeminiSchema } from './google-llm';
 export const GEMINI_DEFAULT_INPUT_SR = 16000;
 export const GEMINI_DEFAULT_OUTPUT_SR = 24000;
 
+/** Model ID for Gemini 3.1 Flash Live (audio-in → audio-out, emotion-aware). */
+export const GEMINI_LIVE_3_1_FLASH_PREVIEW = 'gemini-3.1-flash-live-preview';
+
 /** Callback signature for events emitted by {@link GeminiLiveAdapter}. */
 export type GeminiLiveEventHandler = (
   type:
@@ -44,10 +47,14 @@ interface GeminiLiveOptions {
   inputSampleRate?: number;
   outputSampleRate?: number;
   temperature?: number;
+  /** Gemini API version. Auto-detected from model name when omitted:
+   *  'native-audio' models → 'v1alpha'; all others → SDK default (v1beta). */
+  apiVersion?: string;
 }
 
 /** Realtime adapter for Google's Gemini Live native-audio API. */
 export class GeminiLiveAdapter {
+  private readonly options: GeminiLiveOptions;
   private readonly model: string;
   private readonly voice: string;
   private readonly instructions: string;
@@ -63,6 +70,8 @@ export class GeminiLiveAdapter {
   private receiveLoop: Promise<void> | null = null;
   private handlers: GeminiLiveEventHandler[] = [];
   private running = false;
+  private _readyResolve: (() => void) | null = null;
+  private readonly _ready: Promise<void>;
   /**
    * Tracks call_id -> function name so tool responses can be sent back with
    * the correct `name` field (Gemini expects the original function name,
@@ -74,6 +83,7 @@ export class GeminiLiveAdapter {
     private readonly apiKey: string,
     options: GeminiLiveOptions = {},
   ) {
+    this.options = options;
     // gemini-2.0-flash-exp was experimental preview retired Dec 2024.
     // gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
     // Current native-audio live model (v1alpha-only) is the dated preview.
@@ -87,6 +97,9 @@ export class GeminiLiveAdapter {
     this.inputSampleRate = options.inputSampleRate ?? GEMINI_DEFAULT_INPUT_SR;
     this.outputSampleRate = options.outputSampleRate ?? GEMINI_DEFAULT_OUTPUT_SR;
     this.temperature = options.temperature ?? 0.8;
+    this._ready = new Promise<void>((resolve) => {
+      this._readyResolve = resolve;
+    });
   }
 
   /** Lazily import @google/genai, open a Live session, and start the receive loop. */
@@ -108,10 +121,14 @@ export class GeminiLiveAdapter {
     }
 
     const { GoogleGenAI } = genaiModule;
-    // Native-audio models require the v1alpha endpoint — see module doc.
+    // Auto-detect API version: legacy native-audio models require v1alpha;
+    // gemini-3.1-flash-live-preview and newer work on the SDK default (v1beta).
+    const apiVersion =
+      this.options?.apiVersion ??
+      (this.model.includes('native-audio') ? 'v1alpha' : undefined);
     this.client = new GoogleGenAI({
       apiKey: this.apiKey,
-      httpOptions: { apiVersion: 'v1alpha' },
+      ...(apiVersion ? { httpOptions: { apiVersion } } : {}),
     });
 
     const config: Record<string, unknown> = {
@@ -158,6 +175,16 @@ export class GeminiLiveAdapter {
     this.receiveLoop = this.pumpReceive().catch((err) => {
       getLogger().error(`Gemini Live receive loop error: ${String(err)}`);
     });
+
+    // Block until the receive loop is active (session established).
+    // Timeout after 8 s — same budget as the parked-connection guard in
+    // OpenAIRealtime2Adapter so callers get consistent failure behaviour.
+    await Promise.race([
+      this._ready,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Gemini Live connect: session ready timeout')), 8000),
+      ),
+    ]);
   }
 
   /** Send a PCM audio chunk to Gemini as base64 inline data. */
@@ -166,7 +193,7 @@ export class GeminiLiveAdapter {
     const mime = `audio/pcm;rate=${this.inputSampleRate}`;
     const sess = this.session as { sendRealtimeInput?: (args: unknown) => unknown };
     const result = sess.sendRealtimeInput?.({
-      media: { data: pcm.toString('base64'), mimeType: mime },
+      audio: { data: pcm.toString('base64'), mimeType: mime },
     });
     if (result instanceof Promise) {
       void result.catch((err) =>
@@ -237,8 +264,13 @@ export class GeminiLiveAdapter {
     const sess = this.session as { receive?: () => AsyncIterable<unknown> };
     if (typeof sess.receive !== 'function') {
       getLogger().warn('Gemini Live: session.receive() not available');
+      this._readyResolve?.();
+      this._readyResolve = null;
       return;
     }
+    // Signal that the session is established and ready for audio.
+    this._readyResolve?.();
+    this._readyResolve = null;
     try {
       for await (const response of sess.receive()) {
         if (!this.running) break;
