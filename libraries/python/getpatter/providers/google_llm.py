@@ -321,13 +321,25 @@ _GEMINI_SCHEMA_KEYS = frozenset(
 
 
 def _sanitize_gemini_schema(schema):
-    """Recursively strip JSON-Schema keys Gemini's proto Schema rejects."""
+    """Recursively strip JSON-Schema keys Gemini's proto Schema rejects.
+
+    ``properties`` is a map of PROPERTY NAME -> subschema; the names are
+    arbitrary (query/to/subject), NOT schema keywords, so they must be
+    preserved while only the subschema values are sanitized. Recursing
+    generically strips the names, leaving ``properties={}`` while ``required``
+    still lists them -> Gemini Live rejects the whole setup (WS close 1007:
+    "required[0]: property is not defined"), which silenced the demo line.
+    """
     if isinstance(schema, dict):
-        return {
-            k: _sanitize_gemini_schema(v)
-            for k, v in schema.items()
-            if k in _GEMINI_SCHEMA_KEYS
-        }
+        out: dict = {}
+        for k, v in schema.items():
+            if k not in _GEMINI_SCHEMA_KEYS:
+                continue
+            if k == "properties" and isinstance(v, dict):
+                out[k] = {pn: _sanitize_gemini_schema(ps) for pn, ps in v.items()}
+            else:
+                out[k] = _sanitize_gemini_schema(v)
+        return out
     if isinstance(schema, list):
         return [_sanitize_gemini_schema(v) for v in schema]
     return schema
