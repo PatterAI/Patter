@@ -55,7 +55,12 @@ function makeGenAIMock(
         live: {
           connect: vi.fn(async (args: { callbacks?: LiveCbs }) => {
             holder.cbs = args.callbacks ?? null;
+            // Mirror the real handshake: socket opens, THEN the server sends
+            // setupComplete. connect()'s ready-gate must key off setupComplete
+            // (not onopen) so the caller never sends a turn before the session
+            // is configured — see the prod-silence regression below.
             args.callbacks?.onopen?.();
+            args.callbacks?.onmessage?.({ setupComplete: {} });
             return session;
           }),
         },
@@ -89,6 +94,47 @@ describe('[mocked] GeminiLiveAdapter', () => {
     expect(holder.cbs).not.toBeNull();
     expect(typeof holder.cbs!.onmessage).toBe('function');
     expect(typeof holder.cbs!.onopen).toBe('function');
+    await adapter.close();
+  });
+
+  it('connect() waits for setupComplete, not merely onopen (prod silence fix)', async () => {
+    // REGRESSION (prod 2026-06-18): resolving the ready-gate on onopen let the
+    // StreamHandler send the firstMessage before Gemini processed setup, so the
+    // server silently dropped it and the agent never spoke. connect() must
+    // block until setupComplete. Verified empirically: a user text turn sent
+    // pre-setup yields 0 audio bytes; sent post-setup yields a full reply.
+    let cbs: LiveCbs | null = null;
+    const session = {
+      sendRealtimeInput: vi.fn(),
+      sendClientContent: vi.fn(),
+      sendToolResponse: vi.fn(),
+      close: vi.fn(),
+    };
+    vi.doMock('@google/genai', () => ({
+      GoogleGenAI: vi.fn().mockImplementation(() => ({
+        live: {
+          connect: vi.fn(async (args: { callbacks?: LiveCbs }) => {
+            cbs = args.callbacks ?? null;
+            args.callbacks?.onopen?.(); // socket open — but NOT yet configured
+            return session;
+          }),
+        },
+      })),
+    }));
+
+    const adapter = new GeminiLiveAdapter('test-key', { model: GEMINI_LIVE_3_1_FLASH_PREVIEW });
+    let resolved = false;
+    const p = adapter.connect().then(() => { resolved = true; });
+
+    // onopen has fired; setupComplete has NOT. connect() must still be pending.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(resolved).toBe(false);
+    expect(cbs).not.toBeNull();
+
+    // Server signals setup done -> connect() resolves.
+    cbs!.onmessage!({ setupComplete: {} });
+    await p;
+    expect(resolved).toBe(true);
     await adapter.close();
   });
 
