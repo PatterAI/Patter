@@ -238,9 +238,8 @@ export class GeminiLiveAdapter {
           // Socket open — but the session is NOT yet configured. Do NOT
           // unblock connect() here: the caller would send its firstMessage /
           // first audio before the server processes setup, and the server
-          // SILENTLY DROPS pre-setup turns (prod 2026-06-18: agent never
-          // spoke). The ready-gate resolves on `setupComplete` instead
-          // (handled in handleServerMessage).
+          // SILENTLY DROPS pre-setup turns. The ready-gate resolves on
+          // `setupComplete` instead (handled in handleServerMessage).
           getLogger().debug('Gemini Live: socket open, awaiting setupComplete');
         },
         onmessage: (msg: unknown) => {
