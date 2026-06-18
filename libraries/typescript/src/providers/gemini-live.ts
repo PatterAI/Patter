@@ -18,9 +18,36 @@
 
 import { getLogger } from '../logger';
 import { sanitizeGeminiSchema } from './google-llm';
+import {
+  mulawToPcm16,
+  pcm16ToMulaw,
+  StatefulResampler,
+} from '../audio/transcoding';
 
 export const GEMINI_DEFAULT_INPUT_SR = 16000;
 export const GEMINI_DEFAULT_OUTPUT_SR = 24000;
+
+/**
+ * The carrier (Twilio/Telnyx media stream) always speaks mulaw 8 kHz in
+ * BOTH directions. Gemini Live wants PCM-16-LE at 16 kHz in and emits
+ * PCM-16-LE at 24 kHz out, so the adapter transcodes on both legs.
+ */
+const CARRIER_SAMPLE_RATE = 8000;
+
+/** One mulaw frame Twilio's playout scheduler expects: 20 ms @ 8 kHz = 160 bytes. */
+const MULAW_FRAME_BYTES = 160;
+
+/**
+ * Inbound gain boost applied to telephony audio before sending to Gemini.
+ *
+ * Telephony-band audio decoded from mulaw sits around ±8000 amplitude
+ * (~-12 dB peak), well below the ±16000-±24000 of the studio audio that
+ * server-side VAD is calibrated against — so without a boost inbound
+ * utterances can sit under the speech threshold. 2× brings the level into
+ * the expected band; samples are clamped to ±32767 to avoid Int16 wrap.
+ * Mirrors the OpenAI Realtime 2 adapter. Tunable for the live phone test.
+ */
+const INBOUND_GAIN = 2;
 
 /** Model ID for Gemini 3.1 Flash Live (audio-in → audio-out, emotion-aware). */
 export const GEMINI_LIVE_3_1_FLASH_PREVIEW = 'gemini-3.1-flash-live-preview';
@@ -68,6 +95,29 @@ export class GeminiLiveAdapter {
   private client: unknown = null;
   private session: unknown = null;
   private receiveLoop: Promise<void> | null = null;
+
+  /**
+   * Inbound (carrier → Gemini) upsampler: mulaw 8 kHz is decoded to PCM-16
+   * @ 8 kHz then resampled up to the model input rate (16 kHz default).
+   * Created lazily per session.
+   *
+   * CRITICAL: this MUST be a separate instance from the outbound chain
+   * below. The resamplers carry phase/history state across chunks; sharing
+   * one across both directions interleaves unrelated sample streams and
+   * corrupts the audio on BOTH legs.
+   */
+  private inboundResampler: StatefulResampler | null = null;
+
+  /**
+   * Outbound (Gemini → carrier) downsampling chain: PCM-16 @ 24 kHz →
+   * 16 kHz → 8 kHz. We chain through 16 kHz instead of a direct 24k→8k
+   * decimation because the 16k→8k stage applies a 5-tap FIR anti-alias
+   * filter; without it, model voice energy above 4 kHz aliases down into
+   * the audible band and is heard as raspy/scratchy speech. Created lazily
+   * per session, separate from the inbound resampler (see above).
+   */
+  private outboundResampler24To16: StatefulResampler | null = null;
+  private outboundResampler16To8: StatefulResampler | null = null;
   private handlers: GeminiLiveEventHandler[] = [];
   private running = false;
   private _readyResolve: (() => void) | null = null;
@@ -179,27 +229,77 @@ export class GeminiLiveAdapter {
     // Block until the receive loop is active (session established).
     // Timeout after 8 s — same budget as the parked-connection guard in
     // OpenAIRealtime2Adapter so callers get consistent failure behaviour.
-    await Promise.race([
-      this._ready,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Gemini Live connect: session ready timeout')), 8000),
-      ),
-    ]);
+    //
+    // On timeout, tear down the already-opened session + background receive
+    // pump BEFORE rejecting — otherwise a slow handshake leaks a live
+    // WebSocket and a never-awaited receiveLoop for the rest of the process.
+    try {
+      await Promise.race([
+        this._ready,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Gemini Live connect: session ready timeout')), 8000),
+        ),
+      ]);
+    } catch (err) {
+      await this.close();
+      throw err;
+    }
   }
 
-  /** Send a PCM audio chunk to Gemini as base64 inline data. */
-  sendAudio(pcm: Buffer): void {
+  /**
+   * Send a chunk of carrier audio to Gemini.
+   *
+   * The carrier always hands us mulaw 8 kHz (Twilio/Telnyx media stream),
+   * but Gemini Live only accepts PCM-16-LE at its configured input rate
+   * (16 kHz default). We transcode mulaw8 → PCM16 → upsample to
+   * `inputSampleRate` and send it as base64 inline data with the matching
+   * MIME rate. Without this conversion the model receives mulaw bytes
+   * labelled as 16 kHz PCM and the call is pure static.
+   */
+  sendAudio(mulaw8: Buffer): void {
     if (!this.session || !this.running) return;
+    const pcmIn = this.transcodeInboundMulaw8ToPcm(mulaw8);
+    if (pcmIn.length === 0) return; // resampler warmup — nothing to send yet
     const mime = `audio/pcm;rate=${this.inputSampleRate}`;
     const sess = this.session as { sendRealtimeInput?: (args: unknown) => unknown };
     const result = sess.sendRealtimeInput?.({
-      audio: { data: pcm.toString('base64'), mimeType: mime },
+      audio: { data: pcmIn.toString('base64'), mimeType: mime },
     });
     if (result instanceof Promise) {
       void result.catch((err) =>
         getLogger().warn(`Gemini Live sendAudio error: ${String(err)}`),
       );
     }
+  }
+
+  /**
+   * mulaw 8 kHz Buffer → PCM-16-LE Buffer at `inputSampleRate`.
+   *
+   * Decodes mulaw to PCM-16 @ 8 kHz, applies the {@link INBOUND_GAIN} boost
+   * (clamped to Int16), then upsamples 8 kHz → `inputSampleRate` via the
+   * lazily-created inbound {@link StatefulResampler} so chunk boundaries do
+   * not click. When `inputSampleRate === 8000` no resampling is needed.
+   */
+  private transcodeInboundMulaw8ToPcm(mulaw8: Buffer): Buffer {
+    const pcm8 = mulawToPcm16(mulaw8);
+    const sampleCount = pcm8.length / 2;
+    if (sampleCount === 0) return Buffer.alloc(0);
+
+    const boosted = Buffer.allocUnsafe(pcm8.length);
+    for (let i = 0; i < sampleCount; i++) {
+      const raw = pcm8.readInt16LE(i * 2) * INBOUND_GAIN;
+      boosted.writeInt16LE(Math.max(-32768, Math.min(32767, raw)), i * 2);
+    }
+
+    if (this.inputSampleRate === CARRIER_SAMPLE_RATE) return boosted;
+
+    if (!this.inboundResampler) {
+      this.inboundResampler = new StatefulResampler({
+        srcRate: CARRIER_SAMPLE_RATE,
+        dstRate: this.inputSampleRate,
+      });
+    }
+    return this.inboundResampler.process(boosted);
   }
 
   /** Send a text turn to Gemini and mark the turn complete. */
@@ -301,7 +401,15 @@ export class GeminiLiveAdapter {
         if (sc) {
           for (const part of sc.modelTurn?.parts ?? []) {
             if (part.inlineData?.data) {
-              await this.emit('audio', Buffer.from(part.inlineData.data, 'base64'));
+              // Gemini emits PCM-16-LE at outputSampleRate (24 kHz default);
+              // the carrier wants mulaw 8 kHz in 20 ms (160-byte) frames.
+              // Transcode + split so Twilio's playout scheduler does not
+              // stall on an oversized frame.
+              const mulaw = this.transcodeOutboundPcmToMulaw8(part.inlineData.data);
+              for (let off = 0; off < mulaw.length; off += MULAW_FRAME_BYTES) {
+                const frame = mulaw.subarray(off, Math.min(off + MULAW_FRAME_BYTES, mulaw.length));
+                await this.emit('audio', Buffer.from(frame));
+              }
             }
             if (part.text) await this.emit('transcript_output', part.text);
           }
@@ -343,6 +451,39 @@ export class GeminiLiveAdapter {
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * Base64 PCM-16-LE @ `outputSampleRate` → mulaw 8 kHz Buffer.
+   *
+   * Resamples `outputSampleRate` → 16 kHz → 8 kHz through the lazily-created
+   * outbound resampler pair (anti-aliased 16k→8k stage), then mulaw-encodes.
+   * The resamplers are reused across all deltas in the session so phase
+   * carries across chunk boundaries and there are no per-frame clicks. When
+   * `outputSampleRate === 8000` only the mulaw encode is needed.
+   */
+  private transcodeOutboundPcmToMulaw8(deltaB64: string): Buffer {
+    const pcm = Buffer.from(deltaB64, 'base64');
+    if (pcm.length === 0) return Buffer.alloc(0);
+
+    if (this.outputSampleRate === CARRIER_SAMPLE_RATE) {
+      return pcm16ToMulaw(pcm);
+    }
+
+    if (!this.outboundResampler24To16) {
+      this.outboundResampler24To16 = new StatefulResampler({
+        srcRate: this.outputSampleRate,
+        dstRate: 16000,
+      });
+      this.outboundResampler16To8 = new StatefulResampler({
+        srcRate: 16000,
+        dstRate: CARRIER_SAMPLE_RATE,
+      });
+    }
+    const pcm16 = this.outboundResampler24To16.process(pcm);
+    const pcm8 = this.outboundResampler16To8!.process(pcm16);
+    if (pcm8.length === 0) return Buffer.alloc(0);
+    return pcm16ToMulaw(pcm8);
   }
 
   /** Close the Gemini Live session and stop the receive loop. */
