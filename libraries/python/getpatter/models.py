@@ -32,7 +32,9 @@ logger = logging.getLogger("getpatter")
 # string union ``'openai_realtime' | 'elevenlabs_convai' | 'pipeline'`` in
 # ``types.ts``. Tightened from a free ``str`` so editors autocomplete and
 # typos surface at type-check time instead of at call time.
-ProviderMode = Literal["openai_realtime", "elevenlabs_convai", "pipeline"]
+ProviderMode = Literal[
+    "openai_realtime", "elevenlabs_convai", "gemini_live", "pipeline"
+]
 
 
 @dataclass(frozen=True)

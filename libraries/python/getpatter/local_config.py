@@ -13,6 +13,7 @@ class LocalConfig:
     plivo_auth_token: str = ""
     openai_key: str = ""
     elevenlabs_key: str = ""
+    google_key: str = ""
     deepgram_key: str = ""
     cartesia_key: str = ""
     rime_key: str = ""

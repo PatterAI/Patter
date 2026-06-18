@@ -1894,6 +1894,7 @@ class Patter:
         # --- Engine dispatch ---
         openai_engine_key: str = ""
         elevenlabs_engine_key: str = ""
+        gemini_engine_key: str = ""
         # Engine-supplied OpenAI Realtime extras propagated to Agent so the
         # stream-handler can forward them to ``OpenAIRealtimeAdapter``.
         openai_realtime_reasoning_effort: str | None = None
@@ -1934,6 +1935,8 @@ class Patter:
                     )
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
+            elif engine_kind == "gemini_live":
+                gemini_engine_key = engine_fields.get("api_key", "")
         elif provider is not None:
             # User explicitly selected the mode via provider= (TS parity); the
             # value was validated above. Keep it as the resolved mode.
@@ -1959,6 +1962,10 @@ class Patter:
         if elevenlabs_engine_key and not self._local_config.elevenlabs_key:
             self._local_config = replace(
                 self._local_config, elevenlabs_key=elevenlabs_engine_key
+            )
+        if gemini_engine_key and not self._local_config.google_key:
+            self._local_config = replace(
+                self._local_config, google_key=gemini_engine_key
             )
 
         if (
@@ -2132,6 +2139,7 @@ class Patter:
     def _unpack_engine(engine: Any) -> tuple[str, dict]:
         """Convert an engine instance to ``(kind, {voice, model, api_key, agent_id})``."""
         from getpatter.engines.elevenlabs import ConvAI as _ConvAI
+        from getpatter.engines.gemini import GeminiLive as _GeminiLive
         from getpatter.engines.openai import Realtime as _Realtime
         from getpatter.engines.openai_realtime_2 import Realtime2 as _Realtime2
 
@@ -2163,9 +2171,18 @@ class Patter:
                 "agent_id": engine.agent_id,
                 "voice": engine.voice,
             }
+        if isinstance(engine, _GeminiLive):
+            return "gemini_live", {
+                "api_key": engine.api_key,
+                "voice": engine.voice,
+                "model": engine.model,
+                "language": engine.language,
+                "temperature": engine.temperature,
+            }
         raise TypeError(
-            "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), or "
-            f"ElevenLabsConvAI(...) instance, got {type(engine).__name__}"
+            "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), "
+            "ElevenLabsConvAI(...), or GeminiLive(...) instance, got "
+            f"{type(engine).__name__}"
         )
 
     @staticmethod

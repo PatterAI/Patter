@@ -5,12 +5,18 @@ Patter's adapter surface — ``connect`` / ``send_audio`` / ``receive_events`` /
 so callers can swap providers without touching the handler. Session lifecycle
 (reconnects, resumes) is managed by Patter's handlers, not by the adapter.
 
-NOTE: Native-audio Gemini Live models are **v1alpha-only**. The client must
-pass ``http_options={"api_version": "v1alpha"}`` when constructing the genai
-client (see :meth:`GeminiLiveAdapter.connect`). When Google promotes native
-audio to GA, move the default to ``v1beta`` or ``v1`` and update the default
-``model`` below accordingly.
+API version is auto-detected from the model name (see :meth:`__init__`): legacy
+native-audio Gemini Live models require ``v1alpha`` and are detected by the
+``native-audio`` substring, while ``gemini-3.1-flash-live-preview`` and newer
+non-native-audio models use the SDK default ``v1beta``. Pass ``api_version=``
+explicitly to override the auto-detection.
 See: https://ai.google.dev/gemini-api/docs/live
+
+Audio codec transcoding (mirrors :class:`OpenAIRealtime2Adapter`): the carrier
+always speaks mu-law 8 kHz, so :meth:`send_audio` decodes carrier mu-law to
+PCM16 and upsamples to ``input_sample_rate`` before sending, and
+:meth:`receive_events` resamples Gemini's PCM output down to mu-law 8 kHz split
+into 20 ms / 160-byte frames before yielding the ``audio`` event.
 """
 
 from __future__ import annotations
@@ -18,8 +24,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import struct
 from enum import IntEnum, StrEnum
 from typing import Any, AsyncIterator, Union
+
+from getpatter.audio.transcoding import (
+    StatefulResampler,
+    mulaw_to_pcm16,
+    pcm16_to_mulaw,
+)
 
 logger = logging.getLogger("getpatter.gemini_live")
 
@@ -78,13 +91,30 @@ class GeminiLiveEventType(StrEnum):
 
 # Default PCM audio format used on the wire for Gemini Live.
 # Gemini Live requires PCM16 mono; sample-rate negotiation happens via
-# ``speech_config``. Patter callers should resample to 16 kHz before calling
-# :meth:`GeminiLiveAdapter.send_audio`.
+# ``speech_config``. The adapter transcodes carrier mu-law 8 kHz to/from these
+# rates internally (see :meth:`GeminiLiveAdapter.send_audio` /
+# :meth:`GeminiLiveAdapter.receive_events`).
 DEFAULT_INPUT_SAMPLE_RATE_HZ = GeminiLiveSampleRate.HZ_16000.value
 DEFAULT_OUTPUT_SAMPLE_RATE_HZ = GeminiLiveSampleRate.HZ_24000.value
 
 #: Convenience alias for the default Gemini 3.1 Live model.
 GEMINI_LIVE_3_1_FLASH_PREVIEW: str = GeminiLiveModel.FLASH_3_1_LIVE_PREVIEW.value
+
+# Telephony carrier audio is always mu-law (G.711) at 8 kHz. Both transcode
+# directions pivot through this rate.
+CARRIER_SAMPLE_RATE = 8000
+
+# 20 ms of mu-law at 8 kHz = 160 bytes. Splitting outbound audio into 160-byte
+# frames gives the StreamHandler → bridge.send_audio chain the cadence Twilio's
+# playout scheduler expects; one big frame stalls playout (mirrors
+# ``OpenAIRealtime2Adapter._MULAW_FRAME_BYTES``).
+MULAW_FRAME_BYTES = 160
+
+# Gain boost applied to inbound telephony audio before upsampling. Gemini's VAD,
+# like the OpenAI GA server VAD, is calibrated against studio-quality audio;
+# telephony-band mu-law typically sits at ~-12 dB peak relative to that. 2x gain
+# lifts the signal into the VAD's expected range. Tunable for the live test.
+INBOUND_GAIN = 2
 
 
 class GeminiLiveAdapter:
@@ -150,6 +180,15 @@ class GeminiLiveAdapter:
         # with the correct ``name`` field (Gemini expects the original function
         # name, not the call_id).
         self._pending_tool_calls: dict[str, str] = {}
+        # SEPARATE resampler instances per direction, created lazily per
+        # session. Sharing a single ``StatefulResampler`` across inbound and
+        # outbound corrupts both: ``audioop.ratecv`` carries filter state, so
+        # interleaving 8k→16k and 24k→8k frames through one instance produces
+        # garbled audio in both directions (matches the OpenAI adapter's design
+        # of distinct inbound/outbound resamplers).
+        self._inbound_resampler: StatefulResampler | None = None
+        self._outbound_resampler_24to16: StatefulResampler | None = None
+        self._outbound_resampler_16to8: StatefulResampler | None = None
 
     def __repr__(self) -> str:
         return (
@@ -231,13 +270,45 @@ class GeminiLiveAdapter:
         self._session = await self._session_cm.__aenter__()
         self._running = True
 
+    def _transcode_inbound_mulaw8_to_pcm(self, mulaw8: bytes) -> bytes:
+        """Carrier mu-law 8 kHz → PCM16 mono at ``input_sample_rate``.
+
+        Decodes mu-law to PCM16 @ 8 kHz, applies the named :data:`INBOUND_GAIN`
+        boost (clamped to Int16 to avoid wrap-around), then upsamples
+        8 kHz → ``input_sample_rate`` via the dedicated inbound resampler. When
+        ``input_sample_rate == 8000`` the upsample is skipped.
+        """
+        pcm8 = mulaw_to_pcm16(mulaw8)
+        num_samples = len(pcm8) // 2
+        if num_samples == 0:
+            return b""
+        boosted = bytearray(num_samples * 2)
+        for i in range(num_samples):
+            sample = struct.unpack_from("<h", pcm8, i * 2)[0] * INBOUND_GAIN
+            struct.pack_into("<h", boosted, i * 2, max(-32768, min(32767, sample)))
+        if int(self.input_sample_rate) == CARRIER_SAMPLE_RATE:
+            return bytes(boosted)
+        if self._inbound_resampler is None:
+            self._inbound_resampler = StatefulResampler(
+                src_rate=CARRIER_SAMPLE_RATE, dst_rate=int(self.input_sample_rate)
+            )
+        return self._inbound_resampler.process(bytes(boosted))
+
     async def send_audio(self, audio: bytes) -> None:
-        """Send a PCM16 mono chunk at ``input_sample_rate`` Hz."""
+        """Send a carrier mu-law 8 kHz chunk, transcoded to PCM for Gemini.
+
+        Mirrors :class:`OpenAIRealtime2Adapter`: the inbound telephony audio is
+        mu-law 8 kHz, so it is decoded + gain-boosted + upsampled to
+        ``input_sample_rate`` before being sent in the ``audio`` field.
+        """
         if self._session is None:
             return
+        pcm = self._transcode_inbound_mulaw8_to_pcm(audio)
+        if not pcm:
+            return  # resampler warmup — no whole frame yet
         mime_type = f"audio/pcm;rate={self.input_sample_rate}"
         await self._session.send_realtime_input(
-            audio={"data": audio, "mime_type": mime_type},
+            audio={"data": pcm, "mime_type": mime_type},
         )
 
     async def send_text(self, text: str) -> None:
@@ -273,11 +344,39 @@ class GeminiLiveAdapter:
         # explicit cancel is not part of the v1alpha wire protocol.
         logger.debug("Gemini Live: cancel_response is implicit via VAD")
 
+    def _transcode_outbound_pcm_to_mulaw8(self, pcm: bytes) -> bytes:
+        """Gemini PCM16 @ ``output_sample_rate`` → carrier mu-law 8 kHz.
+
+        Mirrors :class:`OpenAIRealtime2Adapter`: resamples
+        ``output_sample_rate`` → 16 kHz → 8 kHz via a SEPARATE pair of
+        resamplers (the 16k→8k stage applies audioop's anti-alias FIR, avoiding
+        raspy speech), then mu-law-encodes. When ``output_sample_rate == 8000``
+        only the mu-law encode runs.
+        """
+        if not pcm:
+            return b""
+        if int(self.output_sample_rate) == CARRIER_SAMPLE_RATE:
+            return pcm16_to_mulaw(pcm)
+        if self._outbound_resampler_24to16 is None:
+            self._outbound_resampler_24to16 = StatefulResampler(
+                src_rate=int(self.output_sample_rate), dst_rate=16000
+            )
+            self._outbound_resampler_16to8 = StatefulResampler(
+                src_rate=16000, dst_rate=CARRIER_SAMPLE_RATE
+            )
+        pcm16 = self._outbound_resampler_24to16.process(pcm)
+        pcm8 = self._outbound_resampler_16to8.process(pcm16)  # type: ignore[union-attr]
+        if not pcm8:
+            return b""
+        return pcm16_to_mulaw(pcm8)
+
     async def receive_events(self) -> AsyncIterator[tuple[str, Any]]:
         """Yield ``(event_type, payload)`` tuples.
 
         Event types:
-            ``audio`` — ``bytes`` of PCM16 mono audio at ``output_sample_rate``
+            ``audio`` — ``bytes`` of carrier mu-law 8 kHz audio, one 20 ms /
+                160-byte frame per yield (transcoded from Gemini's
+                ``output_sample_rate`` PCM)
             ``transcript_output`` — partial transcript text (if enabled)
             ``function_call`` — ``{"call_id", "name", "arguments"}``
             ``response_done`` — server indicated turn completion
@@ -297,7 +396,14 @@ class GeminiLiveAdapter:
                         for part in getattr(model_turn, "parts", []) or []:
                             inline = getattr(part, "inline_data", None)
                             if inline is not None and getattr(inline, "data", None):
-                                yield (GeminiLiveEventType.AUDIO.value, inline.data)
+                                mulaw = self._transcode_outbound_pcm_to_mulaw8(
+                                    inline.data
+                                )
+                                for off in range(0, len(mulaw), MULAW_FRAME_BYTES):
+                                    yield (
+                                        GeminiLiveEventType.AUDIO.value,
+                                        mulaw[off : off + MULAW_FRAME_BYTES],
+                                    )
                             text = getattr(part, "text", None)
                             if text:
                                 yield (
@@ -369,3 +475,6 @@ class GeminiLiveAdapter:
                 self._session = None
         self._client = None
         self._pending_tool_calls.clear()
+        self._inbound_resampler = None
+        self._outbound_resampler_24to16 = None
+        self._outbound_resampler_16to8 = None
