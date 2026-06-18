@@ -129,9 +129,7 @@ async def test_receive_transcodes_pcm24_to_mulaw8_20ms_frames():
     import math
 
     # Build a 20 ms 200 Hz sine at 24 kHz: 480 samples, PCM16-LE.
-    samples = [
-        int(8000 * math.sin(2 * math.pi * 200 * n / 24000)) for n in range(480)
-    ]
+    samples = [int(8000 * math.sin(2 * math.pi * 200 * n / 24000)) for n in range(480)]
     pcm24 = b"".join(struct.pack("<h", s) for s in samples)
     assert len(pcm24) == 960
 

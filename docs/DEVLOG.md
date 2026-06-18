@@ -2,6 +2,63 @@
 
 ## Log
 
+### [2026-06-18] — Gemini Live Python parity: audio codec transcode + `GeminiLive` marker
+
+**Type:** feat + fix
+**Branch:** feat/gemini-3.1-live-demo
+
+**What it does:**
+Brings the Python SDK to parity with the TS Gemini Live work. (1) `GeminiLiveAdapter`
+now transcodes carrier audio in BOTH directions, mirroring `OpenAIRealtime2Adapter`:
+`send_audio` decodes carrier mu-law 8 kHz → PCM16, applies a 2x inbound VAD gain, and
+upsamples to `input_sample_rate` (16 kHz) before sending; `receive_events` resamples
+Gemini's PCM output (24 kHz) → 16 kHz → 8 kHz and mu-law-encodes it, yielding one
+160-byte / 20 ms `audio` frame at a time so Twilio's playout scheduler doesn't stall.
+(2) Adds the `gemini-3.1-flash-live-preview` pricing row under `google` (without it
+Python billed $0 for the model). (3) Adds the `GeminiLive` engine marker so callers can
+pass `engine=GeminiLive(...)` to `Patter.agent()`, wired through `_unpack_engine`,
+`ProviderMode`, `LocalConfig.google_key`, and the `__init__` exports.
+
+**Implementation details:**
+- Separate `StatefulResampler` instances per direction (inbound 8k→16k, outbound
+  24k→16k + 16k→8k), created lazily per session and cleared in `close()`. Sharing one
+  instance corrupts both directions because `audioop.ratecv` carries filter state.
+- The 16k→8k outbound stage uses audioop's anti-alias FIR (avoids raspy speech); the
+  inbound gain is a named `INBOUND_GAIN` constant, clamped to Int16.
+- Carrier rate / frame size / gain are named constants (`CARRIER_SAMPLE_RATE`,
+  `MULAW_FRAME_BYTES`, `INBOUND_GAIN`). When a configured rate already equals 8 kHz the
+  resample is skipped and only the mu-law codec runs.
+- Module docstring updated: the stale "native-audio is v1alpha-only / client must pass
+  v1alpha" note now describes the model-name auto-detect (v1beta default).
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `libraries/python/getpatter/providers/gemini_live.py` | inbound/outbound transcode + constants + docstring |
+| `libraries/python/getpatter/pricing.py` | `gemini-3.1-flash-live-preview` row under `google` |
+| `libraries/python/getpatter/engines/gemini.py` | NEW — `GeminiLive` marker |
+| `libraries/python/getpatter/engines/__init__.py` | export `gemini` |
+| `libraries/python/getpatter/__init__.py` | flat alias + `__all__` for `GeminiLive` |
+| `libraries/python/getpatter/client.py` | `_unpack_engine` gemini branch + key backfill |
+| `libraries/python/getpatter/models.py` | `ProviderMode` += `gemini_live` |
+| `libraries/python/getpatter/local_config.py` | `google_key` field |
+| `libraries/python/tests/test_gemini_live.py` | 4 new mocked tests (real transcode + marker dispatch) |
+
+**Tests added:**
+- `test_send_audio_transcodes_carrier_mulaw8_to_pcm16k` — real mu-law decode + resample
+- `test_receive_transcodes_pcm24_to_mulaw8_20ms_frames` — real resample + mu-law encode
+- `test_gemini_live_engine_marker_and_dispatch` / `test_gemini_live_engine_requires_key`
+
+**Breaking changes:** None — additive; `GeminiLiveAdapter.send_audio` now expects
+carrier mu-law (it previously expected pre-resampled PCM), but no call path fed it yet.
+
+**Known gap (NOT addressed — see blockers):** runtime wiring into the telephony
+StreamHandler. Python uses a dedicated `StreamHandler` subclass per provider mode
+(twilio/telnyx/plivo each dispatch to one), unlike TS's single handler. A
+`gemini_live` runtime branch needs a new ~400-line `GeminiLiveStreamHandler` subclass,
+not a thin branch — deferred to a follow-up.
+
 ### [2026-06-18] — GeminiLive engine marker (TS) — make `agent({ engine: new GeminiLive() })` work
 
 **Type:** feat
