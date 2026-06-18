@@ -94,7 +94,14 @@ export class GeminiLiveAdapter {
 
   private client: unknown = null;
   private session: unknown = null;
-  private receiveLoop: Promise<void> | null = null;
+  /**
+   * Serial chain that processes inbound server messages in arrival order.
+   * The JS @google/genai SDK delivers each message through the synchronous
+   * `callbacks.onmessage` handler; we hand off to the async
+   * {@link handleServerMessage} via this chain so audio frames reach the
+   * carrier in order (out-of-order emits would scramble playback).
+   */
+  private recvChain: Promise<void> = Promise.resolve();
 
   /**
    * Inbound (carrier → Gemini) upsampler: mulaw 8 kHz is decoded to PCM-16
@@ -212,27 +219,53 @@ export class GeminiLiveAdapter {
       ];
     }
 
-    // The genai live surface is organised as client.live.connect({model, config, callbacks?}).
-    // Some SDK versions return a Session-like object with send*/receive methods.
+    // The genai live surface is client.live.connect({model, config, callbacks}).
+    // CRITICAL: the JS SDK delivers server messages ONLY through
+    // `callbacks.onmessage` — the returned Session has NO async-iterable
+    // `receive()` (that is the Python SDK's shape). Registering callbacks
+    // here is what makes the agent hear/speak; without them the session
+    // connects but no audio ever flows (prod incident 2026-06-18: 20 s of
+    // silence). See https://ai.google.dev/gemini-api/docs/live (JS sample).
     const liveApi = (this.client as { live?: { connect?: (args: unknown) => Promise<unknown> } }).live;
     if (!liveApi?.connect) {
       throw new Error('@google/genai: live.connect is not available in this version');
     }
-    this.session = await liveApi.connect({ model: this.model, config });
+    this.session = await liveApi.connect({
+      model: this.model,
+      config,
+      callbacks: {
+        onopen: () => {
+          // Session WebSocket is open and the SDK has sent setup — safe to
+          // unblock connect() so the caller can start streaming audio.
+          this._readyResolve?.();
+          this._readyResolve = null;
+        },
+        onmessage: (msg: unknown) => {
+          // Process strictly in arrival order (audio frame ordering matters).
+          this.recvChain = this.recvChain
+            .then(() => this.handleServerMessage(msg))
+            .catch((err) =>
+              getLogger().error(`Gemini Live message handler error: ${String(err)}`),
+            );
+        },
+        onerror: (e: unknown) => {
+          void this.emit('error', e);
+        },
+        onclose: () => {
+          this.running = false;
+        },
+      },
+    });
     this.running = true;
 
-    // Start the receive pump.
-    this.receiveLoop = this.pumpReceive().catch((err) => {
-      getLogger().error(`Gemini Live receive loop error: ${String(err)}`);
-    });
-
-    // Block until the receive loop is active (session established).
+    // Block until the session is open (onopen) before returning, so the caller
+    // does not stream audio into a half-open session.
     // Timeout after 8 s — same budget as the parked-connection guard in
     // OpenAIRealtime2Adapter so callers get consistent failure behaviour.
     //
-    // On timeout, tear down the already-opened session + background receive
-    // pump BEFORE rejecting — otherwise a slow handshake leaks a live
-    // WebSocket and a never-awaited receiveLoop for the rest of the process.
+    // On timeout, tear down the already-opened session BEFORE rejecting —
+    // otherwise a slow handshake leaks a live WebSocket for the rest of the
+    // process.
     try {
       await Promise.race([
         this._ready,
@@ -359,97 +392,92 @@ export class GeminiLiveAdapter {
     }
   }
 
-  private async pumpReceive(): Promise<void> {
-    if (!this.session) return;
-    const sess = this.session as { receive?: () => AsyncIterable<unknown> };
-    if (typeof sess.receive !== 'function') {
-      getLogger().warn('Gemini Live: session.receive() not available');
+  /**
+   * Handle one server message delivered via {@link connect}'s
+   * `callbacks.onmessage`. Dispatches audio (transcoded PCM →
+   * mulaw 8 kHz, split into 20 ms frames), transcripts, turn-complete /
+   * interrupted signals, goAway warnings, and tool calls. Invoked in arrival
+   * order through {@link recvChain}.
+   */
+  private async handleServerMessage(response: unknown): Promise<void> {
+    const r = response as {
+      setupComplete?: unknown;
+      serverContent?: {
+        modelTurn?: {
+          parts?: Array<{
+            inlineData?: { data?: string };
+            text?: string;
+          }>;
+        };
+        inputTranscription?: { text?: string };
+        outputTranscription?: { text?: string };
+        turnComplete?: boolean;
+        interrupted?: boolean;
+      };
+      goAway?: { timeLeft?: string };
+      toolCall?: {
+        functionCalls?: Array<{
+          id?: string;
+          name?: string;
+          args?: Record<string, unknown> | string;
+        }>;
+      };
+    };
+
+    // setupComplete is the definitive "session configured" signal; unblock
+    // connect() here too in case the onopen callback was missed.
+    if (r.setupComplete) {
       this._readyResolve?.();
       this._readyResolve = null;
-      return;
     }
-    // Signal that the session is established and ready for audio.
-    this._readyResolve?.();
-    this._readyResolve = null;
-    try {
-      for await (const response of sess.receive()) {
-        if (!this.running) break;
-        const r = response as {
-          serverContent?: {
-            modelTurn?: {
-              parts?: Array<{
-                inlineData?: { data?: string };
-                text?: string;
-              }>;
-            };
-            inputTranscription?: { text?: string };
-            outputTranscription?: { text?: string };
-            turnComplete?: boolean;
-            interrupted?: boolean;
-          };
-          goAway?: { timeLeft?: string };
-          toolCall?: {
-            functionCalls?: Array<{
-              id?: string;
-              name?: string;
-              args?: Record<string, unknown> | string;
-            }>;
-          };
-        };
 
-        const sc = r.serverContent;
-        if (sc) {
-          for (const part of sc.modelTurn?.parts ?? []) {
-            if (part.inlineData?.data) {
-              // Gemini emits PCM-16-LE at outputSampleRate (24 kHz default);
-              // the carrier wants mulaw 8 kHz in 20 ms (160-byte) frames.
-              // Transcode + split so Twilio's playout scheduler does not
-              // stall on an oversized frame.
-              const mulaw = this.transcodeOutboundPcmToMulaw8(part.inlineData.data);
-              for (let off = 0; off < mulaw.length; off += MULAW_FRAME_BYTES) {
-                const frame = mulaw.subarray(off, Math.min(off + MULAW_FRAME_BYTES, mulaw.length));
-                await this.emit('audio', Buffer.from(frame));
-              }
-            }
-            if (part.text) await this.emit('transcript_output', part.text);
-          }
-          if (sc.inputTranscription?.text) {
-            await this.emit('transcript_input', sc.inputTranscription.text);
-          }
-          if (sc.outputTranscription?.text) {
-            await this.emit('transcript_output', sc.outputTranscription.text);
-          }
-          if (sc.turnComplete) await this.emit('response_done', null);
-          if (sc.interrupted) await this.emit('speech_started', null);
-        }
-        if (r.goAway) {
-          // Gemini Live hard-caps session length (~10-15 min without
-          // resumption); goAway is the only warning before the server drops
-          // the connection. Surface it loudly.
-          getLogger().warn(
-            `Gemini Live goAway received — session ends in ${r.goAway.timeLeft ?? 'unknown'}`,
-          );
-        }
-        if (r.toolCall) {
-          for (const fn of r.toolCall.functionCalls ?? []) {
-            const args = fn.args ?? {};
-            const callId = fn.id ?? '';
-            const fnName = fn.name ?? '';
-            if (callId && fnName) {
-              this.pendingToolCalls.set(callId, fnName);
-            }
-            await this.emit('function_call', {
-              call_id: callId,
-              name: fnName,
-              arguments: typeof args === 'string' ? args : JSON.stringify(args),
-            });
+    const sc = r.serverContent;
+    if (sc) {
+      for (const part of sc.modelTurn?.parts ?? []) {
+        if (part.inlineData?.data) {
+          // Gemini emits PCM-16-LE at outputSampleRate (24 kHz default);
+          // the carrier wants mulaw 8 kHz in 20 ms (160-byte) frames.
+          // Transcode + split so Twilio's playout scheduler does not
+          // stall on an oversized frame.
+          const mulaw = this.transcodeOutboundPcmToMulaw8(part.inlineData.data);
+          for (let off = 0; off < mulaw.length; off += MULAW_FRAME_BYTES) {
+            const frame = mulaw.subarray(off, Math.min(off + MULAW_FRAME_BYTES, mulaw.length));
+            await this.emit('audio', Buffer.from(frame));
           }
         }
+        if (part.text) await this.emit('transcript_output', part.text);
       }
-    } catch (err) {
-      if (this.running) await this.emit('error', err);
-    } finally {
-      this.running = false;
+      if (sc.inputTranscription?.text) {
+        await this.emit('transcript_input', sc.inputTranscription.text);
+      }
+      if (sc.outputTranscription?.text) {
+        await this.emit('transcript_output', sc.outputTranscription.text);
+      }
+      if (sc.turnComplete) await this.emit('response_done', null);
+      if (sc.interrupted) await this.emit('speech_started', null);
+    }
+    if (r.goAway) {
+      // Gemini Live hard-caps session length (~10-15 min without
+      // resumption); goAway is the only warning before the server drops
+      // the connection. Surface it loudly.
+      getLogger().warn(
+        `Gemini Live goAway received — session ends in ${r.goAway.timeLeft ?? 'unknown'}`,
+      );
+    }
+    if (r.toolCall) {
+      for (const fn of r.toolCall.functionCalls ?? []) {
+        const args = fn.args ?? {};
+        const callId = fn.id ?? '';
+        const fnName = fn.name ?? '';
+        if (callId && fnName) {
+          this.pendingToolCalls.set(callId, fnName);
+        }
+        await this.emit('function_call', {
+          call_id: callId,
+          name: fnName,
+          arguments: typeof args === 'string' ? args : JSON.stringify(args),
+        });
+      }
     }
   }
 
@@ -499,10 +527,10 @@ export class GeminiLiveAdapter {
       this.session = null;
     }
     this.client = null;
-    if (this.receiveLoop) {
-      await this.receiveLoop.catch(() => undefined);
-      this.receiveLoop = null;
-    }
+    // Drain any in-flight message handling so a closing session doesn't leave
+    // a dangling emit mid-flight.
+    await this.recvChain.catch(() => undefined);
+    this.recvChain = Promise.resolve();
     this.pendingToolCalls.clear();
   }
 }
