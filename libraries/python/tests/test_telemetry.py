@@ -189,6 +189,9 @@ async def test_agent_records_realtime_model_in_feature_used(
         "openai-gpt-realtime-mini",
     ]
     assert all(e["engine"] == "realtime" for e in feature_events)
+    # The realtime family is always the OpenAI realtime engine, so the per-layer
+    # LLM vendor is pinned to "openai" — provider and model stay consistent.
+    assert all(e.get("llm_provider") == "openai" for e in feature_events)
 
 
 # --- pending-buffer survival (fire-and-forget clients) ----------------------

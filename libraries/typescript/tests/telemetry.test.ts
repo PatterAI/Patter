@@ -281,6 +281,9 @@ describe('[integration] telemetry — enabled path', () => {
       'openai-gpt-realtime-mini',
     ]);
     for (const e of featureEvents) expect(e.engine).toBe('realtime');
+    // The realtime family is always the OpenAI realtime engine, so the per-layer
+    // LLM vendor is pinned to "openai" — provider and model stay consistent.
+    for (const e of featureEvents) expect(e.llm_provider).toBe('openai');
   });
 
   it('close() delivers an event whose flush was already started by record()', async () => {

@@ -631,9 +631,14 @@ export class Patter {
       // Realtime has no composed stack, so the model variant is the whole
       // story — resolve it the same way the engine merge below does (an
       // explicit model wins; otherwise the engine's model; else the default).
+      // Pin llm_provider="openai" alongside the model: the realtime family is
+      // always the OpenAI realtime engine, so the per-layer LLM vendor is openai.
+      // Set it explicitly (overriding any stray `llm` provider) so the
+      // feature_used row's provider and model stay consistent.
       const engineModel = (opts.engine as { model?: string } | undefined)?.model;
       stack = {
         ...stack,
+        llm_provider: "openai",
         llm_model: modelToken(
           "openai",
           (opts.model as string | undefined) ?? engineModel ?? "gpt-realtime-mini",

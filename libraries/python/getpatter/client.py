@@ -1824,12 +1824,20 @@ class Patter:
             # Realtime has no composed stack, so the model variant is the whole
             # story — resolve it the same way the engine unpacking below does
             # (an explicit model= kwarg wins; otherwise the engine's model).
+            # Pin llm_provider="openai" alongside the model: the realtime family
+            # is always the OpenAI realtime engine, so the per-layer LLM vendor is
+            # openai. Set it explicitly (overriding any stray ``llm=`` provider)
+            # so the feature_used row's provider and model stay consistent.
             _rt_model = (
                 model
                 if model is not None
                 else (getattr(engine, "model", None) or "gpt-realtime-mini")
             )
-            _stack = {**_stack, "llm_model": model_token("openai", _rt_model)}
+            _stack = {
+                **_stack,
+                "llm_provider": "openai",
+                "llm_model": model_token("openai", _rt_model),
+            }
         _feature_key = (
             _family + "|" + ",".join(f"{k}={v}" for k, v in sorted(_stack.items()))
         )
