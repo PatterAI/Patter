@@ -2,6 +2,20 @@
 
 ### Added
 
+- **Python: `KrispVivaFilter` and `DeepFilterNetFilter` are now exported from
+  the package root.** Both noise-suppression `AudioFilter` implementations
+  already shipped as modules (`getpatter/providers/krisp_filter.py`,
+  `getpatter/providers/deepfilternet_filter.py`) but were not surfaced on the
+  `getpatter` barrel, so Python users had to reach into the internal provider
+  path while TypeScript already exported the equivalent `KrispVivaFilter` /
+  `DeepFilterNetFilter` classes. They are now resolvable as
+  `getpatter.KrispVivaFilter` / `getpatter.DeepFilterNetFilter` and listed in
+  `__all__`. Resolution is lazy (via `getpatter.__getattr__`, matching
+  `SileroVAD` / `SmartTurnDetector`) so importing `getpatter` still costs
+  nothing when the proprietary `krisp-audio` SDK or the heavy `deepfilternet`
+  (torch) extra is absent. Additive, backward-compatible, and closes a
+  Python↔TypeScript public-surface parity gap. `libraries/python/getpatter/__init__.py`.
+
 - **Telemetry: `config_incomplete` — activation-blocker signal.** A new event
   emitted at most once per `Patter` instance when required runtime config is
   missing so the instance/agent cannot proceed. It carries a single coarse enum
