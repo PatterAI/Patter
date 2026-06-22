@@ -69,6 +69,33 @@ class TestPublicReexports:
         assert hasattr(getpatter, name), f"getpatter.{name} not importable"
 
 
+@pytest.mark.unit
+class TestAudioFilterReexports:
+    """The noise-suppression filters are reachable from the package root.
+
+    Parity with the TypeScript ``KrispVivaFilter`` / ``DeepFilterNetFilter``
+    exports. Resolution is lazy (via ``getpatter.__getattr__``) so the symbols
+    are importable even without the proprietary ``krisp-audio`` SDK or the
+    heavy ``deepfilternet`` (torch) extra installed — exercised here with no
+    mocks, which is the real code path users hit.
+    """
+
+    @pytest.mark.parametrize("name", ["KrispVivaFilter", "DeepFilterNetFilter"])
+    def test_filter_in_all_and_lazy_resolves(self, name: str) -> None:
+        from getpatter.providers.base import AudioFilter
+
+        assert name in getpatter.__all__, f"{name} missing from getpatter.__all__"
+        cls = getattr(getpatter, name)
+        assert isinstance(cls, type) and issubclass(cls, AudioFilter)
+
+    def test_barrel_symbols_are_the_canonical_classes(self) -> None:
+        from getpatter.providers.deepfilternet_filter import DeepFilterNetFilter
+        from getpatter.providers.krisp_filter import KrispVivaFilter
+
+        assert getpatter.KrispVivaFilter is KrispVivaFilter
+        assert getpatter.DeepFilterNetFilter is DeepFilterNetFilter
+
+
 # ---------------------------------------------------------------------------
 # LLMChunk
 # ---------------------------------------------------------------------------

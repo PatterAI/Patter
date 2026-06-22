@@ -159,6 +159,21 @@ def __getattr__(name):
         from getpatter.providers import krisp_instance as _krisp_instance
 
         return getattr(_krisp_instance, name)
+    # Pre-STT noise-suppression audio filters — opt-in (need the ``krisp`` /
+    # ``deepfilternet`` extras). Both modules defer their heavy imports
+    # (krisp-audio, torch) until instantiation, so surfacing the class here
+    # costs nothing when the extra is absent. Parity with the TypeScript
+    # ``KrispVivaFilter`` / ``DeepFilterNetFilter`` exports.
+    if name == "KrispVivaFilter":
+        from getpatter.providers.krisp_filter import KrispVivaFilter as _KrispVivaFilter
+
+        return _KrispVivaFilter
+    if name == "DeepFilterNetFilter":
+        from getpatter.providers.deepfilternet_filter import (
+            DeepFilterNetFilter as _DeepFilterNetFilter,
+        )
+
+        return _DeepFilterNetFilter
     if name in {"OnnxExecutionProvider", "SileroOnnxSampleRate"}:
         from getpatter.providers import silero_onnx as _silero_onnx
 
@@ -497,6 +512,8 @@ __all__ = [
     "TelnyxTTS",
     "SileroVAD",
     "SmartTurnDetector",
+    "KrispVivaFilter",
+    "DeepFilterNetFilter",
     "init_tracing",
     "start_span",
     "SPAN_CALL",
