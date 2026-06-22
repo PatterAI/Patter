@@ -51,6 +51,27 @@ export {
   ProvisionError,
   RateLimitError,
 } from "./errors";
+// Evaluation harness — parity with `getpatter.evals` (Python).
+export {
+  EvalResult,
+  LLMJudge,
+  OpenAIJudgeBackend,
+  JUDGE_SYSTEM,
+  EvalRunner,
+  loadSuite,
+} from "./evals";
+export type {
+  EvalTurn,
+  EvalCase,
+  JudgeResult,
+  TranscriptEntry,
+  JudgeBackend,
+  LLMJudgeOptions,
+  EvalSuite,
+  EvalRunnerOptions,
+  AgentReply,
+  AgentFactory,
+} from "./evals";
 export {
   deepgram,
   whisper,

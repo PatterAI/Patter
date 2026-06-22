@@ -5,7 +5,7 @@
  *
  * Usage:
  *   npx getpatter dashboard [--port 8000]
- *   npx getpatter eval                        (stub — evals are Python-only today)
+ *   npx getpatter eval run <suite>            Run an evaluation suite
  *   npx getpatter telemetry [status|disable|enable]
  */
 
@@ -13,6 +13,7 @@ import { createServer } from 'node:http';
 import express from 'express';
 import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
+import { runEval } from './evals/cli';
 import { getLogger } from './logger';
 import { showBanner } from './banner';
 import { VERSION } from './version';
@@ -102,16 +103,6 @@ function parseArgs(argv: string[]): { port: number } {
   return { port };
 }
 
-function printEvalStub(): void {
-  console.log(
-    'Evaluations are not yet available in the TypeScript SDK.\n' +
-      'Use the Python SDK instead:\n\n' +
-      '  pip install getpatter\n' +
-      '  patter eval --help\n\n' +
-      'See https://github.com/PatterAI/Patter for docs.',
-  );
-}
-
 function printHermesStub(): void {
   console.log(
     'The Hermes wizard (doctor / setup / test / trace / diagnose /\n' +
@@ -151,8 +142,7 @@ async function main(): Promise<void> {
 
   if (command === 'eval') {
     await emitCliCommand('eval');
-    printEvalStub();
-    process.exit(0);
+    process.exit(await runEval(process.argv.slice(3)));
   }
   if (command === 'hermes') {
     printHermesStub();
@@ -165,7 +155,7 @@ async function main(): Promise<void> {
   if (command !== 'dashboard') {
     await emitCliCommand(command ? 'other' : 'none');
     console.log('Usage: getpatter dashboard [--port 8000]');
-    console.log('       getpatter eval          (stub — use Python SDK for evals)');
+    console.log('       getpatter eval run <suite>   Run an evaluation suite');
     console.log('       getpatter hermes        (stub — use Python SDK for the wizard)');
     console.log('       getpatter openclaw      (stub — use Python SDK for the wizard)');
     console.log('       getpatter telemetry [status|disable|enable]');

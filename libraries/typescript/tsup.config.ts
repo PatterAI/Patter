@@ -28,5 +28,8 @@ export default defineConfig({
     // installed package is used rather than a bundled copy.
     "cloudflared",
     "@ngrok/ngrok",
+    // Optional YAML suite loader — `await import("yaml")` in src/evals/runner.ts.
+    // Kept external so JSON-only users don't need the dependency installed.
+    "yaml",
   ],
 });

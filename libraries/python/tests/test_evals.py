@@ -7,7 +7,6 @@ is not set.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
@@ -15,7 +14,6 @@ import pytest
 
 from getpatter.evals import (
     EvalCase,
-    EvalResult,
     EvalRunner,
     EvalSuite,
     EvalTurn,
@@ -57,7 +55,9 @@ async def test_llm_judge_parses_score_and_reasoning():
 
 @pytest.mark.asyncio
 async def test_llm_judge_tolerates_code_fences():
-    judge = LLMJudge(backend=FakeBackend({"score": 0.5, "passed": False, "reasoning": "meh"}))
+    judge = LLMJudge(
+        backend=FakeBackend({"score": 0.5, "passed": False, "reasoning": "meh"})
+    )
     # Replace backend to return a fenced string instead of the raw dict.
     fenced = '```json\n{"score": 0.5, "passed": false, "reasoning": "meh"}\n```'
 
@@ -87,10 +87,27 @@ async def test_llm_judge_fails_safely_on_invalid_json():
 
 @pytest.mark.asyncio
 async def test_llm_judge_clamps_score_to_unit_range():
-    judge = LLMJudge(backend=FakeBackend({"score": 1.5, "passed": True, "reasoning": ""}))
+    judge = LLMJudge(
+        backend=FakeBackend({"score": 1.5, "passed": True, "reasoning": ""})
+    )
     case = EvalCase(name="t", turns=[], expected_behavior="", rubric="")
     result = await judge.judge_case(case, [])
     assert result.score == 1.0
+
+
+@pytest.mark.asyncio
+async def test_llm_judge_computes_verdict_locally_from_score():
+    # A hallucinated ``passed: true`` paired with a sub-threshold score must
+    # still fail — the verdict is computed locally from the clamped score, not
+    # trusted from the model. Mirrors the TS test of the same invariant.
+    judge = LLMJudge(
+        pass_threshold=0.7,
+        backend=FakeBackend({"score": 0.2, "passed": True, "reasoning": "lies"}),
+    )
+    case = EvalCase(name="t", turns=[], expected_behavior="", rubric="")
+    result = await judge.judge_case(case, [])
+    assert result.score == pytest.approx(0.2)
+    assert result.passed is False
 
 
 @pytest.mark.asyncio
@@ -144,7 +161,9 @@ async def test_runner_handles_agent_exception():
         rubric="",
     )
     suite = EvalSuite(name="s", cases=[case])
-    judge = LLMJudge(backend=FakeBackend({"score": 0, "passed": False, "reasoning": ""}))
+    judge = LLMJudge(
+        backend=FakeBackend({"score": 0, "passed": False, "reasoning": ""})
+    )
     runner = EvalRunner(judge=judge)
 
     async def broken(_: str) -> str:

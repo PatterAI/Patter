@@ -1,5 +1,30 @@
 ## Unreleased
 
+### Added
+
+- **TypeScript evals harness — parity with the Python `getpatter.evals` core.**
+  The TypeScript SDK now ships the evaluation harness that was previously
+  Python-only (the CLI printed *"Evaluations are not yet available in the
+  TypeScript SDK"*). New `src/evals/` exports `EvalCase` / `EvalTurn` /
+  `EvalSuite` / `JudgeResult` / `TranscriptEntry` / `EvalResult`, the
+  `LLMJudge` (OpenAI-as-judge, strict JSON, verdict computed locally from the
+  clamped score so a hallucinated `passed: true` on a low score still fails),
+  `EvalRunner` (drives a suite against an async `reply()` agent factory, one
+  transient judge failure no longer aborts the whole suite), and async
+  `loadSuite()` for JSON and (optional `yaml` dependency) YAML suite files.
+  The suite file schema and JSON report shape are identical across SDKs, so a
+  suite authored for `patter eval run` works unchanged in either. The CLI stub
+  is replaced by a real `getpatter eval run <suite> [--agent module:export]
+  [--judge-model M] [--pass-threshold T] [--output FILE]` (exit 0 all-pass / 1
+  any-fail / 2 bad usage). Purely additive — no breaking change. The judge
+  uses raw `fetch` (the SDK has no `openai` dependency) mirroring
+  `src/llm-loop.ts`; a `JudgeBackend` seam makes the judge injectable for
+  tests. `libraries/typescript/src/evals/{case,llm-judge,runner,cli,index}.ts`,
+  `libraries/typescript/src/cli.ts`, `libraries/typescript/src/index.ts`,
+  mirrors `libraries/python/getpatter/evals/{case,llm_judge,runner,cli}.py`.
+  (The real-pipeline `EvalSession` layer — `session.py` / `assertions.py` —
+  remains Python-only for now and is tracked as a follow-up.)
+
 ## 0.6.7 (2026-06-10)
 
 ### Fixed

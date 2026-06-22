@@ -25,7 +25,7 @@ The session-layer names are loaded lazily (PEP 562) so importing
 
 from getpatter.evals.case import EvalCase, EvalTurn, JudgeResult, EvalResult
 from getpatter.evals.llm_judge import LLMJudge
-from getpatter.evals.runner import EvalRunner, EvalSuite
+from getpatter.evals.runner import EvalRunner, EvalSuite, load_suite
 
 __all__ = [
     "EvalCase",
@@ -35,6 +35,7 @@ __all__ = [
     "LLMJudge",
     "EvalRunner",
     "EvalSuite",
+    "load_suite",
     # Real-pipeline harness (lazy):
     "EvalSession",
     "TurnResult",
