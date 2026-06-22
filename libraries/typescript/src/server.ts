@@ -2782,6 +2782,17 @@ export class EmbeddedServer {
     };
 
     const wrappedEnd = async (data: Record<string, unknown>): Promise<void> => {
+      // The media-stream bridge's end payload carries no call direction, so
+      // resolve it from the active store record (seeded with the true
+      // inbound/outbound at dial/connect time) before recording telemetry.
+      // Without this, ``call_completed`` omits the direction (``call_started``
+      // already carries it) and the inbound/outbound funnel cannot be closed.
+      // Mirrors ``wrappedStart``.
+      if (!data.direction) {
+        const cid = typeof data.call_id === 'string' ? data.call_id : '';
+        const active = cid ? store.getActive(cid) : undefined;
+        if (active?.direction) data.direction = active.direction;
+      }
       // Anonymous telemetry: per-call completion (engine/provider/carrier + raw
       // duration/latency + matching correlation id; no cost, no PII). Fail-safe
       // and O(1). pop=true so the uid is removed once the call reaches its

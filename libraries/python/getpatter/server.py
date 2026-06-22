@@ -878,6 +878,19 @@ class EmbeddedServer:
             return None
 
         async def _on_call_end(data):
+            # The media-stream bridge's end payload carries no call direction, so
+            # resolve it from the active store record — seeded with the true
+            # inbound/outbound by ``record_call_initiated`` (outbound) and
+            # ``_on_call_start`` (inbound) — BEFORE ``record_call_end`` finalises
+            # the record. Without this, ``call_completed`` telemetry omits the
+            # direction (the ``call_started`` side already carries it) and the
+            # inbound/outbound funnel cannot be closed. Mirrors ``_on_call_start``.
+            if store is not None and not data.get("direction"):
+                _cid = data.get("call_id", "") or ""
+                if _cid:
+                    _rec = store.get_active(_cid)
+                    if _rec and _rec.get("direction"):
+                        data["direction"] = _rec["direction"]
             if store is not None:
                 store.record_call_end(data, metrics=data.get("metrics"))
             # Anonymous telemetry: per-call completion (engine/provider/carrier +

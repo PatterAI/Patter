@@ -123,6 +123,21 @@
 
 ### Fixed
 
+- **Telemetry: `call_completed` now carries the call `direction`
+  (inbound/outbound).** The media-stream bridge's end payload has no direction,
+  and the call-end handler — unlike the call-start handler — never resolved it
+  from the active dashboard-store record, so every `call_completed` event was
+  emitted with `direction` omitted while `call_started` carried it. This made the
+  inbound/outbound funnel impossible to close in the usage analytics (the field
+  was empty on 100% of completions). Both SDKs now resolve `direction` from the
+  active store record (seeded with the true inbound/outbound at dial/connect
+  time) before recording the completion, mirroring the start path.
+  `libraries/python/getpatter/server.py` (`_on_call_end`),
+  `libraries/typescript/src/server.ts` (`wrappedEnd`). Resolution depends on the
+  dashboard store, which is present by default; behaviour is unchanged when the
+  store is disabled (the start side has the same dependency). Parity across both
+  SDKs.
+
 - **Plivo `extra_headers` are now exposed to the agent prompt and
   `on_call_start` (parity with Twilio's `<Parameter>` customParameters).**
   Developer-supplied headers delivered on the Plivo `start` frame were parsed

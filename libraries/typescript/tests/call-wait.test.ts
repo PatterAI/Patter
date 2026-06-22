@@ -205,6 +205,39 @@ describe('[unit] call({ wait: true }) — connected call', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Telemetry — call_completed resolves the call direction from the store
+// ---------------------------------------------------------------------------
+
+describe('[unit] call_completed direction resolution', () => {
+  it('resolves direction from the active store record when the end payload omits it', async () => {
+    // The media-stream end payload carries no direction, so the real wrapped
+    // onCallEnd must resolve it from the active store record (seeded with the
+    // true inbound/outbound at dial/connect time) so call_completed carries the
+    // same direction call_started does. Regression for the empty-direction gap
+    // (call_completed used to omit it, breaking the inbound/outbound funnel).
+    const phone = localPhone();
+    const server = attachRealServer(phone, makeAgent());
+
+    // Seed the store the way an outbound dial does (recordCallInitiated).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (server as any).metricsStore.recordCallStart({ call_id: 'CA_dir', direction: 'outbound' });
+
+    const recorded: Array<Record<string, unknown>> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (server as any).telemetry = {
+      record: (_name: string, dims?: Record<string, unknown>) => recorded.push(dims ?? {}),
+    };
+
+    const onCallEnd = wrappedOnCallEnd(server);
+    // End payload from the bridge — note it carries NO direction.
+    await onCallEnd({ call_id: 'CA_dir', metrics: metrics('CA_dir') });
+
+    const completed = recorded.find((d) => 'outcome' in d);
+    expect(completed?.direction).toBe('outbound');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // wait: true — no-media outcomes resolve via the status-callback path
 // ---------------------------------------------------------------------------
 

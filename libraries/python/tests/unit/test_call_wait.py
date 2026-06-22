@@ -181,6 +181,46 @@ async def test_call_wait_true_voicemail_when_amd_machine() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Telemetry — call_completed resolves the call direction from the store
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_call_completed_resolves_direction_from_store() -> None:
+    """The media-stream end payload carries no direction, so the real wrapped
+    ``_on_call_end`` must resolve it from the active store record — seeded with
+    the true inbound/outbound at dial/connect time — so ``call_completed`` carries
+    the same direction ``call_started`` does. Regression for the empty-direction
+    gap (call_completed used to omit it, breaking the inbound/outbound funnel)."""
+    from getpatter.dashboard.store import MetricsStore
+
+    phone = _local_phone()
+    agent = Agent(system_prompt="x", prewarm=False)
+    server = _attach_real_server(phone, agent)
+
+    # Seed the store the way an outbound dial does (record_call_initiated).
+    server._metrics_store = MetricsStore()
+    server._metrics_store.record_call_start(
+        {"call_id": "CA_dir", "direction": "outbound"}
+    )
+
+    recorded: list[tuple[str, dict]] = []
+
+    class _Sink:
+        def record(self, name, **dims):
+            recorded.append((name, dims))
+
+    server._telemetry = _Sink()
+    _, on_call_end, _, _, _ = server._wrap_callbacks()
+
+    # End payload from the bridge — note it carries NO ``direction``.
+    await on_call_end({"call_id": "CA_dir", "metrics": _metrics("CA_dir")})
+
+    completed = next(dims for name, dims in recorded if name == "call_completed")
+    assert completed["direction"] == "outbound"
+
+
+# ---------------------------------------------------------------------------
 # wait=True — no-media outcomes resolve via the status-callback path
 # ---------------------------------------------------------------------------
 
