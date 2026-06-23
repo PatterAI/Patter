@@ -47,6 +47,13 @@
             ]
           },
           {
+            "group": "Get Started",
+            "icon": "rocket",
+            "pages": [
+              "quickstart-create"
+            ]
+          },
+          {
             "group": "Libraries",
             "icon": "library",
             "pages": [

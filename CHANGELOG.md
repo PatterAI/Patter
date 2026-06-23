@@ -2,6 +2,33 @@
 
 ### Added
 
+- **`getpatter init` — greenfield setup wizard, plus `npm create getpatter`.**
+  A new `init` subcommand on the `getpatter` CLI (Python
+  `libraries/python/getpatter/init/cli.py`, TypeScript
+  `libraries/typescript/src/init/cli.ts`) scaffolds a runnable inbound
+  voice-agent project the way `npm create` does. It walks through project name,
+  voice mode (`realtime` — one engine owns the turn — or `pipeline` — compose
+  STT + LLM + TTS), engine/providers (filtered by mode), telephony carrier
+  (Twilio / Telnyx / Plivo), API keys, IDE skills, and `git init`, then writes a
+  runnable scaffold: `main.py` (Python) / `src/index.ts` (TypeScript) wired to
+  the chosen stack, `.env` + `.env.example`, `requirements.txt` / `package.json`
+  pinned to the current SDK version with the right pip extras, `.gitignore`
+  (ignores `.env`), and a `README.md`. Every prompt has a matching
+  non-interactive flag (`--name`, `--runtime`, `--mode`, `--engine`, `--stt`,
+  `--llm`, `--tts`, `--carrier`, `--phone`, `--skip-keys`, `--ide`,
+  `--no-skills`, `--no-git`, `--force`); `--yes`/`-y` runs fully non-interactive
+  with defaults (realtime + OpenAIRealtime2 + Twilio). TypeScript users can
+  launch it without a global install via the new zero-dependency
+  `create-getpatter` package — `npm create getpatter my-app` re-dispatches to
+  `getpatter init` (local CLI if resolvable, else `npx getpatter@<version>`).
+  API keys are never echoed (Python `getpass`, TypeScript muted `readline`) or
+  logged, `.env` is created atomically at mode `0600`, and the project name is
+  validated/sanitized (rejects `..`, path separators, quotes, and shell
+  metacharacters) so a hostile name cannot corrupt `package.json` or escape the
+  target directory. Zero new runtime dependencies — stdlib `argparse` +
+  `input()` (Python) / `node:readline/promises` (TypeScript). Full
+  Python↔TypeScript parity. `docs/quickstart-create.mdx`.
+
 - **Python: `KrispVivaFilter` and `DeepFilterNetFilter` are now exported from
   the package root.** Both noise-suppression `AudioFilter` implementations
   already shipped as modules (`getpatter/providers/krisp_filter.py`,

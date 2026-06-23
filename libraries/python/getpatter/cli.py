@@ -32,6 +32,11 @@ def main() -> None:
 
     build_eval_parser(subparsers)
 
+    # patter init — greenfield setup wizard
+    from getpatter.init import build_init_parser, dispatch_init
+
+    build_init_parser(subparsers)
+
     # patter hermes {doctor|setup|test|trace|diagnose|attach-number|numbers}
     from getpatter.cli_hermes import build_hermes_parser, dispatch_hermes
 
@@ -68,6 +73,8 @@ def main() -> None:
         asyncio.run(_run_dashboard(args.port))
     elif args.command == "eval":
         sys.exit(dispatch_eval(args))
+    elif args.command == "init":
+        sys.exit(dispatch_init(args))
     elif args.command == "hermes":
         sys.exit(dispatch_hermes(args))
     elif args.command == "openclaw":

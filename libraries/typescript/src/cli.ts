@@ -4,6 +4,7 @@
  * Patter CLI — standalone dashboard and utilities.
  *
  * Usage:
+ *   npx getpatter init [options]   (greenfield setup wizard)
  *   npx getpatter dashboard [--port 8000]
  *   npx getpatter eval run <suite> [--agent module:export] [--output report.json]
  *   npx getpatter telemetry [status|disable|enable]
@@ -15,6 +16,7 @@ import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
 import { getLogger } from './logger';
 import { showBanner } from './banner';
+import { runInit } from './init/cli';
 import { VERSION } from './version';
 import { TelemetryClient, DEFAULT_ENDPOINT } from './telemetry/client';
 import { isEnabled } from './telemetry/consent';
@@ -236,6 +238,13 @@ async function main(): Promise<void> {
     process.exit(runTelemetryCommand(process.argv[3]));
   }
 
+  if (command === 'init') {
+    // Greenfield setup wizard. argv after the `init` token are its flags.
+    await emitCliCommand('init');
+    const code = await runInit(process.argv.slice(3));
+    process.exit(code);
+  }
+
   if (command === 'eval') {
     await emitCliCommand('eval');
     try {
@@ -257,7 +266,8 @@ async function main(): Promise<void> {
   }
   if (command !== 'dashboard') {
     await emitCliCommand(command ? 'other' : 'none');
-    console.log('Usage: getpatter dashboard [--port 8000]');
+    console.log('Usage: getpatter init [options]            (setup wizard)');
+    console.log('       getpatter dashboard [--port 8000]');
     console.log('       getpatter eval run <suite> [--agent module:export] [--output report.json]');
     console.log('       getpatter hermes        (stub — use Python SDK for the wizard)');
     console.log('       getpatter openclaw      (stub — use Python SDK for the wizard)');
