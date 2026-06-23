@@ -1,0 +1,230 @@
+---
+title: "Create a Project"
+description: "Scaffold a runnable Patter voice agent in seconds with the interactive setup wizard — npm create getpatter (TypeScript) or getpatter init (Python)."
+icon: "wand-magic-sparkles"
+---
+
+# Create a Project
+
+The setup wizard scaffolds a complete, runnable inbound voice agent — entry file, environment template, dependency manifest, `.gitignore`, and a README — so you go from nothing to a project you can run in under a minute. It is the fastest way to start a new Patter project, and it works the same on both SDKs.
+
+<CardGroup cols={2}>
+  <Card title="TypeScript" icon="js">
+    ```sh
+    npm create getpatter
+    ```
+  </Card>
+  <Card title="Python" icon="python">
+    ```sh
+    uvx getpatter init
+    # or, if getpatter is installed:
+    getpatter init
+    ```
+  </Card>
+</CardGroup>
+
+The wizard asks a short series of questions, then writes the project to disk. Every question has a flag, so you can also run it fully non-interactively in CI or a script.
+
+## Run it
+
+### TypeScript
+
+`npm create getpatter` fetches the matching SDK release and launches the wizard. No global install required.
+
+```sh
+npm create getpatter
+```
+
+You can pass flags straight through:
+
+```sh
+npm create getpatter -- --name my-agent --mode realtime --carrier twilio --yes
+```
+
+Equivalently, if you already have the package installed, the same wizard is exposed on the SDK CLI:
+
+```sh
+npx getpatter init
+```
+
+### Python
+
+`getpatter init` is a subcommand of the `getpatter` CLI. If you have not installed the SDK, [uv](https://docs.astral.sh/uv/) can run the wizard one-off with `uvx`:
+
+```sh
+uvx getpatter init
+```
+
+If the SDK is already installed (`pip install getpatter`), call it directly:
+
+```sh
+getpatter init
+```
+
+## The two voice modes
+
+The wizard's central choice is the **voice mode**. Patter has exactly two, and they trade latency for control.
+
+<CardGroup cols={2}>
+  <Card title="Realtime" icon="bolt">
+    One end-to-end engine owns the entire turn — it hears the caller and speaks back in a single model. Lowest latency, fewest moving parts.
+  </Card>
+  <Card title="Pipeline" icon="sliders">
+    Compose three providers yourself — speech-to-text, then an LLM, then text-to-speech. Maximum control over each stage.
+  </Card>
+</CardGroup>
+
+The mode you pick determines which providers the wizard offers next.
+
+### Realtime
+
+In realtime mode you choose a single **engine**. ElevenLabs ConvAI is itself a realtime engine — it is not a separate mode.
+
+| Engine | Notes | Required env |
+| --- | --- | --- |
+| `OpenAIRealtime2` (default) | OpenAI Realtime 2, model `gpt-realtime-2` | `OPENAI_API_KEY` |
+| `OpenAIRealtime` | Legacy `gpt-realtime-mini` | `OPENAI_API_KEY` |
+| `ElevenLabsConvAI` | Needs a pre-built ConvAI agent | `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` |
+
+### Pipeline
+
+In pipeline mode you pick one provider for each of the three stages. Sensible defaults are pre-selected.
+
+| Stage | Default | Other options |
+| --- | --- | --- |
+| STT (speech-to-text) | Deepgram | AssemblyAI, Cartesia, Soniox, Speechmatics, OpenAI Whisper, OpenAI Transcribe |
+| LLM | Cerebras (`gpt-oss-120b`) | OpenAI, Anthropic Claude, Groq, Google Gemini |
+| TTS (text-to-speech) | ElevenLabs | OpenAI, Cartesia, Rime, LMNT, Inworld |
+
+<Note>
+On the Python SDK, providers outside the base set install via a pip extra (for example `getpatter[anthropic,cartesia]`). The wizard works out which extras you need and pins them in `requirements.txt` automatically. The TypeScript SDK bundles every provider, so no extras are needed.
+</Note>
+
+## What the wizard asks
+
+The prompts are identical across both SDKs (only naming idioms differ — `snake_case` in Python, `camelCase` in TypeScript). Each step has a matching flag for non-interactive runs.
+
+| Step | Prompt | Flag | Default |
+| --- | --- | --- | --- |
+| 1 | Project name (becomes the target directory) | `--name <dir>` | `my-patter-agent` |
+| 2 | SDK runtime | `--runtime python\|typescript` | prefilled to the CLI you ran |
+| 3 | Voice mode | `--mode realtime\|pipeline` | `realtime` |
+| 4a | Realtime engine (realtime mode only) | `--engine <name>` | `OpenAIRealtime2` |
+| 4b | STT / LLM / TTS (pipeline mode only) | `--stt`, `--llm`, `--tts` | Deepgram / Cerebras / ElevenLabs |
+| 5 | Telephony carrier | `--carrier twilio\|telnyx\|plivo` | `twilio` |
+| 6 | API keys (written to `.env`) | `--skip-keys` | prompted, skippable |
+| 7 | IDE skills to install | `--ide <list>`, `--no-skills` | prompted multi-select |
+| 8 | Initialize a git repository | `--no-git` | yes (interactive) |
+| 9 | Allow a non-empty target directory | `--force` | off |
+
+A phone number for your agent can be supplied with `--phone` (E.164, for example `+15550001234`); leave it blank to fill in later. The wizard also reads the carrier's phone-number env var (`TWILIO_PHONE_NUMBER`, `TELNYX_PHONE_NUMBER`, or `PLIVO_PHONE_NUMBER`) at runtime.
+
+## Non-interactive mode
+
+Pass `--yes` (or `-y`) to skip every prompt and accept the defaults. Combine it with the flags above to fully script project creation:
+
+```sh
+# TypeScript, realtime + OpenAI, Twilio carrier, no prompts
+npm create getpatter -- --yes --name support-line --mode realtime --carrier twilio
+
+# Python, pipeline with Anthropic + Cartesia on Telnyx
+getpatter init --yes --name claims-bot --runtime python \
+  --mode pipeline --stt deepgram --llm anthropic --tts cartesia --carrier telnyx
+```
+
+In `--yes` mode the wizard never prompts for API keys; it writes blank placeholders to `.env` for you to fill in. `--skip-keys` does the same in interactive mode.
+
+## What gets scaffolded
+
+The wizard writes a small, focused project. For a TypeScript realtime project on Twilio it produces:
+
+```text
+my-patter-agent/
+├── src/index.ts        # runnable inbound agent, wired to your choices
+├── package.json        # getpatter pinned; "start": "tsx src/index.ts"
+├── .env                # your keys (chmod 0600) or blank placeholders
+├── .env.example        # committable template, no secrets
+├── .gitignore          # ignores .env, node_modules/
+└── README.md           # how to run this project
+```
+
+A Python project mirrors it exactly:
+
+```text
+my-patter-agent/
+├── main.py             # runnable inbound agent, wired to your choices
+├── requirements.txt    # getpatter[<extras>] pinned to the SDK version
+├── .env                # your keys (chmod 0600) or blank placeholders
+├── .env.example        # committable template, no secrets
+├── .gitignore          # ignores .env, __pycache__/, .venv/
+└── README.md           # how to run this project
+```
+
+The generated entry file is a minimal inbound agent. A realtime project looks like this (Python shown; TypeScript mirrors it with `new` and an options object):
+
+```python
+from getpatter import Patter, Twilio, OpenAIRealtime2
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    engine=OpenAIRealtime2(),
+    system_prompt="...",
+    first_message="...",
+)
+
+await phone.serve(agent, tunnel=True)
+```
+
+A pipeline project swaps the single `engine=` for the three composed providers:
+
+```python
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=CerebrasLLM(),
+    tts=ElevenLabsTTS(),
+    system_prompt="...",
+)
+```
+
+Every provider and carrier reads its credentials from the environment when constructed with no arguments, so the generated code stays clean and your secrets live only in `.env`.
+
+<Warning>
+Your API keys are written to `.env` with file mode `0600` (owner read/write only) and `.env` is listed in `.gitignore`. The wizard never prints or logs the values you enter. Keep `.env` out of version control — commit `.env.example` instead.
+</Warning>
+
+## IDE skills
+
+Optionally, the wizard installs Patter's editor "skills" — reference material your AI coding assistant can use while you build. It is a multi-select step supporting `claude-code`, `cursor`, `copilot`, and `codex`:
+
+```sh
+getpatter init --ide claude-code,cursor
+```
+
+This shells out to `npx skills add` under the hood. If Node (`npx`) is not available — common on Python-only machines — the step is skipped gracefully and the rest of the scaffold still completes. Use `--no-skills` to skip it entirely.
+
+## Next steps
+
+Once the project is created:
+
+1. `cd` into the new directory.
+2. Fill in your API keys in `.env`.
+3. Install dependencies — `npm install` (TypeScript) or `pip install -r requirements.txt` (Python).
+4. Run it — `npm start` (TypeScript) or `python main.py` (Python).
+
+The agent answers inbound calls and starts a Cloudflare Quick Tunnel (`tunnel=True`) so your carrier can reach your local server during development.
+
+<CardGroup cols={2}>
+  <Card title="Python Quickstart" icon="rocket" href="/python-sdk/quickstart">
+    The four-line walkthrough, credentials, and your first call.
+  </Card>
+  <Card title="TypeScript Quickstart" icon="rocket" href="/typescript-sdk/quickstart">
+    The same first call, in TypeScript.
+  </Card>
+  <Card title="Core Concepts" icon="lightbulb" href="/concepts">
+    Agents, voice modes, and the audio pipeline.
+  </Card>
+  <Card title="Tunneling" icon="cloud" href="/dev-tools/tunneling">
+    How the dev tunnel exposes your local server to the carrier.
+  </Card>
+</CardGroup>

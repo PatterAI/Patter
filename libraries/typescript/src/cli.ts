@@ -4,6 +4,7 @@
  * Patter CLI — standalone dashboard and utilities.
  *
  * Usage:
+ *   npx getpatter init [options]   (also runnable as `npm create getpatter`)
  *   npx getpatter dashboard [--port 8000]
  *   npx getpatter eval run <suite> [--agent module:export] [--output report.json]
  *   npx getpatter telemetry [status|disable|enable]
@@ -19,6 +20,7 @@ import { VERSION } from './version';
 import { TelemetryClient, DEFAULT_ENDPOINT } from './telemetry/client';
 import { isEnabled } from './telemetry/consent';
 import { isOptedOut, setOptOut } from './telemetry/install-id';
+import { runInit } from './init/cli';
 
 /**
  * Record which CLI command was invoked (the name only — never args/flags), then
@@ -245,6 +247,15 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   }
+  if (command === 'init') {
+    await emitCliCommand('init');
+    try {
+      process.exit(await runInit(process.argv.slice(3)));
+    } catch (err) {
+      console.error(`init failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
   if (command === 'hermes') {
     await emitCliCommand('hermes');
     printHermesStub();
@@ -258,6 +269,7 @@ async function main(): Promise<void> {
   if (command !== 'dashboard') {
     await emitCliCommand(command ? 'other' : 'none');
     console.log('Usage: getpatter dashboard [--port 8000]');
+    console.log('       getpatter init          Scaffold a new voice-agent project (setup wizard)');
     console.log('       getpatter eval run <suite> [--agent module:export] [--output report.json]');
     console.log('       getpatter hermes        (stub — use Python SDK for the wizard)');
     console.log('       getpatter openclaw      (stub — use Python SDK for the wizard)');

@@ -55,3 +55,23 @@ jobs:
         run: |
           cd libraries/typescript
           npm publish
+
+  release-create-getpatter:
+    name: Publish create-getpatter launcher to npm
+    # The launcher's npx fallback fetches `getpatter@<version>`, so publish the
+    # SDK first to guarantee it is resolvable when `npm create getpatter` runs.
+    needs: release-ts-sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd create-getpatter
+          npm publish

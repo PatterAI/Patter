@@ -1,6 +1,26 @@
 ## Unreleased
 
+## 0.6.9 (2026-06-23)
+
 ### Added
+
+- **`getpatter init` — greenfield project setup wizard, plus the
+  `npm create getpatter` launcher.** A new interactive scaffolder generates a
+  complete, runnable inbound voice-agent project so a new user goes from nothing
+  to a project they can run in under a minute. It prompts for a voice mode
+  (`realtime` — one engine — or `pipeline` — STT + LLM + TTS), the
+  engine/providers, and the telephony carrier, then writes the entry file
+  (`main.py` / `src/index.ts`), a `.env` (chmod 0600 — secrets are never echoed
+  or logged) and `.env.example`, the dependency manifest, `.gitignore`, and a
+  `README.md`. Every prompt has a matching flag (`--mode`, `--engine`, `--stt`,
+  `--llm`, `--tts`, `--carrier`, `--yes`, …) so it also runs fully
+  non-interactively in CI. Exposed as `getpatter init` on both CLIs
+  (`libraries/python/getpatter/init/`, `libraries/typescript/src/init/cli.ts`)
+  and as `npm create getpatter` via the new zero-dependency `create-getpatter`
+  launcher package, which re-dispatches to the same wizard (single source of
+  truth — no bundled copy). Additive: no existing command or public API
+  changes. Python ↔ TypeScript parity (byte-for-byte mirrored prompts, flags,
+  defaults, and scaffold codegen). Docs: `docs/quickstart-create.mdx`.
 
 - **Python: `KrispVivaFilter` and `DeepFilterNetFilter` are now exported from
   the package root.** Both noise-suppression `AudioFilter` implementations

@@ -1,0 +1,43 @@
+{
+  "name": "create-getpatter",
+  "version": "0.6.9",
+  "description": "npm create shim for Patter — runs `getpatter init`, the greenfield voice-agent setup wizard",
+  "license": "MIT",
+  "author": {
+    "name": "PatterAI",
+    "email": "hello@getpatter.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PatterAI/Patter.git",
+    "directory": "create-getpatter"
+  },
+  "homepage": "https://www.getpatter.com",
+  "bugs": {
+    "url": "https://github.com/PatterAI/Patter/issues"
+  },
+  "keywords": [
+    "voice",
+    "ai",
+    "phone",
+    "telephony",
+    "scaffold",
+    "create",
+    "getpatter",
+    "patter"
+  ],
+  "type": "module",
+  "bin": {
+    "create-getpatter": "./index.js"
+  },
+  "scripts": {
+    "test": "node smoke-test.mjs"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
