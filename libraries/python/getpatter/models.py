@@ -607,6 +607,12 @@ class Agent:
     # ``None`` (default) keeps the adapter default (``whisper-1``). Set to
     # e.g. ``"gpt-realtime-whisper"`` for low-latency transcript partials.
     openai_realtime_input_audio_transcription_model: str | None = None
+    # OpenAI Realtime — ISO-639-1 language hint for
+    # ``input_audio_transcription.language`` (e.g. ``"it"``). ``None`` (default)
+    # keeps Whisper auto-detect; pinning a language stops auto-detect from
+    # mislabelling short / noisy phone utterances. Display-only (transcript
+    # feeds dashboard / ``on_transcript``, not the model's comprehension).
+    openai_realtime_transcription_language: str | None = None
     # OpenAI Realtime — input noise reduction for speakerphone / conference
     # audio. ``None`` (default) omits the field entirely (no reduction —
     # today's behavior). ``"far_field"`` is recommended for phone /

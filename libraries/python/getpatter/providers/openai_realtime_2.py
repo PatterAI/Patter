@@ -49,6 +49,7 @@ from typing import Any, AsyncGenerator
 import websockets
 
 from getpatter.audio.transcoding import (
+    StatefulFirLowpass,
     StatefulResampler,
     mulaw_to_pcm16,
     pcm16_to_mulaw,
@@ -119,6 +120,15 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
         # Created lazily on the first audio delta so each session has its own state.
         self._outbound_resampler_24to16: StatefulResampler | None = None
         self._outbound_resampler_16to8: StatefulResampler | None = None
+        # Anti-alias low-pass applied to the 24 kHz model output BEFORE the
+        # 24→16→8 decimation chain. ``gpt-realtime-2`` emits voice with
+        # significant energy above 4 kHz; without a real anti-alias filter that
+        # energy folds back into the telephony band on decimation and is heard
+        # as raspy / crackly speech. A 63-tap Hamming-windowed sinc at 3.7 kHz
+        # (~53 dB stopband) removes it so the downstream linear/binomial stages
+        # have nothing left to alias. Created lazily so each session owns its
+        # state.
+        self._outbound_lowpass_24k: StatefulFirLowpass | None = None
         # Last 8 kHz input sample carried across chunk boundaries for the
         # direct 3x linear upsample. The carry guarantees the first output of
         # each chunk interpolates from the real preceding sample, not from a
@@ -202,6 +212,14 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             include_response_gating=True,
             gate_response_on_transcript=self.gate_response_on_transcript,
         )
+        # Pin the transcription language when configured — Whisper auto-detect
+        # mislabels short / noisy phone utterances. Inherited from the v1
+        # constructor; omitted when unset. GA path is
+        # ``audio.input.transcription.language``.
+        if self.transcription_language is not None:
+            config["audio"]["input"]["transcription"]["language"] = (
+                self.transcription_language
+            )
         # GA nests noise reduction under audio.input AND renames the key: the
         # v1-beta ``input_audio_noise_reduction`` becomes ``noise_reduction``
         # (same ``input_audio_`` → nested drop as format/transcription). Sending
@@ -304,8 +322,13 @@ class OpenAIRealtime2Adapter(OpenAIRealtimeAdapter):
             self._outbound_resampler_16to8 = StatefulResampler(
                 src_rate=16000, dst_rate=8000
             )
+            self._outbound_lowpass_24k = StatefulFirLowpass(
+                num_taps=63, cutoff_hz=3700, sample_rate_hz=24000
+            )
         pcm24 = base64.b64decode(delta_b64)
-        pcm16 = self._outbound_resampler_24to16.process(pcm24)
+        # Anti-alias FIRST (at 24 kHz), THEN decimate — see field docstring.
+        filtered24 = self._outbound_lowpass_24k.process(pcm24)  # type: ignore[union-attr]
+        pcm16 = self._outbound_resampler_24to16.process(filtered24)
         pcm8 = self._outbound_resampler_16to8.process(pcm16)  # type: ignore[union-attr]
         if not pcm8:
             return b""

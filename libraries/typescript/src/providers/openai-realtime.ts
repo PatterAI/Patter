@@ -114,6 +114,12 @@ export interface OpenAIRealtimeOptions {
   modalities?: string[];
   toolChoice?: string | Record<string, unknown>;
   inputAudioTranscriptionModel?: string;
+  /**
+   * ISO-639-1 language hint for `input_audio_transcription.language`
+   * (e.g. `"it"`). Pins the transcription model to one language instead of
+   * auto-detecting per utterance. Omit to keep auto-detect (default).
+   */
+  transcriptionLanguage?: string;
   vadType?: 'server_vad' | 'semantic_vad';
   /**
    * Trailing silence (ms) the server VAD waits for before treating the user's
@@ -356,6 +362,11 @@ export class OpenAIRealtimeAdapter {
       }),
       input_audio_transcription: {
         model: this.options.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
+        // Pin the transcription language when configured — Whisper auto-detect
+        // mislabels short / noisy phone utterances. Omitted when unset.
+        ...(this.options.transcriptionLanguage
+          ? { language: this.options.transcriptionLanguage }
+          : {}),
       },
     };
     // v1 puts noise reduction at the TOP LEVEL of session (not nested under

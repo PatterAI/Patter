@@ -49,6 +49,14 @@ class Realtime:
     # ``"gpt-realtime-whisper"`` for low-latency partials, ``"gpt-4o-transcribe"``
     # for higher accuracy.
     input_audio_transcription_model: str | None = None
+    # ISO-639-1 language hint for the Realtime session's
+    # ``input_audio_transcription.language`` (e.g. ``"it"``, ``"en"``, ``"es"``).
+    # Pins the input transcription model to one language instead of
+    # auto-detecting per utterance — auto-detect mislabels short / noisy phone
+    # utterances. ``None`` (default) keeps auto-detect. Display-only: the
+    # transcript feeds the dashboard / ``on_transcript``, not the model's
+    # comprehension.
+    transcription_language: str | None = None
     # Input noise reduction for speakerphone / conference audio. ``None``
     # (default) omits the field (no reduction). ``"far_field"`` recommended
     # for phone calls. Mirrors ``Patter.agent(openai_realtime_noise_reduction=)``.

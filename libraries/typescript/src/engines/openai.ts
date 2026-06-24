@@ -31,6 +31,15 @@ export interface RealtimeOptions {
    */
   inputAudioTranscriptionModel?: string;
   /**
+   * ISO-639-1 language hint for the Realtime session's
+   * `input_audio_transcription.language` (e.g. `"it"`, `"en"`, `"es"`). Pins
+   * the input transcription model to one language instead of auto-detecting
+   * per utterance — auto-detect mislabels short / noisy phone utterances.
+   * Omit to keep auto-detect (default). Display-only: the transcript feeds the
+   * dashboard / `onTranscript`, not the model's comprehension.
+   */
+  transcriptionLanguage?: string;
+  /**
    * Input noise reduction for speakerphone / conference audio. `undefined`
    * (default) omits the field (no reduction). `"far_field"` recommended for
    * phone / speakerphone calls; `"near_field"` for a handset close to the
@@ -90,6 +99,7 @@ export class Realtime {
   readonly voice: string;
   readonly reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
   readonly inputAudioTranscriptionModel?: string;
+  readonly transcriptionLanguage?: string;
   readonly noiseReduction?: 'near_field' | 'far_field';
   readonly turnDetection?: RealtimeTurnDetection;
   readonly gateResponseOnTranscript?: boolean;
@@ -113,6 +123,7 @@ export class Realtime {
     this.voice = opts.voice ?? "alloy";
     this.reasoningEffort = opts.reasoningEffort;
     this.inputAudioTranscriptionModel = opts.inputAudioTranscriptionModel;
+    this.transcriptionLanguage = opts.transcriptionLanguage;
     this.noiseReduction = opts.noiseReduction;
     this.turnDetection = opts.turnDetection;
     this.gateResponseOnTranscript = opts.gateResponseOnTranscript;

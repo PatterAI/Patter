@@ -13,7 +13,10 @@ Public API
 
 from __future__ import annotations
 
+import array
 import logging
+import math
+import sys
 import warnings
 from typing import Optional, Tuple
 
@@ -36,6 +39,7 @@ __all__ = [
     "resample_24k_to_16k",
     "PcmCarry",
     "StatefulResampler",
+    "StatefulFirLowpass",
     "create_resampler_8k_to_16k",
     "create_resampler_16k_to_8k",
     "create_resampler_24k_to_16k",
@@ -263,6 +267,146 @@ class StatefulResampler:
         """Reset internal state for a new stream without recreating the object."""
         self._carry.reset()
         self._state = None
+
+
+# ---------------------------------------------------------------------------
+# StatefulFirLowpass — windowed-sinc anti-alias low-pass
+# ---------------------------------------------------------------------------
+
+
+def _pcm16le_to_int_list(data: bytes) -> array.array:
+    """Decode little-endian PCM16 bytes to a signed-int ``array('h')``."""
+    samples = array.array("h")
+    samples.frombytes(data)
+    if sys.byteorder == "big":
+        # ``array('h')`` parses in native order; the wire format is LE.
+        samples.byteswap()
+    return samples
+
+
+def _int_list_to_pcm16le(samples: array.array) -> bytes:
+    """Encode a signed-int ``array('h')`` to little-endian PCM16 bytes."""
+    if sys.byteorder == "big":
+        swapped = array.array("h", samples)
+        swapped.byteswap()
+        return swapped.tobytes()
+    return samples.tobytes()
+
+
+class StatefulFirLowpass:
+    """Linear-phase FIR low-pass with cross-chunk history — an anti-alias
+    pre-filter to run BEFORE decimation.
+
+    Why this exists: decimating ``gpt-realtime-2``'s 24 kHz output straight
+    down to 8 kHz aliases any energy above 4 kHz into the telephony band,
+    heard as raspy / crackly speech. The 24→16 (linear) + 16→8 resampler
+    chain under-attenuates that band. Running this low-pass on the 24 kHz
+    signal FIRST removes everything above the cutoff, so the downstream
+    decimation has nothing left to alias.
+
+    Coefficients are a Hamming-windowed sinc (~53 dB stopband), DC-normalised
+    to unity gain. State is the previous ``num_taps - 1`` input samples,
+    carried across :meth:`process` calls so the output is continuous (no
+    per-chunk transient). Group delay is a constant ``(num_taps - 1) / 2``
+    samples — inaudible at these tap counts. Odd trailing bytes are buffered
+    across calls via :class:`PcmCarry`, mirroring :class:`StatefulResampler`.
+
+    Parameters
+    ----------
+    num_taps:
+        Number of FIR taps. Must be a positive ODD integer (linear phase).
+    cutoff_hz:
+        -6 dB cutoff frequency in Hz.
+    sample_rate_hz:
+        Sample rate of the stream being filtered, in Hz.
+    """
+
+    __slots__ = ("_coeffs", "_num_taps", "_history", "_carry")
+
+    def __init__(self, num_taps: int, cutoff_hz: float, sample_rate_hz: float) -> None:
+        if num_taps < 1 or num_taps % 2 == 0:
+            raise ValueError(
+                f"StatefulFirLowpass: num_taps must be a positive odd integer, "
+                f"got {num_taps}"
+            )
+        if cutoff_hz <= 0 or cutoff_hz >= sample_rate_hz / 2:
+            raise ValueError(
+                f"StatefulFirLowpass: cutoff_hz must be in (0, "
+                f"{sample_rate_hz / 2}), got {cutoff_hz}"
+            )
+        self._num_taps = num_taps
+        self._coeffs = self._design(num_taps, cutoff_hz, sample_rate_hz)
+        # Last ``num_taps - 1`` input samples: history[k] = x[k - (num_taps-1)].
+        self._history: list[float] = [0.0] * (num_taps - 1)
+        self._carry = PcmCarry(2)
+
+    @staticmethod
+    def _design(num_taps: int, cutoff_hz: float, sample_rate_hz: float) -> list[float]:
+        """Hamming-windowed sinc low-pass, DC-normalised to unity gain."""
+        fc = cutoff_hz / sample_rate_hz  # normalised cutoff (cycles/sample)
+        m = num_taps - 1
+        coeffs = [0.0] * num_taps
+        total = 0.0
+        for n in range(num_taps):
+            k = n - m / 2
+            if k == 0:
+                sinc = 2 * fc
+            else:
+                sinc = math.sin(2 * math.pi * fc * k) / (math.pi * k)
+            window = 0.54 - 0.46 * math.cos((2 * math.pi * n) / m)  # Hamming
+            coeffs[n] = sinc * window
+            total += coeffs[n]
+        return [c / total for c in coeffs]  # unity DC gain
+
+    def process(self, pcm: bytes) -> bytes:
+        """Filter a chunk of PCM16-LE samples, returning the same number of
+        samples. Odd trailing bytes are buffered across calls.
+        """
+        aligned = self._carry.feed(pcm)
+        if not aligned:
+            return b""
+        x = _pcm16le_to_int_list(aligned)
+        n = len(x)
+
+        taps = self._num_taps
+        keep = taps - 1
+        c = self._coeffs
+        hist = self._history
+        out = array.array("h", bytes(n * 2))
+
+        for i in range(n):
+            acc = 0.0
+            # y[i] = sum_{j=0..taps-1} c[j] * x[i - (taps-1) + j]
+            for j in range(taps):
+                idx = i - keep + j
+                s = x[idx] if idx >= 0 else hist[keep + idx]
+                acc += c[j] * s
+            out[i] = _clamp_int16(int(round(acc)))
+
+        # New history = last ``keep`` input samples of the virtual stream.
+        # Build into a temp first so small chunks (n < keep) don't read
+        # overwritten slots.
+        nxt = [0.0] * keep
+        for k in range(keep):
+            idx = n - keep + k
+            nxt[k] = float(x[idx]) if idx >= 0 else hist[keep + idx]
+        self._history = nxt
+
+        return _int_list_to_pcm16le(out)
+
+    def reset(self) -> None:
+        """Clear filter history (e.g. at call boundaries)."""
+        self._history = [0.0] * (self._num_taps - 1)
+        self._carry.reset()
+
+
+def _clamp_int16(value: int) -> int:
+    """Clamp an int to the signed 16-bit range."""
+    if value > 32767:
+        return 32767
+    if value < -32768:
+        return -32768
+    return value
 
 
 # ---------------------------------------------------------------------------

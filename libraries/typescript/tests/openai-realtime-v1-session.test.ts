@@ -21,6 +21,19 @@ function buildV1(opts: OpenAIRealtimeOptions): Record<string, unknown> {
     .buildSessionConfig();
 }
 
+describe('[unit] OpenAIRealtimeAdapter v1 transcription language', () => {
+  it('pins input_audio_transcription.language when transcriptionLanguage is set', () => {
+    const t = buildV1({ transcriptionLanguage: 'it' }).input_audio_transcription as Record<string, unknown>;
+    expect(t.language).toBe('it');
+    expect(typeof t.model).toBe('string');
+  });
+
+  it('OMITS the language key entirely when unset (Whisper auto-detect)', () => {
+    const t = buildV1({}).input_audio_transcription as Record<string, unknown>;
+    expect('language' in t).toBe(false);
+  });
+});
+
 describe('[unit] OpenAIRealtimeAdapter v1 noise reduction', () => {
   it('injects input_audio_noise_reduction at the TOP LEVEL of session (not nested)', () => {
     const config = buildV1({ noiseReduction: 'far_field' });

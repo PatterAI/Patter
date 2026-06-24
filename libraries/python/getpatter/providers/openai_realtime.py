@@ -189,6 +189,11 @@ class OpenAIRealtimeAdapter:
         tool_choice: str | dict | None = None,
         input_audio_transcription_model: OpenAITranscriptionModel
         | str = OpenAITranscriptionModel.WHISPER_1,
+        # ISO-639-1 language hint for ``input_audio_transcription.language``
+        # (e.g. ``"it"``). Pins the transcription model to one language instead
+        # of auto-detecting per utterance. ``None`` (default) omits the field
+        # (auto-detect — today's behavior).
+        transcription_language: str | None = None,
         vad_type: Literal[
             "server_vad", "semantic_vad"
         ] = OpenAIRealtimeVADType.SERVER_VAD.value,
@@ -236,6 +241,7 @@ class OpenAIRealtimeAdapter:
         self.modalities = modalities
         self.tool_choice = tool_choice
         self.input_audio_transcription_model = input_audio_transcription_model
+        self.transcription_language = transcription_language
         self.vad_type = vad_type
         self.silence_duration_ms = silence_duration_ms
         self.reasoning_effort = reasoning_effort
@@ -435,6 +441,12 @@ class OpenAIRealtimeAdapter:
                 "model": self.input_audio_transcription_model,
             },
         }
+        # Pin the transcription language when configured — Whisper auto-detect
+        # mislabels short / noisy phone utterances. Omitted when unset.
+        if self.transcription_language is not None:
+            session_config["input_audio_transcription"]["language"] = (
+                self.transcription_language
+            )
         # v1 puts noise reduction at the TOP LEVEL of session (not nested under
         # audio.input as the GA shape does). Omitted entirely when unset.
         if self.noise_reduction is not None:

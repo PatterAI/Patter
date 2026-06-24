@@ -1388,6 +1388,13 @@ class Patter:
                     adapter_kwargs["input_audio_transcription_model"] = (
                         transcription_model
                     )
+                transcription_language = getattr(
+                    agent,
+                    "openai_realtime_transcription_language",
+                    None,
+                )
+                if transcription_language is not None:
+                    adapter_kwargs["transcription_language"] = transcription_language
                 tmp_adapter = OpenAIRealtime2Adapter(**adapter_kwargs)
                 ws = await tmp_adapter.open_parked_connection()
                 if self._prewarmed_connections.get(call_id) is not slot:
@@ -1939,6 +1946,7 @@ class Patter:
         # stream-handler can forward them to ``OpenAIRealtimeAdapter``.
         openai_realtime_reasoning_effort: str | None = None
         openai_realtime_input_audio_transcription_model: str | None = None
+        openai_realtime_transcription_language: str | None = None
         if engine is not None:
             # Engine mode handles the LLM internally — `llm=` is ignored.
             # Emit a one-time warning so the user knows.
@@ -1961,6 +1969,9 @@ class Patter:
                 openai_realtime_reasoning_effort = engine_fields.get("reasoning_effort")
                 openai_realtime_input_audio_transcription_model = engine_fields.get(
                     "input_audio_transcription_model"
+                )
+                openai_realtime_transcription_language = engine_fields.get(
+                    "transcription_language"
                 )
                 # Explicit agent() kwargs win over the engine marker value.
                 if openai_realtime_noise_reduction is None:
@@ -2163,6 +2174,7 @@ class Patter:
             prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
+            openai_realtime_transcription_language=openai_realtime_transcription_language,
             openai_realtime_noise_reduction=openai_realtime_noise_reduction,
             realtime_turn_detection=realtime_turn_detection,
             realtime_gate_response_on_transcript=realtime_gate_response_on_transcript,
@@ -2185,6 +2197,7 @@ class Patter:
                 "model": engine.model,
                 "reasoning_effort": engine.reasoning_effort,
                 "input_audio_transcription_model": engine.input_audio_transcription_model,
+                "transcription_language": engine.transcription_language,
                 "noise_reduction": engine.noise_reduction,
                 "turn_detection": engine.turn_detection,
                 "gate_response_on_transcript": engine.gate_response_on_transcript,
@@ -2196,6 +2209,7 @@ class Patter:
                 "model": engine.model,
                 "reasoning_effort": engine.reasoning_effort,
                 "input_audio_transcription_model": engine.input_audio_transcription_model,
+                "transcription_language": engine.transcription_language,
                 "noise_reduction": engine.noise_reduction,
                 "turn_detection": engine.turn_detection,
                 "gate_response_on_transcript": engine.gate_response_on_transcript,
