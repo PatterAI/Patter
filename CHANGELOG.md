@@ -18,6 +18,45 @@
   `providers/openai_realtime.py`, `providers/openai_realtime_2.py`, `client.py`,
   `models.py`, `stream_handler.py`.
 
+### Fixed
+
+- **OpenAI Realtime 2: raspy / crackly agent voice on telephony.** The GA
+  adapter decimated `gpt-realtime-2`'s 24 kHz output down to mulaw 8 kHz through
+  a 24→16 (linear, unfiltered) → 16→8 (gentle 5-tap binomial) chain that
+  under-attenuated energy above 4 kHz. `gpt-realtime-2` emits significant
+  high-frequency content, which aliased into the telephony band and was heard as
+  raspy speech. A 63-tap Hamming-windowed-sinc anti-alias low-pass (cutoff
+  3.7 kHz, ~53 dB stopband, stateful across audio deltas) now runs on the 24 kHz
+  signal before decimation, so the downstream stages have nothing above the
+  cutoff left to fold back. Contained to the Realtime-2 outbound path — the
+  shared `StatefulResampler` / pipeline TTS is untouched.
+  `libraries/typescript/src/audio/transcoding.ts` (new `StatefulFirLowpass`),
+  `providers/openai-realtime-2.ts`. Python mirror:
+  `libraries/python/getpatter/audio/transcoding.py` (`StatefulFirLowpass`),
+  `providers/openai_realtime_2.py`.
+
+## 0.6.9 (2026-06-23)
+
+### Added
+
+- **`getpatter init` — greenfield project setup wizard, plus the
+  `npm create getpatter` launcher.** A new interactive scaffolder generates a
+  complete, runnable inbound voice-agent project so a new user goes from nothing
+  to a project they can run in under a minute. It prompts for a voice mode
+  (`realtime` — one engine — or `pipeline` — STT + LLM + TTS), the
+  engine/providers, and the telephony carrier, then writes the entry file
+  (`main.py` / `src/index.ts`), a `.env` (chmod 0600 — secrets are never echoed
+  or logged) and `.env.example`, the dependency manifest, `.gitignore`, and a
+  `README.md`. Every prompt has a matching flag (`--mode`, `--engine`, `--stt`,
+  `--llm`, `--tts`, `--carrier`, `--yes`, …) so it also runs fully
+  non-interactively in CI. Exposed as `getpatter init` on both CLIs
+  (`libraries/python/getpatter/init/`, `libraries/typescript/src/init/cli.ts`)
+  and as `npm create getpatter` via the new zero-dependency `create-getpatter`
+  launcher package, which re-dispatches to the same wizard (single source of
+  truth — no bundled copy). Additive: no existing command or public API
+  changes. Python ↔ TypeScript parity (byte-for-byte mirrored prompts, flags,
+  defaults, and scaffold codegen). Docs: `docs/quickstart-create.mdx`.
+
 - **Python: `KrispVivaFilter` and `DeepFilterNetFilter` are now exported from
   the package root.** Both noise-suppression `AudioFilter` implementations
   already shipped as modules (`getpatter/providers/krisp_filter.py`,
@@ -125,21 +164,6 @@
   understood was removed or renamed — all changes are additive.
 
 ### Fixed
-
-- **OpenAI Realtime 2: raspy / crackly agent voice on telephony.** The GA
-  adapter decimated `gpt-realtime-2`'s 24 kHz output down to mulaw 8 kHz through
-  a 24→16 (linear, unfiltered) → 16→8 (gentle 5-tap binomial) chain that
-  under-attenuated energy above 4 kHz. `gpt-realtime-2` emits significant
-  high-frequency content, which aliased into the telephony band and was heard as
-  raspy speech. A 63-tap Hamming-windowed-sinc anti-alias low-pass (cutoff
-  3.7 kHz, ~53 dB stopband, stateful across audio deltas) now runs on the 24 kHz
-  signal before decimation, so the downstream stages have nothing above the
-  cutoff left to fold back. Contained to the Realtime-2 outbound path — the
-  shared `StatefulResampler` / pipeline TTS is untouched.
-  `libraries/typescript/src/audio/transcoding.ts` (new `StatefulFirLowpass`),
-  `providers/openai-realtime-2.ts`. Python mirror:
-  `libraries/python/getpatter/audio/transcoding.py` (`StatefulFirLowpass`),
-  `providers/openai_realtime_2.py`.
 
 - **Telemetry: `call_completed` now carries the call `direction`
   (inbound/outbound).** The media-stream bridge's end payload has no direction,

@@ -43,7 +43,8 @@
           {
             "group": "Welcome",
             "pages": [
-              "home/index"
+              "home/index",
+              "quickstart-create"
             ]
           },
           {
