@@ -5,7 +5,64 @@ import {
   resample8kTo16k,
   resample16kTo8k,
   resample24kTo16k,
+  StatefulFirLowpass,
 } from "../src/audio/transcoding";
+
+/** Generate `numSamples` of a real sine tone as a PCM16-LE buffer. */
+function sinePcm(freqHz: number, numSamples: number, amp = 10000, rate = 24000): Buffer {
+  const buf = Buffer.alloc(numSamples * 2);
+  for (let i = 0; i < numSamples; i++) {
+    buf.writeInt16LE(Math.round(amp * Math.sin((2 * Math.PI * freqHz * i) / rate)), i * 2);
+  }
+  return buf;
+}
+
+/** RMS amplitude of a PCM16-LE buffer. */
+function rms(buf: Buffer): number {
+  const n = buf.length >> 1;
+  if (n === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const s = buf.readInt16LE(i * 2);
+    sum += s * s;
+  }
+  return Math.sqrt(sum / n);
+}
+
+describe("[unit] StatefulFirLowpass anti-alias pre-filter", () => {
+  const make = () => new StatefulFirLowpass({ numTaps: 63, cutoffHz: 3700, sampleRateHz: 24000 });
+
+  it("passes a 500 Hz tone (below cutoff) at near-unity amplitude", () => {
+    const input = sinePcm(500, 4800);
+    const out = make().process(input);
+    const skip = 200 * 2; // drop the FIR startup transient before measuring
+    const ratio = rms(out.subarray(skip)) / rms(input.subarray(skip));
+    expect(ratio).toBeGreaterThan(0.9);
+    expect(ratio).toBeLessThan(1.1);
+  });
+
+  it("strongly attenuates a 7 kHz tone (above cutoff) — the aliasing source", () => {
+    const input = sinePcm(7000, 4800);
+    const out = make().process(input);
+    const skip = 200 * 2;
+    const ratio = rms(out.subarray(skip)) / rms(input.subarray(skip));
+    expect(ratio).toBeLessThan(0.1);
+  });
+
+  it("is continuous across chunk boundaries (chunked output === single-shot)", () => {
+    const input = sinePcm(1500, 2400);
+    const whole = make().process(input);
+    const lp = make();
+    const a = lp.process(input.subarray(0, 1000));
+    const b = lp.process(input.subarray(1000));
+    expect(Buffer.concat([a, b]).equals(whole)).toBe(true);
+  });
+
+  it("rejects an even tap count and an out-of-range cutoff", () => {
+    expect(() => new StatefulFirLowpass({ numTaps: 64, cutoffHz: 3700, sampleRateHz: 24000 })).toThrow();
+    expect(() => new StatefulFirLowpass({ numTaps: 63, cutoffHz: 20000, sampleRateHz: 24000 })).toThrow();
+  });
+});
 
 describe("mulawToPcm16", () => {
   it("decodes silence (mulaw 0xFF) to near-zero PCM", () => {

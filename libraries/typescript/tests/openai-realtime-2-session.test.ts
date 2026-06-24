@@ -27,6 +27,24 @@ function audioInput(config: Record<string, unknown>): Record<string, unknown> {
   return (config.audio as { input: Record<string, unknown> }).input;
 }
 
+describe('[unit] OpenAIRealtime2Adapter GA transcription language', () => {
+  function transcription(config: Record<string, unknown>): Record<string, unknown> {
+    return audioInput(config).transcription as Record<string, unknown>;
+  }
+
+  it('pins audio.input.transcription.language when transcriptionLanguage is set', () => {
+    const t = transcription(buildGA({ transcriptionLanguage: 'it' }));
+    expect(t.language).toBe('it');
+    // The model is still emitted (default whisper-1) — language is additive.
+    expect(typeof t.model).toBe('string');
+  });
+
+  it('OMITS the language key entirely when unset (Whisper auto-detect, today behavior)', () => {
+    const t = transcription(buildGA({}));
+    expect('language' in t).toBe(false);
+  });
+});
+
 describe('[unit] OpenAIRealtime2Adapter GA noise reduction', () => {
   it("nests noise_reduction under session.audio.input when set to 'far_field'", () => {
     const config = buildGA({ noiseReduction: 'far_field' });

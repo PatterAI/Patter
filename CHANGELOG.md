@@ -14,6 +14,9 @@
   omitted by default (auto-detect preserved, no behaviour change for existing
   callers). `libraries/typescript/src/engines/openai.ts`, `engines/openai-2.ts`,
   `providers/openai-realtime.ts`, `providers/openai-realtime-2.ts`, `server.ts`.
+  Python mirror: `engines/openai_realtime.py`, `engines/openai_realtime_2.py`,
+  `providers/openai_realtime.py`, `providers/openai_realtime_2.py`, `client.py`,
+  `models.py`, `stream_handler.py`.
 
 - **Python: `KrispVivaFilter` and `DeepFilterNetFilter` are now exported from
   the package root.** Both noise-suppression `AudioFilter` implementations
@@ -134,7 +137,9 @@
   cutoff left to fold back. Contained to the Realtime-2 outbound path — the
   shared `StatefulResampler` / pipeline TTS is untouched.
   `libraries/typescript/src/audio/transcoding.ts` (new `StatefulFirLowpass`),
-  `providers/openai-realtime-2.ts`.
+  `providers/openai-realtime-2.ts`. Python mirror:
+  `libraries/python/getpatter/audio/transcoding.py` (`StatefulFirLowpass`),
+  `providers/openai_realtime_2.py`.
 
 - **Telemetry: `call_completed` now carries the call `direction`
   (inbound/outbound).** The media-stream bridge's end payload has no direction,

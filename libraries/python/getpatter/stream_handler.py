@@ -1769,6 +1769,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         )
         if transcription_model is not None:
             adapter_kwargs["input_audio_transcription_model"] = transcription_model
+        transcription_language = getattr(
+            self.agent, "openai_realtime_transcription_language", None
+        )
+        if transcription_language is not None:
+            adapter_kwargs["transcription_language"] = transcription_language
         # Forward the speakerphone noise-reduction + turn-detection tuning
         # knobs only when set, so the adapter's own defaults stay authoritative
         # for users who don't pass them. (POINT 1a / 1b.)
