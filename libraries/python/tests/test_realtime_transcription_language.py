@@ -85,7 +85,7 @@ def _phone():
 def test_engine_marker_threads_language_to_agent_realtime_2() -> None:
     from getpatter import OpenAIRealtime2
 
-    eng = OpenAIRealtime2(transcription_language="it")
+    eng = OpenAIRealtime2(api_key="sk-test", transcription_language="it")
     assert eng.transcription_language == "it"
     agent = _phone().agent(engine=eng, system_prompt="hi")
     assert agent.openai_realtime_transcription_language == "it"
@@ -94,7 +94,7 @@ def test_engine_marker_threads_language_to_agent_realtime_2() -> None:
 def test_engine_marker_threads_language_to_agent_realtime_v1() -> None:
     from getpatter import OpenAIRealtime
 
-    eng = OpenAIRealtime(transcription_language="en")
+    eng = OpenAIRealtime(api_key="sk-test", transcription_language="en")
     assert eng.transcription_language == "en"
     agent = _phone().agent(engine=eng, system_prompt="hi")
     assert agent.openai_realtime_transcription_language == "en"
@@ -103,5 +103,7 @@ def test_engine_marker_threads_language_to_agent_realtime_v1() -> None:
 def test_agent_language_defaults_to_none_without_engine_field() -> None:
     from getpatter import OpenAIRealtime2
 
-    agent = _phone().agent(engine=OpenAIRealtime2(), system_prompt="hi")
+    agent = _phone().agent(
+        engine=OpenAIRealtime2(api_key="sk-test"), system_prompt="hi"
+    )
     assert agent.openai_realtime_transcription_language is None

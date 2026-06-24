@@ -1,18 +1,25 @@
 """Unit tests for ``StatefulFirLowpass`` — the windowed-sinc anti-alias
-low-pass that runs on the 24 kHz Realtime-2 output before the 24→16→8
+low-pass that runs on the 24 kHz Realtime-2 output before the 24->16->8
 decimation to mulaw.
 
 These exercise the REAL filter (no mocks): they feed real sinusoids through
 ``process()`` and assert on the real output bytes. A low-frequency tone passes
 near unity; a tone above the cutoff is strongly attenuated; and feeding a
 signal in two chunks yields byte-for-byte the same result as one chunk
-(stateful cross-chunk continuity). numpy is used only to synthesise the test
-signals and measure RMS — the filter itself is pure stdlib.
+(stateful cross-chunk continuity).
+
+Signal synthesis + RMS use only the stdlib (``struct`` / ``math``) — numpy is
+NOT a base dependency, so importing it here would break the base
+``Python SDK Tests`` CI job at collection time. The filter itself is pure
+stdlib too (``array``), so this keeps the whole path dependency-clean.
 """
 
 from __future__ import annotations
 
-import numpy as np
+import math
+import struct
+
+import pytest
 
 from getpatter.audio.transcoding import StatefulFirLowpass
 
@@ -23,15 +30,23 @@ _AMP = 10000
 def _sine_pcm16le(
     freq_hz: float, n: int = 4800, sr: int = _SR, amp: int = _AMP
 ) -> bytes:
-    """A pure sine wave as little-endian PCM16 bytes."""
-    t = np.arange(n) / sr
-    samples = (amp * np.sin(2 * np.pi * freq_hz * t)).astype("<i2")
-    return samples.tobytes()
+    """A pure sine wave as little-endian PCM16 bytes (``struct`` is always LE)."""
+    out = bytearray()
+    for i in range(n):
+        v = int(round(amp * math.sin(2 * math.pi * freq_hz * i / sr)))
+        out += struct.pack("<h", max(-32768, min(32767, v)))
+    return bytes(out)
 
 
 def _rms(pcm: bytes) -> float:
-    arr = np.frombuffer(pcm, dtype="<i2").astype(np.float64)
-    return float(np.sqrt(np.mean(arr * arr))) if arr.size else 0.0
+    n = len(pcm) // 2
+    if n == 0:
+        return 0.0
+    total = 0.0
+    for i in range(n):
+        (s,) = struct.unpack_from("<h", pcm, i * 2)
+        total += s * s
+    return math.sqrt(total / n)
 
 
 def _lowpass() -> StatefulFirLowpass:
@@ -75,23 +90,21 @@ def test_stateful_continuity_across_two_chunks() -> None:
     second = chunked_filter.process(inp[half:])
     chunked = first + second
 
-    assert len(chunked) == len(single)
-    a = np.frombuffer(single, dtype="<i2").astype(np.int64)
-    b = np.frombuffer(chunked, dtype="<i2").astype(np.int64)
-    # Exact byte-for-byte (the chunk split changes nothing in the math).
-    assert int(np.max(np.abs(a - b))) == 0
+    # Exact byte-for-byte — the chunk split changes nothing in the math.
+    assert chunked == single
 
 
 def test_unity_dc_gain() -> None:
     # A constant (DC) input must pass through unchanged once the filter's
     # history has filled — the coefficients are DC-normalised to unity gain.
-    const = np.full(4800, 5000, dtype="<i2").tobytes()
+    const = struct.pack("<h", 5000) * 4800
     out = _lowpass().process(const)
-    out_arr = np.frombuffer(out, dtype="<i2")
-    # Skip the full filter-length start-up transient: the FIR only sees a full
-    # window of constant input once num_taps-1 (=62) samples have flowed in.
-    settled = out_arr[63:]
-    assert np.allclose(settled, 5000, atol=1)
+    n = len(out) // 2
+    # Skip the start-up transient: the FIR only sees a full window of constant
+    # input once num_taps-1 (=62) samples have flowed in.
+    for i in range(63, n):
+        (s,) = struct.unpack_from("<h", out, i * 2)
+        assert abs(s - 5000) <= 1, f"sample {i} settled to {s}, expected ~5000"
 
 
 def test_odd_trailing_byte_carried_across_calls() -> None:
@@ -116,14 +129,10 @@ def test_reset_clears_history() -> None:
 
 
 def test_rejects_even_num_taps() -> None:
-    import pytest
-
     with pytest.raises(ValueError):
         StatefulFirLowpass(num_taps=64, cutoff_hz=3700, sample_rate_hz=_SR)
 
 
 def test_rejects_cutoff_above_nyquist() -> None:
-    import pytest
-
     with pytest.raises(ValueError):
         StatefulFirLowpass(num_taps=63, cutoff_hz=13000, sample_rate_hz=_SR)
