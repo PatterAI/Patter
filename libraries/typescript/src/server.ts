@@ -601,6 +601,9 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
     if (engine.inputAudioTranscriptionModel !== undefined) {
       adapterOptions.inputAudioTranscriptionModel = engine.inputAudioTranscriptionModel;
     }
+    if (engine.transcriptionLanguage !== undefined) {
+      adapterOptions.transcriptionLanguage = engine.transcriptionLanguage;
+    }
     if (engine.noiseReduction !== undefined) {
       adapterOptions.noiseReduction = engine.noiseReduction;
     }

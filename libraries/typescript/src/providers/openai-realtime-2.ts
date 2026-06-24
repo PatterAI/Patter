@@ -31,6 +31,7 @@ import {
 import {
   mulawToPcm16,
   pcm16ToMulaw,
+  StatefulFirLowpass,
   StatefulResampler,
 } from '../audio/transcoding';
 
@@ -88,6 +89,15 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
   private outboundResampler24To16: StatefulResampler | null = null;
   private outboundResampler16To8: StatefulResampler | null = null;
 
+  /** Anti-alias low-pass applied to the 24 kHz model output BEFORE the
+   *  24→16→8 decimation chain. `gpt-realtime-2` emits voice with significant
+   *  energy above 4 kHz; without a real anti-alias filter that energy folds
+   *  back into the telephony band on decimation and is heard as raspy /
+   *  crackly speech. A 63-tap Hamming-windowed sinc at 3.7 kHz (~53 dB
+   *  stopband) removes it so the downstream linear/binomial stages have
+   *  nothing left to alias. Created lazily so each session owns its state. */
+  private outboundLowpass24k: StatefulFirLowpass | null = null;
+
   /** Last 8 kHz input sample carried across chunk boundaries for the
    *  direct 3× linear upsample (see `transcodeInboundMulaw8ToPcm24`).
    *  The carry guarantees the very first output of each chunk
@@ -110,6 +120,11 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
       format: fmt,
       transcription: {
         model: opts.inputAudioTranscriptionModel ?? OpenAITranscriptionModel.WHISPER_1,
+        // Pin the transcription language when configured — Whisper auto-detect
+        // mislabels short / noisy phone utterances. Omitted when unset.
+        ...(opts.transcriptionLanguage
+          ? { language: opts.transcriptionLanguage }
+          : {}),
       },
       // Response creation + barge-in cancellation (issue #154 — hand
       // turn-taking to the server by default):
@@ -675,9 +690,16 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
     if (!this.outboundResampler24To16) {
       this.outboundResampler24To16 = new StatefulResampler({ srcRate: 24000, dstRate: 16000 });
       this.outboundResampler16To8 = new StatefulResampler({ srcRate: 16000, dstRate: 8000 });
+      this.outboundLowpass24k = new StatefulFirLowpass({
+        numTaps: 63,
+        cutoffHz: 3700,
+        sampleRateHz: 24000,
+      });
     }
     const pcm24 = Buffer.from(deltaB64, 'base64');
-    const pcm16 = this.outboundResampler24To16.process(pcm24);
+    // Anti-alias FIRST (at 24 kHz), THEN decimate — see field docstring.
+    const filtered24 = this.outboundLowpass24k!.process(pcm24);
+    const pcm16 = this.outboundResampler24To16.process(filtered24);
     const pcm8 = this.outboundResampler16To8!.process(pcm16);
     if (pcm8.length === 0) return Buffer.alloc(0);
     return pcm16ToMulaw(pcm8);

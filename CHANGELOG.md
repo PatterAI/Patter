@@ -2,6 +2,19 @@
 
 ### Added
 
+- **OpenAI Realtime: `transcriptionLanguage` option on both engine markers.**
+  `OpenAIRealtime` / `OpenAIRealtime2` (TS) and `engines.openai_realtime` /
+  `engines.openai_realtime_2` (Python) now accept an optional ISO-639-1
+  `transcriptionLanguage` (`transcription_language` in Python) that pins the
+  Realtime session's `input_audio_transcription.language` instead of letting
+  Whisper auto-detect per utterance. Auto-detect mislabels short / noisy phone
+  utterances (an Italian "sì" comes back tagged Spanish or English), which only
+  corrupted the display-side transcript (dashboard / `onTranscript` / history) —
+  the speech-to-speech model's comprehension was never affected. Optional,
+  omitted by default (auto-detect preserved, no behaviour change for existing
+  callers). `libraries/typescript/src/engines/openai.ts`, `engines/openai-2.ts`,
+  `providers/openai-realtime.ts`, `providers/openai-realtime-2.ts`, `server.ts`.
+
 - **Python: `KrispVivaFilter` and `DeepFilterNetFilter` are now exported from
   the package root.** Both noise-suppression `AudioFilter` implementations
   already shipped as modules (`getpatter/providers/krisp_filter.py`,
@@ -109,6 +122,19 @@
   understood was removed or renamed — all changes are additive.
 
 ### Fixed
+
+- **OpenAI Realtime 2: raspy / crackly agent voice on telephony.** The GA
+  adapter decimated `gpt-realtime-2`'s 24 kHz output down to mulaw 8 kHz through
+  a 24→16 (linear, unfiltered) → 16→8 (gentle 5-tap binomial) chain that
+  under-attenuated energy above 4 kHz. `gpt-realtime-2` emits significant
+  high-frequency content, which aliased into the telephony band and was heard as
+  raspy speech. A 63-tap Hamming-windowed-sinc anti-alias low-pass (cutoff
+  3.7 kHz, ~53 dB stopband, stateful across audio deltas) now runs on the 24 kHz
+  signal before decimation, so the downstream stages have nothing above the
+  cutoff left to fold back. Contained to the Realtime-2 outbound path — the
+  shared `StatefulResampler` / pipeline TTS is untouched.
+  `libraries/typescript/src/audio/transcoding.ts` (new `StatefulFirLowpass`),
+  `providers/openai-realtime-2.ts`.
 
 - **Telemetry: `call_completed` now carries the call `direction`
   (inbound/outbound).** The media-stream bridge's end payload has no direction,

@@ -489,6 +489,120 @@ export class StatefulResampler {
   }
 }
 
+// ---------- StatefulFirLowpass: windowed-sinc anti-alias low-pass ----------
+
+/** Options for {@link StatefulFirLowpass}. */
+export interface StatefulFirLowpassOptions {
+  /** Number of FIR taps. Must be a positive ODD integer (linear phase). */
+  numTaps: number;
+  /** -6 dB cutoff frequency in Hz. */
+  cutoffHz: number;
+  /** Sample rate of the stream being filtered, in Hz. */
+  sampleRateHz: number;
+}
+
+/**
+ * Linear-phase FIR low-pass with cross-chunk history — an anti-alias
+ * pre-filter to run BEFORE decimation.
+ *
+ * Why this exists: decimating `gpt-realtime-2`'s 24 kHz output straight down
+ * to 8 kHz aliases any energy above 4 kHz into the telephony band, heard as
+ * raspy / crackly speech. The 24→16 (linear, unfiltered) + 16→8 (gentle 5-tap
+ * binomial) resampler chain under-attenuates that band. Running this low-pass
+ * on the 24 kHz signal FIRST removes everything above the cutoff, so the
+ * downstream decimation has nothing left to alias.
+ *
+ * Coefficients are a Hamming-windowed sinc (~53 dB stopband). State is the
+ * previous `numTaps-1` input samples, carried across `process()` calls so the
+ * output is continuous (no per-chunk transient). Group delay is a constant
+ * `(numTaps-1)/2` samples — inaudible at these tap counts.
+ */
+export class StatefulFirLowpass {
+  private readonly coeffs: Float64Array;
+  private readonly numTaps: number;
+  /** Last `numTaps-1` input samples: history[k] = x[k - (numTaps-1)]. */
+  private readonly history: Float64Array;
+  private readonly carry = new PcmCarry();
+
+  constructor(opts: StatefulFirLowpassOptions) {
+    const { numTaps, cutoffHz, sampleRateHz } = opts;
+    if (!Number.isInteger(numTaps) || numTaps < 1 || numTaps % 2 === 0) {
+      throw new Error(
+        `StatefulFirLowpass: numTaps must be a positive odd integer, got ${numTaps}`,
+      );
+    }
+    if (cutoffHz <= 0 || cutoffHz >= sampleRateHz / 2) {
+      throw new Error(
+        `StatefulFirLowpass: cutoffHz must be in (0, ${sampleRateHz / 2}), got ${cutoffHz}`,
+      );
+    }
+    this.numTaps = numTaps;
+    this.coeffs = StatefulFirLowpass.design(numTaps, cutoffHz, sampleRateHz);
+    this.history = new Float64Array(numTaps - 1); // zero-initialised
+  }
+
+  /** Hamming-windowed sinc low-pass, DC-normalised to unity gain. */
+  private static design(numTaps: number, cutoffHz: number, sampleRateHz: number): Float64Array {
+    const fc = cutoffHz / sampleRateHz; // normalised cutoff (cycles/sample)
+    const m = numTaps - 1;
+    const c = new Float64Array(numTaps);
+    let sum = 0;
+    for (let n = 0; n < numTaps; n++) {
+      const k = n - m / 2;
+      const sinc = k === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * k) / (Math.PI * k);
+      const window = 0.54 - 0.46 * Math.cos((2 * Math.PI * n) / m); // Hamming
+      c[n] = sinc * window;
+      sum += c[n];
+    }
+    for (let n = 0; n < numTaps; n++) c[n] /= sum; // unity DC gain
+    return c;
+  }
+
+  /**
+   * Filter a chunk of PCM16-LE samples, returning the same number of samples.
+   * Odd trailing bytes are buffered across calls.
+   */
+  process(pcm: Buffer): Buffer {
+    const aligned = this.carry.push(pcm);
+    const n = aligned.length >> 1;
+    if (n === 0) return Buffer.alloc(0);
+
+    const taps = this.numTaps;
+    const keep = taps - 1;
+    const c = this.coeffs;
+    const hist = this.history;
+    const out = Buffer.alloc(n * 2);
+
+    for (let i = 0; i < n; i++) {
+      let acc = 0;
+      // y[i] = sum_{j=0..taps-1} c[j] * x[i - (taps-1) + j]
+      for (let j = 0; j < taps; j++) {
+        const idx = i - keep + j;
+        const s = idx >= 0 ? aligned.readInt16LE(idx * 2) : hist[keep + idx];
+        acc += c[j] * s;
+      }
+      out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(acc))), i * 2);
+    }
+
+    // New history = last `keep` input samples of the virtual stream. Build into
+    // a temp first so small chunks (n < keep) don't read overwritten slots.
+    const next = new Float64Array(keep);
+    for (let k = 0; k < keep; k++) {
+      const idx = n - keep + k;
+      next[k] = idx >= 0 ? aligned.readInt16LE(idx * 2) : hist[keep + idx];
+    }
+    hist.set(next);
+
+    return out;
+  }
+
+  /** Clear filter history (e.g. at call boundaries). */
+  reset(): void {
+    this.history.fill(0);
+    this.carry.reset();
+  }
+}
+
 /** Create a stateful 16 kHz → 8 kHz downsampling resampler. */
 export function createResampler16kTo8k(): StatefulResampler {
   return new StatefulResampler({ srcRate: 16000, dstRate: 8000 });
