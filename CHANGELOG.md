@@ -108,19 +108,6 @@
   `libraries/typescript/src/telemetry/events.ts`). No payload a v7 consumer
   understood was removed or renamed — all changes are additive.
 
-- **Dashboard recolored from the peach accent to the electric-blue brand
-  palette.** The in-process metrics dashboard now uses the single electric-blue
-  accent (`#2018ea`; surfaces `#ecebfe`, borders `#c6c4f9`) from the Patter
-  design system in place of the previous peach/orange, across both light and
-  dark modes — the live indicators, the "active now" card, selected rows, status
-  pills, the latency waterfall, the live-call transcript, and the bulk-select
-  controls. Purely a color change: no markup, layout, or behaviour was touched.
-  The `--peach*` CSS variables are kept as aliases of the new `--blue*` tokens so
-  the diff stays minimal, and text sitting on the now-darker accent flips to
-  white for contrast (`--fg-on-accent`). `libraries/typescript/src/dashboard/ui.html`
-  and `libraries/python/getpatter/dashboard/ui.html` (byte-identical). Parity
-  across both SDKs.
-
 ### Fixed
 
 - **Telemetry: `call_completed` now carries the call `direction`
