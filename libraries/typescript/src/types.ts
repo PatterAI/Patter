@@ -550,6 +550,30 @@ export interface AudioFilter {
   close(): Promise<void>;
 }
 
+/**
+ * Automatic-gain-control tuning for the inbound (caller -> STT) chain.
+ *
+ * Passed to {@link AgentOptions.agc}. Speech-selective: the gain is only
+ * driven up on frames above {@link speechFloorDbfs}, so silence / line-noise
+ * gaps are never amplified into a hiss. A per-frame peak limiter holds the
+ * output below {@link limiterCeiling} of full scale to avoid clipping on a
+ * loud transient. Defaults match Python ``AgcConfig`` byte-for-byte (parity).
+ */
+export interface AgcConfig {
+  /** Target output RMS in dBFS. Must be < 0. Default -18. */
+  readonly targetRmsDbfs?: number;
+  /** Symmetric gain bound in dB (noise floor never amplified beyond this). Default 30. */
+  readonly maxGainDb?: number;
+  /** Frames below this RMS (dBFS) are non-speech: gain releases toward unity. Default -45. */
+  readonly speechFloorDbfs?: number;
+  /** Smoothing time constant when gain DECREASES (signal got louder) — fast. Default 10 ms. */
+  readonly attackMs?: number;
+  /** Smoothing time constant when gain INCREASES (signal got quieter) — slow. Default 200 ms. */
+  readonly releaseMs?: number;
+  /** Peak ceiling as a fraction of full scale (0, 1]. Default 0.99. */
+  readonly limiterCeiling?: number;
+}
+
 /** Mixes background audio (hold music, thinking cues) with TTS output. */
 export interface BackgroundAudioPlayer {
   start(): Promise<void>;
@@ -710,6 +734,25 @@ export interface AgentOptions {
    * spoke before any TTS played.
    */
   readonly echoCancellation?: boolean;
+  /**
+   * Inbound high-pass / DC-block cutoff in Hz (pipeline mode only). When set
+   * (typical 80–120), the SDK runs a 2nd-order Butterworth high-pass biquad as
+   * the FIRST stage of the inbound chain — before AEC, noise suppression, VAD
+   * and STT — stripping DC offset, mains hum (50/60 Hz) and handling rumble
+   * that otherwise bias the echo canceller and inflate the VAD energy estimate.
+   * Pure-DSP, stateful, <<1 % CPU. Undefined (default) leaves the inbound audio
+   * byte-identical to today.
+   */
+  readonly highPassHz?: number;
+  /**
+   * Inbound automatic gain control (pipeline mode only). Normalises the
+   * caller's level toward a target RMS just before VAD/STT, cutting WER on
+   * quiet / variable-distance talkers. Runs AFTER noise suppression and BEFORE
+   * VAD. Speech-selective (silence gaps are not amplified) with a peak limiter
+   * to avoid clipping. `false`/undefined (default) disables it; `true` uses
+   * {@link AgcConfig} defaults; pass an {@link AgcConfig} to tune.
+   */
+  readonly agc?: boolean | AgcConfig;
   /**
    * Realtime / ConvAI engine instance. When present, the agent runs in the
    * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,

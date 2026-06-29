@@ -450,6 +450,7 @@ def _handoff_history_text(name: str, reason: str) -> str:
         text += f" — {reason}"
     return text
 
+
 END_CALL_TOOL: dict = {
     "name": "end_call",
     "description": "End the current phone call. Use when the conversation is complete or the user says goodbye.",
@@ -984,7 +985,9 @@ class StreamHandler(ABC):
         # and the bridge-side deques stayed empty forever — every
         # ``on_call_end`` payload carried an empty transcript/history.
         self.conversation_history: deque = (
-            conversation_history if conversation_history is not None else deque(maxlen=200)
+            conversation_history
+            if conversation_history is not None
+            else deque(maxlen=200)
         )
         self.transcript_entries: deque = (
             transcript_entries if transcript_entries is not None else deque(maxlen=200)
@@ -1288,7 +1291,6 @@ class StreamHandler(ABC):
         if task is not None and not task.done():
             task.cancel()
         self._max_call_watchdog = None
-
 
     async def _safe_on_transcript(self, payload: dict) -> None:
         """Invoke the user's ``on_transcript`` with exception containment.
@@ -2137,9 +2139,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             # ``role:user`` turn, so the model REPLIED to
                             # "I can't respond to that" as if the caller had
                             # said it.
-                            send_re = getattr(
-                                self._adapter, "send_reassurance", None
-                            )
+                            send_re = getattr(self._adapter, "send_reassurance", None)
                             if callable(send_re):
                                 await send_re(replacement)
                             else:
@@ -2978,12 +2978,8 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             (t for t in (self.agent.tools or []) if t.get("name") == name),
             None,
         )
-        if not tool_def or not (
-            tool_def.get("webhook_url") or tool_def.get("handler")
-        ):
-            logger.warning(
-                "ConvAI client_tool_call for unregistered tool '%s'", name
-            )
+        if not tool_def or not (tool_def.get("webhook_url") or tool_def.get("handler")):
+            logger.warning("ConvAI client_tool_call for unregistered tool '%s'", name)
             await _respond(
                 json.dumps(
                     {"error": f"Tool '{name}' is not registered", "fallback": True}
@@ -3306,9 +3302,7 @@ class PipelineStreamHandler(StreamHandler):
         # ``bargeInMode`` / ``outputPaused``.
         _mode = getattr(agent, "barge_in_mode", "cancel") or "cancel"
         if _mode not in ("cancel", "pause_resume"):
-            logger.warning(
-                "Unknown barge_in_mode %r — falling back to 'cancel'", _mode
-            )
+            logger.warning("Unknown barge_in_mode %r — falling back to 'cancel'", _mode)
             _mode = "cancel"
         self._barge_in_mode: str = _mode
         # True while output is paused: ``_synthesize_sentence`` queues
@@ -3771,9 +3765,7 @@ class PipelineStreamHandler(StreamHandler):
             and self._tts is not None
         ):
             await self._begin_speaking(is_first_message=True)
-            self._first_message_task = asyncio.create_task(
-                self._play_first_message()
-            )
+            self._first_message_task = asyncio.create_task(self._play_first_message())
 
             def _log_first_message_result(task: asyncio.Task) -> None:
                 if task.cancelled():
@@ -4688,9 +4680,7 @@ class PipelineStreamHandler(StreamHandler):
                 sanitize_log_value(transcript.text[:40]),
             )
             return
-        if _since_last < 2.0 and _normalised == getattr(
-            self, "_last_commit_text", ""
-        ):
+        if _since_last < 2.0 and _normalised == getattr(self, "_last_commit_text", ""):
             logger.debug(
                 "Barge-in skipped: duplicate of just-committed transcript %r",
                 sanitize_log_value(transcript.text[:40]),
@@ -4727,9 +4717,9 @@ class PipelineStreamHandler(StreamHandler):
         # — interims and noise wait for the resume timer instead. The
         # confirming transcript then continues through the strategy/legacy
         # decision below exactly as today.
-        if getattr(self, "_output_paused", False) and not self._passes_paused_kill_filters(
-            transcript
-        ):
+        if getattr(
+            self, "_output_paused", False
+        ) and not self._passes_paused_kill_filters(transcript):
             logger.debug(
                 "Paused turn: transcript %r cannot confirm the kill "
                 "(interim/hallucination/duplicate) — awaiting resume timer",
@@ -5111,9 +5101,7 @@ class PipelineStreamHandler(StreamHandler):
             len(tail),
         )
         if self._event_bus is not None:
-            self._event_bus.emit(
-                "false_interruption", {"resumed_sentences": len(tail)}
-            )
+            self._event_bus.emit("false_interruption", {"resumed_sentences": len(tail)})
         # Re-send the unheard tail BEFORE unpausing so the in-flight
         # synthesis (which queues while paused) cannot interleave a newer
         # chunk ahead of the replayed audio.
@@ -5192,7 +5180,9 @@ class PipelineStreamHandler(StreamHandler):
                 "pause_resume sentence buffer overflow (%d) — degrading to full cancel",
                 len(buf),
             )
-            await self._do_cancel_for_barge_in("<pause_resume sentence-buffer overflow>")
+            await self._do_cancel_for_barge_in(
+                "<pause_resume sentence-buffer overflow>"
+            )
             return True  # handled; the loop observes _is_speaking=False next
         buf.append(sentence)
         return True
@@ -5228,8 +5218,8 @@ class PipelineStreamHandler(StreamHandler):
         overflow (paused → the turn was just killed; speaking → retention
         was released and the caller falls back to direct sends)."""
         entry["chunks"].append(chunk)
-        self._pause_retained_bytes = (
-            getattr(self, "_pause_retained_bytes", 0) + len(chunk)
+        self._pause_retained_bytes = getattr(self, "_pause_retained_bytes", 0) + len(
+            chunk
         )
         if self._pause_retained_bytes <= self._pause_retained_cap_bytes():
             return True
@@ -5640,9 +5630,7 @@ class PipelineStreamHandler(StreamHandler):
             sanitize_log_value(interim_text[:60]),
         )
 
-    async def _abort_speculation(
-        self, *, reason: str, count_miss: bool = True
-    ) -> None:
+    async def _abort_speculation(self, *, reason: str, count_miss: bool = True) -> None:
         """Discard the current speculation (if any): signal cancel, await the
         task's unwind (bounded), and count a miss unless this is teardown.
         The speculative task never touched history / carrier / per-turn
@@ -5688,9 +5676,7 @@ class PipelineStreamHandler(StreamHandler):
         spec.release_event.set()
         if self._speculation is spec:
             self._speculation = None
-        if self.metrics is not None and hasattr(
-            self.metrics, "record_preemptive_miss"
-        ):
+        if self.metrics is not None and hasattr(self.metrics, "record_preemptive_miss"):
             self.metrics.record_preemptive_miss()
         logger.debug("Preemptive: speculation failed (%s)", reason)
 
@@ -5968,9 +5954,7 @@ class PipelineStreamHandler(StreamHandler):
         if blocked:
             sentence = get_guardrail_replacement(self.agent, guard_name)
         if hook_executor.has_after_llm_sentence():
-            transformed = await hook_executor.run_after_llm_sentence(
-                sentence, hook_ctx
-            )
+            transformed = await hook_executor.run_after_llm_sentence(sentence, hook_ctx)
             if transformed is None:
                 return True  # hook dropped this sentence
             sentence = transformed
@@ -6093,9 +6077,7 @@ class PipelineStreamHandler(StreamHandler):
                     while not next_token.done() and not spec.released:
                         if spec.cancel_event.is_set():
                             break
-                        release_wait = asyncio.ensure_future(
-                            spec.release_event.wait()
-                        )
+                        release_wait = asyncio.ensure_future(spec.release_event.wait())
                         try:
                             await asyncio.wait(
                                 {next_token, release_wait},
@@ -6143,9 +6125,7 @@ class PipelineStreamHandler(StreamHandler):
                             await self._spec_ensure_flushed(spec)
                         # Live continuation — keep the echo-guard reference
                         # and user-perceived TTFT current.
-                        self._current_agent_spoken_text = "".join(
-                            spec.response_parts
-                        )
+                        self._current_agent_spoken_text = "".join(spec.response_parts)
                         if not spec.llm_first_token_recorded:
                             spec.llm_first_token_recorded = True
                             if self.metrics is not None:
@@ -6189,9 +6169,7 @@ class PipelineStreamHandler(StreamHandler):
                             record_segment=False,
                         )
                     except Exception:  # pragma: no cover - defensive
-                        logger.exception(
-                            "llm_error_message fallback synthesis failed"
-                        )
+                        logger.exception("llm_error_message fallback synthesis failed")
 
             if not llm_error and not stopped:
                 for sentence in chunker.flush():
@@ -6508,6 +6486,24 @@ class PipelineStreamHandler(StreamHandler):
                 )
             await self._process_regular_response(response_text, self.call_id)
 
+    def _resolve_agc_config(self) -> object | None:
+        """Resolve ``agent.agc`` (``bool | AgcConfig | None``) to an
+        :class:`~getpatter.models.AgcConfig` or ``None``.
+
+        ``True`` -> defaults; an ``AgcConfig`` -> itself; anything falsy ->
+        ``None`` (stage disabled).
+        """
+        agc = getattr(self.agent, "agc", False)
+        if agc is True:
+            from getpatter.models import AgcConfig
+
+            return AgcConfig()
+        from getpatter.models import AgcConfig
+
+        if isinstance(agc, AgcConfig):
+            return agc
+        return None
+
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward caller audio to STT (transcoding to PCM16 16 kHz, running VAD/hooks)."""
         # Local-recording tap — ABOVE the STT/barge-in early-returns so the
@@ -6546,8 +6542,11 @@ class PipelineStreamHandler(StreamHandler):
                 input_is_mulaw_8k=self._input_is_mulaw_8k,
                 get_aec=lambda: getattr(self, "_aec", None),
                 get_audio_filter=lambda: getattr(self.agent, "audio_filter", None),
-                get_vad=lambda: getattr(self.agent, "vad", None)
-                or getattr(self, "_auto_vad", None),
+                get_vad=lambda: (
+                    getattr(self.agent, "vad", None) or getattr(self, "_auto_vad", None)
+                ),
+                high_pass_hz=getattr(self.agent, "high_pass_hz", None),
+                agc=self._resolve_agc_config(),
             )
             self._input_chain = chain
         frame = await chain.process(audio_bytes)
@@ -6816,9 +6815,7 @@ class PipelineStreamHandler(StreamHandler):
                 # withheld from STT no transcript could ever arrive — the
                 # pending state always timed out and barge-in was
                 # structurally impossible with strategies configured.
-                _pending = (
-                    getattr(self, "_barge_in_pending_since", None) is not None
-                )
+                _pending = getattr(self, "_barge_in_pending_since", None) is not None
                 if not self._forward_stt_while_speaking and not _pending:
                     return
 
@@ -6907,9 +6904,7 @@ class PipelineStreamHandler(StreamHandler):
         if detector is None:
             return
         try:
-            probability = float(
-                await detector.predict(self._semantic_window_bytes())
-            )
+            probability = float(await detector.predict(self._semantic_window_bytes()))
         except Exception as exc:
             self._semantic_detector_failed = True
             logger.warning(
@@ -7757,9 +7752,7 @@ class PipelineStreamHandler(StreamHandler):
                 # pre-synthesised buffer) still uses
                 # _send_paced_first_message_bytes because that buffer can
                 # be several seconds long and needs pacing.
-                async for audio_chunk in self._tts.synthesize(
-                    self.agent.first_message
-                ):
+                async for audio_chunk in self._tts.synthesize(self.agent.first_message):
                     if not self._is_speaking:
                         break
                     if not first_chunk_sent:

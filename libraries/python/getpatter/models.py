@@ -442,6 +442,34 @@ class SessionContext:
 
 
 @dataclass(frozen=True)
+class AgcConfig:
+    """Automatic-gain-control tuning for the inbound (caller -> STT) chain.
+
+    Passed to :attr:`Agent.agc`. Speech-selective: the gain is only driven up
+    on frames above :attr:`speech_floor_dbfs`, so silence / line-noise gaps are
+    never amplified into a hiss. A per-frame peak limiter holds the output below
+    :attr:`limiter_ceiling` of full scale to avoid clipping on a loud transient.
+
+    Defaults match TypeScript ``AgcConfig`` byte-for-byte (parity).
+    """
+
+    # Target output RMS in dBFS. Must be < 0.
+    target_rms_dbfs: float = -18.0
+    # Symmetric gain bound in dB — the noise floor is never amplified by more
+    # than this, and a hot input never attenuated by more than this.
+    max_gain_db: float = 30.0
+    # Frames whose RMS is below this are treated as non-speech (gain releases
+    # toward unity instead of being driven up — "don't pump the noise floor").
+    speech_floor_dbfs: float = -45.0
+    # Smoothing time constant when the gain DECREASES (signal got louder) — fast.
+    attack_ms: float = 10.0
+    # Smoothing time constant when the gain INCREASES (signal got quieter) — slow.
+    release_ms: float = 200.0
+    # Peak ceiling as a fraction of full scale (0, 1].
+    limiter_ceiling: float = 0.99
+
+
+@dataclass(frozen=True)
 class Agent:
     """Configuration for a local-mode voice AI agent.
 
@@ -597,6 +625,21 @@ class Agent:
     # don't have the bleed, and the 0.5–2 s convergence period would
     # briefly attenuate caller speech if they spoke before any TTS played.
     echo_cancellation: bool = False
+    # Inbound high-pass / DC-block (pipeline mode only). When set to a cutoff
+    # frequency in Hz (typical 80-120), the SDK runs a 2nd-order Butterworth
+    # high-pass biquad as the FIRST stage of the inbound chain — before AEC,
+    # noise suppression, VAD and STT — stripping DC offset, mains hum
+    # (50/60 Hz) and handling rumble that otherwise bias the echo canceller and
+    # inflate the VAD energy estimate. Pure-DSP, stateful, <<1 % CPU.
+    # ``None`` (default) leaves the inbound audio byte-identical to today.
+    high_pass_hz: int | None = None
+    # Inbound automatic gain control (pipeline mode only). Normalises the
+    # caller's level toward a target RMS just before VAD/STT, which cuts WER on
+    # quiet / variable-distance talkers. Runs AFTER noise suppression and BEFORE
+    # VAD. Speech-selective (silence gaps are not amplified) with a peak limiter
+    # to avoid clipping. ``False``/``None`` (default) disables it; ``True`` uses
+    # :class:`AgcConfig` defaults; pass an :class:`AgcConfig` to tune.
+    agc: "bool | AgcConfig | None" = False
     # OpenAI Realtime — reasoning-effort tier (``gpt-realtime-2`` only).
     # Threaded through from ``engines.openai.Realtime(reasoning_effort=...)``
     # so the high-level engine wrapper has the same expressivity as the

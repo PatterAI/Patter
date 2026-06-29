@@ -1694,12 +1694,10 @@ export class StreamHandler {
    * after construction. Owns the per-call VAD error kill switch that
    * previously lived here as ``vadDisabled``.
    */
-  private readonly inputChain: InputProcessingChain = new InputProcessingChain({
-    resampler: this.inboundResampler,
-    getAec: () => this.aec,
-    getAudioFilter: () => this.deps.agent.audioFilter,
-    getVad: () => this.deps.agent.vad ?? this.autoVad,
-  });
+  // Constructed in the constructor body (after ``this.deps`` is set) because
+  // the high-pass / AGC stages are built eagerly from ``deps.agent`` config —
+  // a field initialiser would read ``this.deps`` before it is assigned.
+  private readonly inputChain: InputProcessingChain;
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -1711,6 +1709,19 @@ export class StreamHandler {
     this.caller = caller;
     this.callee = callee;
     this.currentAgent = deps.agent;
+
+    // Inbound chain: HPF (opt) -> resample -> AEC (opt) -> audioFilter/NS (opt)
+    // -> AGC (opt) -> VAD. AEC / filter / VAD are late-bound getters because
+    // ``initPipeline`` installs ``aec`` / ``autoVad`` after construction;
+    // HPF / AGC are built eagerly from the immutable ``agent`` config here.
+    this.inputChain = new InputProcessingChain({
+      resampler: this.inboundResampler,
+      getAec: () => this.aec,
+      getAudioFilter: () => this.deps.agent.audioFilter,
+      getVad: () => this.deps.agent.vad ?? this.autoVad,
+      highPassHz: this.deps.agent.highPassHz,
+      agc: this.deps.agent.agc,
+    });
 
     if (this.forwardSttWhileSpeaking) {
       getLogger().warn(

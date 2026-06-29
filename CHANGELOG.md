@@ -2,6 +2,43 @@
 
 ### Added
 
+- **Inbound audio front-end: opt-in high-pass / DC-block and speech-selective
+  AGC, plus inbound sample-rate validation.** The pipeline inbound chain
+  (caller → STT) gained the two canonical audio-processing stages it was
+  missing, both provider-agnostic, opt-in, and fail-open:
+  - `Agent.high_pass_hz` (Py) / `highPassHz` (TS) — a 2nd-order Butterworth
+    high-pass / DC-block (typical 80–120 Hz) runs as the FIRST stage, before
+    AEC, so DC offset, mains hum (50/60 Hz) and handling rumble never reach the
+    echo canceller, VAD or STT. `None`/undefined (default) leaves audio
+    byte-identical to before.
+  - `Agent.agc` (`bool | AgcConfig`) — speech-selective automatic gain control
+    runs after noise suppression and before VAD/STT, normalising the caller's
+    level toward a target RMS to cut WER on quiet / variable-distance talkers.
+    Silence gaps are not amplified (the gain releases toward unity) and a
+    per-frame peak limiter prevents clipping. `false`/undefined (default) keeps
+    today's behaviour; `true` uses defaults; pass `AgcConfig` to tune.
+  - `InputProcessingChain` now takes `input_sample_rate` / `inputSampleRate`
+    (default 16000): a non-mu-law PCM16 carrier at a non-16 kHz rate is
+    resampled to 16 kHz instead of being forwarded blind (a PCM16 @ 8 kHz
+    stream previously reached STT pitched up an octave).
+  The final inbound order is `HPF(opt) → resample → AEC(opt) → audio_filter/NS(opt)
+  → AGC(opt) → VAD → STT`. New pure-DSP modules `audio/high_pass.py` +
+  `audio/agc.py` (Py) and `audio/high-pass.ts` + `audio/agc.ts` (TS), wired in
+  `services/input_chain.py` / `services/input-chain.ts`, `stream_handler.py` /
+  `stream-handler.ts`, `models.py` / `types.ts`, `client.py` (TS via spread).
+
+### Changed
+
+- **AEC scope documented: browser/native only, no-op by design on PSTN.** The
+  NLMS echo canceller (`audio/aec.py` / `audio/aec.ts`) docstrings now state
+  explicitly that on a phone call the carrier round-trip exceeds the 32 ms
+  filter window, so `process_near_end` / `processNearEnd` passes through
+  unchanged — PSTN line echo is handled by the carrier (ITU-T G.168) and the
+  caller device. The existing runtime warning when `echo_cancellation` is
+  enabled on a PSTN carrier is unchanged. No behaviour change.
+
+### Added
+
 - **TTS providers declare their output format; carrier-native μ-law passthrough
   generalised.** Pipeline TTS adapters can now expose `sourceAudioFormat()`
   (TS) / `source_audio_format()` (Py) returning `{ encoding, sampleRate }`, and

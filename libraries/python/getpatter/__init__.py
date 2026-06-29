@@ -33,6 +33,7 @@ from getpatter._speech_events import (
 from getpatter.client import Patter
 from getpatter.models import (
     Agent,
+    AgcConfig,
     CallControl,
     CallEvent,
     CallMetrics,
@@ -430,6 +431,7 @@ __all__ = [
     "AgentState",
     "EouTrigger",
     "Agent",
+    "AgcConfig",
     "CallControl",
     "CallEvent",
     "CallMetrics",
