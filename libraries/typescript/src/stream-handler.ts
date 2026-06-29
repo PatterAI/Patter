@@ -31,6 +31,13 @@ import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import { validateTwilioSid, TRANSFER_CALL_TOOL, END_CALL_TOOL } from './server';
 import { buildConsultTool } from './consult';
+import {
+  USE_SKILL_TOOL_NAME,
+  applySkillActivation,
+  assertNoSkillConflicts,
+  buildUseSkillTool,
+  skillActivationHistoryText,
+} from './skills';
 import type { ProviderPricing } from './pricing';
 import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
@@ -351,6 +358,10 @@ export function applyHandoffTarget(current: AgentOptions, target: AgentOptions):
     textTransforms: target.textTransforms,
     consult: target.consult,
     handoffs: target.handoffs,
+    // Carry the target's own skills so `use_skill` after a handoff advertises
+    // the NEW agent's progressive-disclosure skills (additive feature, distinct
+    // from the one-way prompt/tool replace above).
+    skills: target.skills,
     disablePhonePreamble: target.disablePhonePreamble,
     toolCallPreambles: target.toolCallPreambles,
   };
@@ -1536,6 +1547,13 @@ export class StreamHandler {
    * ``self.agent`` swap.
    */
   private currentAgent: AgentOptions;
+  /**
+   * Names of SKILLS activated so far this call (progressive-disclosure
+   * `use_skill`). Tracked so a second `use_skill` for the same skill is an
+   * idempotent no-op and a handoff can reset the set. Parity with Python
+   * `StreamHandler._active_skills`.
+   */
+  private activeSkills = new Set<string>();
   private llmLoop: LLMLoop | null = null;
   /**
    * Per-call tool executor — provides retry-with-exponential-backoff and a
@@ -2094,6 +2112,16 @@ export class StreamHandler {
     // Merge the built-in consult tool (if configured) into the per-call tool
     // list so it reaches both the Realtime adapter and the pipeline LLM loop.
     this.injectConsultTool();
+    // Validate skill / reserved-name collisions once, against the original
+    // tool list (before any activation merges skill tools in). The built-in
+    // `use_skill` tool itself is advertised by `buildAIAdapter` (Realtime) and
+    // `buildPipelineLlmTools` (Pipeline).
+    if (this.currentAgent.skills && this.currentAgent.skills.length > 0) {
+      assertNoSkillConflicts(
+        this.currentAgent.skills,
+        (this.resolvedTools ?? this.currentAgent.tools) as ReadonlyArray<{ name?: string }> | undefined,
+      );
+    }
 
     if (provider === 'pipeline') {
       await this.initPipeline(resolvedPrompt);
@@ -6483,6 +6511,15 @@ export class StreamHandler {
       return;
     }
 
+    if (
+      fc.name === USE_SKILL_TOOL_NAME &&
+      this.currentAgent.skills &&
+      this.currentAgent.skills.length > 0
+    ) {
+      await this.handleUseSkillFunctionCall(fc);
+      return;
+    }
+
     // User-defined tool — supports either `handler` (in-process function)
     // or `webhookUrl` (HTTP POST). Dispatched through ``DefaultToolExecutor``
     // so both paths get retry-with-exponential-backoff and a per-tool
@@ -6646,12 +6683,15 @@ export class StreamHandler {
     }
 
     this.currentAgent = applyHandoffTarget(this.currentAgent, target);
+    // A handoff REPLACES the prompt, so any skills activated on the prior
+    // agent are no longer layered in — clear the set for the target's skills.
+    this.activeSkills = new Set<string>();
     const effective = this.effectiveToolsForCurrentAgent();
     this.resolvedTools = effective;
 
     // Build the new wire tool list: target tools + built-ins (+ onward
-    // handoff tool when the target has its own handoff map). Mirrors the
-    // construction in `buildAIAdapter`.
+    // handoff tool when the target has its own handoff map, + use_skill when
+    // the target declares skills). Mirrors the construction in `buildAIAdapter`.
     const wireTools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> = effective.map((t) => {
       const entry: { name: string; description: string; parameters: Record<string, unknown>; strict?: boolean } = {
         name: t.name,
@@ -6665,6 +6705,9 @@ export class StreamHandler {
     const onwardHandoffs = this.currentAgent.handoffs;
     if (onwardHandoffs && Object.keys(onwardHandoffs).length > 0) {
       wireTools.push(buildHandoffTool(Object.keys(onwardHandoffs)));
+    }
+    if (this.currentAgent.skills && this.currentAgent.skills.length > 0) {
+      wireTools.push(buildUseSkillTool(this.currentAgent.skills));
     }
 
     const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
@@ -6688,6 +6731,103 @@ export class StreamHandler {
     const result = JSON.stringify({ status: 'handed_off', to: name });
     await adapter.sendFunctionResult(fc.call_id, result);
     await this.emitToolEvent(HANDOFF_TOOL_NAME, args, result);
+  }
+
+  /**
+   * Dispatch the built-in `use_skill` tool on the Realtime path.
+   *
+   * Progressive-disclosure ACTIVATION: layers the chosen skill's `instructions`
+   * into the system prompt and unlocks its `tools` ADDITIVELY (via
+   * `applySkillActivation` — distinct from the one-way handoff replace), then
+   * pushes the merged state to the live session with a mid-session
+   * `session.update` (new `instructions` + `tools`). The skill stays active for
+   * the rest of the call. ALWAYS sends a function result — an unknown /
+   * already-active skill or malformed args produce an envelope, never silence.
+   * Parity with the Pipeline `performSkillActivation` and Python
+   * `_handle_use_skill_function_call`.
+   */
+  private async handleUseSkillFunctionCall(fc: { call_id: string; name: string; arguments: string }): Promise<void> {
+    const adapter = this.adapter as OpenAIRealtimeAdapter;
+    let args: { skill_name?: string } | null;
+    try {
+      args = JSON.parse(fc.arguments || '{}') as { skill_name?: string };
+    } catch {
+      args = null;
+    }
+    if (!args || typeof args !== 'object') {
+      const result = JSON.stringify({ error: 'Malformed use_skill arguments', status: 'rejected' });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(USE_SKILL_TOOL_NAME, {}, result);
+      return;
+    }
+    const name = typeof args.skill_name === 'string' ? args.skill_name : '';
+    const skills = this.currentAgent.skills ?? [];
+    const skill = skills.find((s) => s.name === name);
+    if (!skill) {
+      const result = JSON.stringify({
+        error: `Unknown skill '${name}'`,
+        available: skills.map((s) => s.name).sort(),
+      });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(USE_SKILL_TOOL_NAME, args, result);
+      return;
+    }
+    if (this.activeSkills.has(name)) {
+      // Idempotent: re-activating a live skill must not double-layer the
+      // instructions / tools. Acknowledge without mutating state.
+      const result = JSON.stringify({ status: 'already_active', skill: name });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(USE_SKILL_TOOL_NAME, args, result);
+      return;
+    }
+
+    // Layer the skill in additively and re-derive the effective tool list.
+    this.currentAgent = applySkillActivation(this.currentAgent, skill);
+    this.activeSkills.add(name);
+    const effective = this.effectiveToolsForCurrentAgent();
+    this.resolvedTools = effective;
+
+    // Rebuild the wire tool list: current tools (now incl. the skill's tools)
+    // + built-ins (+ handoff_to when configured) + use_skill again so further
+    // skills can still activate.
+    const wireTools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> = effective.map((t) => {
+      const entry: { name: string; description: string; parameters: Record<string, unknown>; strict?: boolean } = {
+        name: t.name,
+        description: t.description ?? '',
+        parameters: (t.parameters ?? {}) as Record<string, unknown>,
+      };
+      if ((t as { strict?: boolean }).strict === true) entry.strict = true;
+      return entry;
+    });
+    wireTools.push(TRANSFER_CALL_TOOL, END_CALL_TOOL);
+    const onwardHandoffs = this.currentAgent.handoffs;
+    if (onwardHandoffs && Object.keys(onwardHandoffs).length > 0) {
+      wireTools.push(buildHandoffTool(Object.keys(onwardHandoffs)));
+    }
+    if (this.currentAgent.skills && this.currentAgent.skills.length > 0) {
+      wireTools.push(buildUseSkillTool(this.currentAgent.skills));
+    }
+
+    const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
+    const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
+    const newInstructions = applyToolCallPreambles(
+      resolvedPrompt,
+      (this.currentAgent as { toolCallPreambles?: boolean | string }).toolCallPreambles,
+    );
+
+    // session.update FIRST, then the function result — the result triggers the
+    // next `response.create`, which must already run with the skill in scope.
+    await adapter.updateSession({ instructions: newInstructions, tools: wireTools });
+
+    const historyText = skillActivationHistoryText(name);
+    this.history.push({ role: 'system', text: historyText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({ role: 'system', text: historyText, call_id: this.callId });
+    }
+
+    const result = JSON.stringify({ status: 'skill_activated', skill: name });
+    await adapter.sendFunctionResult(fc.call_id, result);
+    await this.emitToolEvent(USE_SKILL_TOOL_NAME, args, result);
   }
 
   /**
@@ -6720,6 +6860,9 @@ export class StreamHandler {
       );
     }
     this.currentAgent = applyHandoffTarget(this.currentAgent, target);
+    // A handoff REPLACES the prompt, so skills activated on the prior agent
+    // are no longer layered in — clear the set for the target's skills.
+    this.activeSkills = new Set<string>();
     this.resolvedTools = this.effectiveToolsForCurrentAgent();
     const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
     const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
@@ -6740,10 +6883,12 @@ export class StreamHandler {
 
   /**
    * Build the full pipeline tool list for the CURRENT agent: user tools +
-   * built-in `transfer_call` / `end_call` + the `handoff_to` tool when
-   * handoff targets are configured. Re-invoked after a handoff so the LLM
-   * loop advertises the target agent's tools (including its onward handoff
-   * map). Parity with the Python `_build_combined_pipeline_tools`.
+   * built-in `transfer_call` / `end_call` + the `handoff_to` tool when handoff
+   * targets are configured + the `use_skill` tool when skills are configured.
+   * Re-invoked after a handoff or a skill activation so the LLM loop advertises
+   * the current agent's tools (including its onward handoff map and any skill
+   * tools merged in on activation). Parity with the Python
+   * `_build_combined_pipeline_tools`.
    */
   private buildPipelineLlmTools(): ToolDefinition[] {
     const augmented = augmentWithBuiltinHandoffTools(
@@ -6764,7 +6909,58 @@ export class StreamHandler {
           ),
       });
     }
+    if (this.currentAgent.skills && this.currentAgent.skills.length > 0) {
+      augmented.push({
+        ...buildUseSkillTool(this.currentAgent.skills),
+        handler: async (args: Record<string, unknown>): Promise<string> =>
+          this.performSkillActivation(typeof args.skill_name === 'string' ? args.skill_name : ''),
+      });
+    }
     return augmented;
+  }
+
+  /**
+   * Activate the named SKILL on the live pipeline call (progressive-disclosure
+   * ACTIVATION).
+   *
+   * Layers the skill's `instructions` into the system prompt and unlocks its
+   * `tools` ADDITIVELY (via `applySkillActivation`), then swaps the LLM loop's
+   * system prompt + rebuilt tool list so the NEXT turn runs with the skill in
+   * scope. The skill stays active for the rest of the call. ALWAYS returns a
+   * tool-result string — an unknown / already-active skill produces an
+   * envelope, never silence. Parity with the Realtime
+   * `handleUseSkillFunctionCall` and Python `_perform_skill_activation`.
+   */
+  private async performSkillActivation(name: string): Promise<string> {
+    const skills = this.currentAgent.skills ?? [];
+    const skill = skills.find((s) => s.name === name);
+    if (!skill) {
+      return JSON.stringify({
+        error: `Unknown skill '${name}'`,
+        available: skills.map((s) => s.name).sort(),
+      });
+    }
+    if (this.activeSkills.has(name)) {
+      return JSON.stringify({ status: 'already_active', skill: name });
+    }
+    this.currentAgent = applySkillActivation(this.currentAgent, skill);
+    this.activeSkills.add(name);
+    this.resolvedTools = this.effectiveToolsForCurrentAgent();
+    const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
+    const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
+    if (this.llmLoop) {
+      this.llmLoop.updateAgent({
+        systemPrompt: resolvedPrompt,
+        tools: this.buildPipelineLlmTools(),
+        disablePhonePreamble: this.currentAgent.disablePhonePreamble ?? false,
+      });
+    }
+    const historyText = skillActivationHistoryText(name);
+    this.history.push({ role: 'system', text: historyText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({ role: 'system', text: historyText, call_id: this.callId });
+    }
+    return JSON.stringify({ status: 'skill_activated', skill: name });
   }
 
   // ---------------------------------------------------------------------------

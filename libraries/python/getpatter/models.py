@@ -470,6 +470,53 @@ class AgcConfig:
 
 
 @dataclass(frozen=True)
+class Skill:
+    """A named, on-demand capability the PRIMARY agent can activate mid-call.
+
+    Skills implement *progressive disclosure* (the Anthropic Agent Skills
+    pattern) so the agent stays low-latency: at call start only each skill's
+    ``name`` + ``description`` are advertised to the model (via the built-in
+    ``use_skill`` tool), NOT the full ``instructions``. When the model decides a
+    skill fits the situation it calls ``use_skill(skill_name=...)`` and Patter
+    layers the skill's ``instructions`` into the system prompt and unlocks its
+    ``tools`` — INLINE in the same agent loop (no sub-agent spawn, no extra
+    round-trip). The skill then stays active for the rest of the call.
+
+    This is distinct from a multi-agent *handoff* (which REPLACES the agent
+    one-way): a skill is ADDITIVE — the base prompt and existing tools remain,
+    the skill stacks on top.
+
+    Args:
+        name: Short identifier the model passes to ``use_skill`` (the
+            discovery enum value). Must be unique within an agent and must not
+            collide with the reserved built-in tool names (``transfer_call``,
+            ``end_call``, ``handoff_to``, ``use_skill``).
+        description: One-line summary surfaced at call start so the model knows
+            WHEN to activate the skill. Keep it to ~30-50 tokens — this is the
+            only part loaded eagerly.
+        instructions: The full playbook / prompt loaded ON DEMAND when the
+            skill activates. Layered into the system prompt as a
+            ``# Skill: <name>`` block.
+        tools: Optional tuple of tools exposed ONLY while the skill is active.
+            Built with the ``tool(...)`` factory (normalised to the internal
+            dict shape by :meth:`Patter.agent`). Names must not collide with
+            the reserved built-ins, the top-level agent tools, or another
+            skill's tools.
+    """
+
+    name: str
+    description: str
+    instructions: str
+    tools: tuple[dict, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Accept a list of tools but store an immutable tuple so the frozen
+        # dataclass holds no mutable shared state. Mirrors ``Guardrail``.
+        if self.tools is not None and not isinstance(self.tools, tuple):
+            object.__setattr__(self, "tools", tuple(self.tools))
+
+
+@dataclass(frozen=True)
 class Agent:
     """Configuration for a local-mode voice AI agent.
 
@@ -590,6 +637,17 @@ class Agent:
     # instances built with :meth:`Patter.agent`; chained handoffs follow the
     # TARGET's own ``handoffs`` map.
     handoffs: "dict[str, Agent] | None" = None
+    # On-demand SKILLS the PRIMARY agent can activate mid-call (progressive
+    # disclosure — the Anthropic Agent Skills pattern). When set, Patter
+    # auto-injects a built-in ``use_skill`` tool (Realtime + Pipeline modes)
+    # whose ``skill_name`` enum advertises ONLY each skill's name +
+    # description (~30-50 tokens each) at call start. When the model calls
+    # ``use_skill(skill_name=...)`` Patter layers that skill's full
+    # ``instructions`` into the system prompt and unlocks its ``tools`` —
+    # INLINE in the same agent loop (no sub-agent spawn / extra latency).
+    # Additive and stackable (unlike the one-way ``handoffs`` swap). ``()``
+    # (default) disables the tool. See :class:`Skill`.
+    skills: "tuple[Skill, ...]" = ()
     # Minimum sustained voice (ms) before treating caller audio as a barge-in
     # and interrupting TTS. ``0`` disables barge-in entirely — useful on noisy
     # links (ngrok tunnels, speakerphone) where the agent can hear itself.

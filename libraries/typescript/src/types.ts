@@ -616,6 +616,48 @@ export interface SessionContext {
   readonly callee?: string;
   readonly callerHash?: string;
 }
+
+/**
+ * A named, on-demand capability the PRIMARY agent can activate mid-call
+ * (progressive disclosure — the Anthropic Agent Skills pattern).
+ *
+ * At call start only each skill's `name` + `description` are advertised to the
+ * model (via the built-in `use_skill` tool), NOT the full `instructions`. When
+ * the model calls `use_skill({ skillName })` Patter layers the skill's
+ * `instructions` into the system prompt and unlocks its `tools` — INLINE in the
+ * same agent loop (no sub-agent spawn, no extra round-trip). The skill then
+ * stays active for the rest of the call.
+ *
+ * Distinct from a multi-agent `handoff` (which REPLACES the agent one-way): a
+ * skill is ADDITIVE — the base prompt and existing tools remain, the skill
+ * stacks on top. Mirrors Python `getpatter.Skill`.
+ */
+export interface Skill {
+  /**
+   * Short identifier the model passes to `use_skill` (the discovery enum
+   * value). Must be unique within an agent and must not collide with the
+   * reserved built-in tool names (`transfer_call`, `end_call`, `handoff_to`,
+   * `use_skill`).
+   */
+  readonly name: string;
+  /**
+   * One-line summary surfaced at call start so the model knows WHEN to activate
+   * the skill. Keep it to ~30-50 tokens — this is the only part loaded eagerly.
+   */
+  readonly description: string;
+  /**
+   * The full playbook / prompt loaded ON DEMAND when the skill activates.
+   * Layered into the system prompt as a `# Skill: <name>` block.
+   */
+  readonly instructions: string;
+  /**
+   * Optional tools exposed ONLY while the skill is active. `Tool` instances
+   * built with the `tool(...)` factory. Names must not collide with the
+   * reserved built-ins, the top-level agent tools, or another skill's tools.
+   */
+  readonly tools?: ReadonlyArray<ToolInstance>;
+}
+
 /** Configuration for a local-mode voice AI agent (passed to `phone.agent({...})`). */
 export interface AgentOptions {
   readonly systemPrompt: string;
@@ -715,6 +757,19 @@ export interface AgentOptions {
    * (default) disables the tool. Mirrors Python ``Agent.handoffs``.
    */
   readonly handoffs?: Readonly<Record<string, AgentOptions>>;
+  /**
+   * On-demand SKILLS the PRIMARY agent can activate mid-call (progressive
+   * disclosure — the Anthropic Agent Skills pattern). When set, Patter
+   * auto-injects a built-in ``use_skill`` tool (Realtime + Pipeline modes)
+   * whose ``skillName`` enum advertises ONLY each skill's name + description
+   * (~30-50 tokens each) at call start. When the model calls
+   * ``use_skill({ skillName })`` Patter layers that skill's full
+   * ``instructions`` into the system prompt and unlocks its ``tools`` — INLINE
+   * in the same agent loop (no sub-agent spawn / extra latency). Additive and
+   * stackable (unlike the one-way ``handoffs`` swap). ``undefined`` (default)
+   * disables the tool. Mirrors Python ``Agent.skills``. See {@link Skill}.
+   */
+  readonly skills?: ReadonlyArray<Skill>;
   /**
    * When ``true``, ship ``systemPrompt`` to the LLM verbatim. Default
    * (``false``) prepends a phone-friendly preamble that instructs the

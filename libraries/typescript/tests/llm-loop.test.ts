@@ -366,6 +366,46 @@ describe('LLMLoop', () => {
       const provider = (loop as unknown as { provider: LLMProvider }).provider;
       expect(provider).toBeInstanceOf(OpenAILLMProvider);
     });
+
+    it('rejects malformed tool-argument JSON without executing the tool (Python parity)', async () => {
+      // Parity with the Python loop (`llm_loop.py`): on malformed argument JSON
+      // the tool must NOT run with guessed/empty args — a side-effecting tool
+      // (transfer, SMS, booking) firing on `{}` is a safety bug. Instead an
+      // error envelope (role=tool, preserving tool_call_id) is fed back so the
+      // model can retry.
+      let callCount = 0;
+      let secondTurnMessages: Array<Record<string, unknown>> = [];
+      const handler = vi.fn().mockResolvedValue('{"ok":true}');
+      const customProvider: LLMProvider = {
+        async *stream(messages, _tools): AsyncGenerator<LLMChunk, void, unknown> {
+          callCount++;
+          if (callCount === 1) {
+            // Truncated / invalid JSON arguments from the model.
+            yield { type: 'tool_call', index: 0, id: 'tc_bad', name: 'process_refund', arguments: '{"amount": 50' };
+          } else {
+            secondTurnMessages = messages.map((m) => ({ ...m }));
+            yield { type: 'text', content: 'Sorry, please retry.' };
+          }
+        },
+      };
+
+      const loop = new LLMLoop('', '', 'System.', [
+        { name: 'process_refund', description: 'Refund', parameters: { type: 'object', properties: {} }, webhookUrl: '', handler },
+      ], customProvider);
+
+      const tokens: string[] = [];
+      for await (const token of loop.run('Refund my order', [], { call_id: 'c1' })) tokens.push(token);
+
+      // The side-effecting handler was NEVER invoked with empty/guessed args.
+      expect(handler).not.toHaveBeenCalled();
+      // An error envelope was fed back, paired to the original tool_call_id.
+      const toolMsg = secondTurnMessages.find((m) => m.role === 'tool' && m.tool_call_id === 'tc_bad');
+      expect(toolMsg).toBeDefined();
+      const envelope = JSON.parse(String(toolMsg!.content));
+      expect(envelope.error).toMatch(/not valid JSON/i);
+      // The model still got to produce a recovery turn.
+      expect(tokens).toEqual(['Sorry, please retry.']);
+    });
   });
 
   describe('[mocked] onToolCall observer (pipeline parity with realtime emitToolEvent)', () => {

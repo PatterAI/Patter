@@ -33,6 +33,7 @@ export type {
   HookContext,
   RealtimeTurnDetection,
   SessionContext,
+  Skill,
   TransferCallOptions,
   TransferCallResult,
   AgcConfig,

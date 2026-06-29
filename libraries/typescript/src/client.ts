@@ -47,6 +47,7 @@ import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import { resolveLogRoot } from "./services/call-log";
 import { validateAllToolSchemas } from "./tools/schema-validation";
+import { assertNoSkillConflicts } from "./skills";
 import type { ToolDefinition } from "./types";
 import { getLogger } from "./logger";
 import { TelemetryClient } from "./telemetry";
@@ -839,6 +840,46 @@ export class Patter {
           'handoffs is set but provider is ElevenLabs ConvAI; the handoff_to ' +
             'tool is only injected in Realtime and Pipeline modes and will be ' +
             'ignored for this agent.',
+        );
+      }
+    }
+
+    // Validate skills (progressive-disclosure use_skill). Mirrors Python
+    // ``Patter.agent`` skills validation: a list of Skill objects with a
+    // non-empty name + string instructions, whose tools pass schema validation
+    // and never collide with reserved / agent / cross-skill tool names.
+    if (working.skills !== undefined && working.skills.length > 0) {
+      if (!Array.isArray(working.skills)) {
+        throw new TypeError(`skills must be an array of Skill, got ${typeof working.skills}.`);
+      }
+      working.skills.forEach((s, i) => {
+        if (!s || typeof s !== 'object' || typeof s.name !== 'string' || !s.name) {
+          throw new Error(`skills[${i}] must be a Skill with a non-empty name.`);
+        }
+        if (typeof s.instructions !== 'string') {
+          throw new Error(`skills[${i}] ('${s.name}') requires string instructions.`);
+        }
+        const skillTools = (s.tools ?? []) as ReadonlyArray<{ name?: string; webhookUrl?: string; handler?: unknown }>;
+        skillTools.forEach((tool, j) => {
+          if (!tool.name) throw new Error(`skills[${i}].tools[${j}] missing required 'name' field`);
+          if (!tool.webhookUrl && !tool.handler) {
+            throw new Error(`skills[${i}].tools[${j}] requires either 'webhookUrl' or 'handler'`);
+          }
+        });
+        if (s.tools && s.tools.length > 0) {
+          validateAllToolSchemas(s.tools as unknown as ToolDefinition[]);
+        }
+      });
+      // Reserved-name / cross-skill / skill↔agent-tool collision guard.
+      assertNoSkillConflicts(
+        working.skills,
+        working.tools as ReadonlyArray<{ name?: string }> | undefined,
+      );
+      if (working.provider === 'elevenlabs_convai') {
+        getLogger().warn(
+          'skills is set but provider is ElevenLabs ConvAI; the use_skill tool ' +
+            'is only injected in Realtime and Pipeline modes and will be ignored ' +
+            'for this agent.',
         );
       }
     }

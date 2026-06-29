@@ -1200,8 +1200,26 @@ export class LLMLoop {
         let args: Record<string, unknown>;
         try {
           args = JSON.parse(tcData.function.arguments);
-        } catch {
-          args = {};
+        } catch (je) {
+          // Malformed argument JSON (truncated stream, model error). Do NOT
+          // execute with guessed/empty arguments — a side-effecting tool
+          // (transfer, SMS, booking) must never fire with an empty payload.
+          // Answer the model with an error envelope instead, preserving the
+          // tool_call_id pairing. Parity with the Python loop
+          // (`llm_loop.py` malformed-args branch).
+          getLogger().warn(
+            `Tool '${toolName}' received malformed arguments JSON (skipping execution): ${String(je)}`,
+          );
+          messages.push({
+            role: 'tool',
+            tool_call_id: tcData.id,
+            content: JSON.stringify({
+              error:
+                'Tool arguments were not valid JSON; the call was not executed. ' +
+                'Retry with well-formed arguments.',
+            }),
+          });
+          continue;
         }
 
         const result = await this.executeTool(toolName, args, callContext);

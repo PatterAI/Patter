@@ -37,6 +37,13 @@ from getpatter.observability.tracing import (
 from getpatter.services.input_chain import InputProcessingChain
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.sentence_chunker import SentenceChunker
+from getpatter.tools.skills import (
+    USE_SKILL_TOOL_NAME,
+    apply_skill_activation,
+    assert_no_skill_conflicts,
+    build_use_skill_tool,
+    skill_activation_history_text,
+)
 from getpatter.telephony.common import (
     _create_stt_from_config,
     _create_tts_from_config,
@@ -438,6 +445,10 @@ def _apply_handoff_target(current, target):
         text_transforms=target.text_transforms,
         consult=target.consult,
         handoffs=target.handoffs,
+        # Carry the target's own skills so ``use_skill`` after a handoff
+        # advertises the NEW agent's progressive-disclosure skills (additive
+        # feature, distinct from the one-way prompt/tool replace above).
+        skills=getattr(target, "skills", ()),
         disable_phone_preamble=target.disable_phone_preamble,
         tool_call_preambles=target.tool_call_preambles,
     )
@@ -1008,6 +1019,11 @@ class StreamHandler(ABC):
         # Closed in ``cleanup``/``fire_call_end`` to free open MCP
         # WebSocket / HTTP connections. Parity with TS field.
         self._mcp_manager: Any = None
+        # Names of SKILLS activated so far this call (progressive-disclosure
+        # ``use_skill``). Tracked so a second ``use_skill`` for the same skill
+        # is an idempotent no-op and a handoff can reset the set. Parity with
+        # TS ``StreamHandler.activeSkills``.
+        self._active_skills: set[str] = set()
         # Carrier-neutral local call recorder (``LocalCallRecorder`` from
         # ``getpatter.audio.call_recorder``) — wired by the telephony bridge
         # right after handler construction when ``serve(local_recording=...)``
@@ -1663,6 +1679,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # target configures one.
         self.agent = _inject_consult_tool(_apply_handoff_target(self.agent, target))
         self.resolved_prompt = resolve_agent_prompt(self.agent)
+        # A handoff REPLACES the prompt, so any skills activated on the prior
+        # agent are no longer layered in — clear the active-skill set so the
+        # target agent's skills start fresh.
+        self._active_skills = set()
 
         # Build the new wire tool list: target tools + built-ins (+ onward
         # handoff tool when the target has its own handoff map). Mirrors the
@@ -1679,6 +1699,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         new_tools += [TRANSFER_CALL_TOOL, END_CALL_TOOL]
         if getattr(self.agent, "handoffs", None):
             new_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
+        if getattr(self.agent, "skills", None):
+            new_tools.append(build_use_skill_tool(self.agent.skills))
 
         new_instructions = apply_tool_call_preambles(
             self.resolved_prompt,
@@ -1708,6 +1730,105 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         result = json.dumps({"status": "handed_off", "to": name})
         await self._adapter.send_function_result(func_data["call_id"], result)
         await self._emit_tool_event(HANDOFF_TOOL_NAME, args, result)
+
+    async def _handle_use_skill_function_call(self, func_data: dict) -> None:
+        """Dispatch the built-in ``use_skill`` tool on the Realtime path.
+
+        Progressive-disclosure ACTIVATION: layers the chosen skill's
+        ``instructions`` into the system prompt and unlocks its ``tools``
+        ADDITIVELY (via :func:`apply_skill_activation` — distinct from the
+        one-way handoff replace), then pushes the merged state to the live
+        session with a mid-session ``session.update`` (new ``instructions`` +
+        ``tools``). The skill stays active for the rest of the call. ALWAYS
+        sends a function result — an unknown / already-active skill or malformed
+        args produce an envelope, never silence (a missing result would wedge
+        the model). Parity with the Pipeline ``_perform_skill_activation``.
+        """
+        raw_args = func_data.get("arguments", "{}")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (json.JSONDecodeError, ValueError):
+            args = None
+        if not isinstance(args, dict):
+            result = json.dumps(
+                {"error": "Malformed use_skill arguments", "status": "rejected"}
+            )
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(USE_SKILL_TOOL_NAME, {}, result)
+            return
+
+        name = args.get("skill_name", "")
+        skills = getattr(self.agent, "skills", None) or ()
+        skill = next((s for s in skills if s.name == name), None)
+        if skill is None:
+            result = json.dumps(
+                {
+                    "error": f"Unknown skill {name!r}",
+                    "available": sorted(s.name for s in skills),
+                }
+            )
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(USE_SKILL_TOOL_NAME, args, result)
+            return
+        if name in self._active_skills:
+            # Idempotent: re-activating a live skill must not double-layer the
+            # instructions / tools. Acknowledge without mutating state.
+            result = json.dumps({"status": "already_active", "skill": name})
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(USE_SKILL_TOOL_NAME, args, result)
+            return
+
+        # Layer the skill in additively and re-resolve the prompt.
+        self.agent = apply_skill_activation(self.agent, skill)
+        self._active_skills.add(name)
+        self.resolved_prompt = resolve_agent_prompt(self.agent)
+
+        # Rebuild the wire tool list: current tools (now incl. the skill's
+        # tools) + built-ins (+ handoff_to when configured) + use_skill again
+        # so further skills can still be activated.
+        new_tools: list[dict] = [
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("parameters", {}),
+                **({"strict": True} if t.get("strict") is True else {}),
+            }
+            for t in (self.agent.tools or [])
+        ]
+        new_tools += [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+        if getattr(self.agent, "handoffs", None):
+            new_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
+        if getattr(self.agent, "skills", None):
+            new_tools.append(build_use_skill_tool(self.agent.skills))
+
+        new_instructions = apply_tool_call_preambles(
+            self.resolved_prompt,
+            getattr(self.agent, "tool_call_preambles", False),
+        )
+        # session.update FIRST, then the function result — the result triggers
+        # the next ``response.create``, which must already run with the skill's
+        # instructions + tools in scope.
+        await self._adapter.update_session(
+            instructions=new_instructions, tools=new_tools
+        )
+
+        history_text = skill_activation_history_text(name)
+        self.conversation_history.append(
+            {"role": "system", "text": history_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "system", "text": history_text})
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "system",
+                    "text": history_text,
+                    "call_id": self.call_id,
+                }
+            )
+
+        result = json.dumps({"status": "skill_activated", "skill": name})
+        await self._adapter.send_function_result(func_data["call_id"], result)
+        await self._emit_tool_event(USE_SKILL_TOOL_NAME, args, result)
 
     async def start(self) -> None:
         """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
@@ -1763,6 +1884,15 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # ``_forward_events`` (see ``_handle_handoff_function_call``).
         if getattr(self.agent, "handoffs", None):
             openai_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
+        # Progressive-disclosure SKILLS: advertise the built-in ``use_skill``
+        # tool (discovery layer — only skill names + descriptions) when the
+        # agent declares skills. Validated against reserved / collision names
+        # once here, before any activation has merged skill tools into
+        # ``agent.tools``. Dispatched in ``_forward_events`` (see
+        # ``_handle_use_skill_function_call``).
+        if getattr(self.agent, "skills", None):
+            assert_no_skill_conflicts(self.agent.skills, self.agent.tools)
+            openai_tools.append(build_use_skill_tool(self.agent.skills))
 
         # Forward optional engine-level Realtime knobs (carried on the Agent
         # by ``Patter._unpack_engine``) only when set, so the adapter's own
@@ -2446,6 +2576,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         self.agent, "handoffs", None
                     ):
                         await self._handle_handoff_function_call(func_data)
+
+                    elif func_data["name"] == USE_SKILL_TOOL_NAME and getattr(
+                        self.agent, "skills", None
+                    ):
+                        await self._handle_use_skill_function_call(func_data)
 
                     else:
                         tool_def = next(
@@ -3827,6 +3962,10 @@ class PipelineStreamHandler(StreamHandler):
             # Merge the built-in consult tool (if configured) before the
             # handoff built-ins so the pipeline LLM sees it too.
             self.agent = _inject_consult_tool(self.agent)
+            # Validate skill / reserved-name collisions once, against the
+            # original tool list (before any activation merges skill tools in).
+            if getattr(self.agent, "skills", None):
+                assert_no_skill_conflicts(self.agent.skills, self.agent.tools)
             combined_tools = self._build_combined_pipeline_tools()
             tool_executor = ToolExecutor() if combined_tools else None
             llm_model = self.agent.model
@@ -3892,9 +4031,11 @@ class PipelineStreamHandler(StreamHandler):
     def _build_combined_pipeline_tools(self) -> list[dict]:
         """Build the full pipeline tool list for the CURRENT ``self.agent``:
         user tools + built-in ``transfer_call`` / ``end_call`` + the
-        ``handoff_to`` tool when handoff targets are configured. Re-invoked
-        after a handoff so the LLM loop advertises the target agent's tools
-        (including its onward handoff map)."""
+        ``handoff_to`` tool when handoff targets are configured + the
+        ``use_skill`` tool when skills are configured. Re-invoked after a
+        handoff or a skill activation so the LLM loop advertises the
+        current agent's tools (including its onward handoff map and any
+        skill tools merged in on activation)."""
         combined = _augment_with_builtin_handoff_tools(
             self.agent.tools,
             transfer_fn=self._transfer_fn,
@@ -3907,6 +4048,13 @@ class PipelineStreamHandler(StreamHandler):
                     "handler": self._handoff_tool_handler,
                 }
             )
+        if getattr(self.agent, "skills", None):
+            combined.append(
+                {
+                    **build_use_skill_tool(self.agent.skills),
+                    "handler": self._use_skill_tool_handler,
+                }
+            )
         return combined
 
     async def _handoff_tool_handler(self, arguments: dict, call_context: dict) -> str:
@@ -3915,6 +4063,61 @@ class PipelineStreamHandler(StreamHandler):
         return await self._perform_handoff(
             args.get("name", ""), args.get("reason") or ""
         )
+
+    async def _use_skill_tool_handler(self, arguments: dict, call_context: dict) -> str:
+        """Handler closure for the built-in ``use_skill`` tool (pipeline)."""
+        args = arguments or {}
+        return await self._perform_skill_activation(args.get("skill_name", ""))
+
+    async def _perform_skill_activation(self, name: str) -> str:
+        """Activate the named SKILL on the live pipeline call (progressive
+        disclosure ACTIVATION).
+
+        Layers the skill's ``instructions`` into the system prompt and unlocks
+        its ``tools`` ADDITIVELY (via :func:`apply_skill_activation`), then
+        swaps the LLM loop's system prompt + rebuilt tool list so the NEXT turn
+        runs with the skill in scope. The skill stays active for the rest of
+        the call. ALWAYS returns a tool-result string — an unknown /
+        already-active skill produces an envelope, never silence. Parity with
+        the Realtime ``_handle_use_skill_function_call``.
+        """
+        skills = getattr(self.agent, "skills", None) or ()
+        skill = next((s for s in skills if s.name == name), None)
+        if skill is None:
+            return json.dumps(
+                {
+                    "error": f"Unknown skill {name!r}",
+                    "available": sorted(s.name for s in skills),
+                }
+            )
+        if name in self._active_skills:
+            return json.dumps({"status": "already_active", "skill": name})
+
+        self.agent = apply_skill_activation(self.agent, skill)
+        self._active_skills.add(name)
+        self.resolved_prompt = resolve_agent_prompt(self.agent)
+        if self._llm_loop is not None:
+            self._llm_loop.update_agent(
+                system_prompt=self.resolved_prompt,
+                tools=self._build_combined_pipeline_tools(),
+                disable_phone_preamble=getattr(
+                    self.agent, "disable_phone_preamble", False
+                ),
+            )
+        history_text = skill_activation_history_text(name)
+        self.conversation_history.append(
+            {"role": "system", "text": history_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "system", "text": history_text})
+        if self.on_transcript is not None:
+            await self.on_transcript(
+                {
+                    "role": "system",
+                    "text": history_text,
+                    "call_id": self.call_id,
+                }
+            )
+        return json.dumps({"status": "skill_activated", "skill": name})
 
     async def _perform_handoff(self, name: str, reason: str) -> str:
         """Swap the live pipeline call to the named handoff target agent.
@@ -3949,6 +4152,9 @@ class PipelineStreamHandler(StreamHandler):
             )
         self.agent = _inject_consult_tool(_apply_handoff_target(self.agent, target))
         self.resolved_prompt = resolve_agent_prompt(self.agent)
+        # A handoff REPLACES the prompt, so skills activated on the prior agent
+        # are no longer layered in — clear the set for the target's skills.
+        self._active_skills = set()
         if self._llm_loop is not None:
             self._llm_loop.update_agent(
                 system_prompt=self.resolved_prompt,
