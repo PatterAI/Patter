@@ -24,6 +24,7 @@ import {
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager } from './handler-utils';
+import { ContextCompactor } from './compaction';
 import { DefaultToolExecutor } from './llm-loop';
 import { MCPManager } from './tools/mcp-client';
 import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, TransferCallOptions, TransferCallResult, VADProvider, CarrierKind } from './types';
@@ -1555,6 +1556,11 @@ export class StreamHandler {
    */
   private activeSkills = new Set<string>();
   private llmLoop: LLMLoop | null = null;
+  // Opt-in token-aware history compaction (pipeline mode). Constructed in the
+  // LLM-loop setup when `agent.compaction` is set; `null` keeps the plain FIFO
+  // history. `compactionTask` tracks the in-flight background summarization.
+  private compactor: ContextCompactor | null = null;
+  private compactionTask: Promise<void> | null = null;
   /**
    * Per-call tool executor — provides retry-with-exponential-backoff and a
    * per-tool circuit breaker for Realtime function calls. Pipeline mode
@@ -1777,7 +1783,15 @@ export class StreamHandler {
         ? holdMs
         : 1200;
 
-    this.history = createHistoryManager(200);
+    // ``maxHistory`` sizes the per-call working-memory ring (default 200 —
+    // byte-identical to the prior hard-coded value). Parity with Python
+    // ``Agent.max_history``.
+    const maxHistory = deps.agent.maxHistory;
+    this.history = createHistoryManager(
+      typeof maxHistory === 'number' && Number.isFinite(maxHistory) && maxHistory > 0
+        ? Math.floor(maxHistory)
+        : 200,
+    );
 
     // v0.5.0+: ``agent.stt`` / ``agent.tts`` are always STTAdapter / TTSAdapter
     // instances (or undefined). Provider classes expose a static
@@ -3460,9 +3474,11 @@ export class StreamHandler {
         augmentedTools,
         this.deps.agent.llm,
         this.deps.agent.disablePhonePreamble ?? false,
+        this.deps.agent.contextTokenBudget,
       );
       this.llmLoop.setEventBus(this._eventBus);
       this.llmLoop.setOnToolCall((n, a, r) => this.recordToolCall(n, a, r));
+      this.setupCompaction();
       const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label}, llm=${llmLabel})`);
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
@@ -3476,9 +3492,11 @@ export class StreamHandler {
         augmentedTools,
         undefined,
         this.deps.agent.disablePhonePreamble ?? false,
+        this.deps.agent.contextTokenBudget,
       );
       this.llmLoop.setEventBus(this._eventBus);
       this.llmLoop.setOnToolCall((n, a, r) => this.recordToolCall(n, a, r));
+      this.setupCompaction();
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label})`);
     }
 
@@ -6059,6 +6077,49 @@ export class StreamHandler {
   }
 
   /**
+   * Construct the opt-in {@link ContextCompactor} when `agent.compaction` is
+   * set. The default summarizer uses the agent's own LLM (`llmLoop.summarize`).
+   * No-op when compaction is disabled. Mirrors the Python handler wiring.
+   */
+  private setupCompaction(): void {
+    const cfg = this.deps.agent.compaction;
+    if (!cfg || !this.llmLoop) return;
+    const loop = this.llmLoop;
+    const target = cfg.targetTokens ?? 3000;
+    this.compactor = new ContextCompactor(cfg, (prior, old) =>
+      loop.summarize(prior, old, target),
+    );
+  }
+
+  /**
+   * Kick off a background history-compaction pass when over budget. No-op when
+   * compaction is disabled or a pass is already running. The summarization is
+   * async and runs OFF the live turn path so it never adds latency — the new
+   * summary is applied to the next turn once it completes. Mirrors Python
+   * `_maybe_start_compaction`.
+   */
+  private maybeStartCompaction(): void {
+    if (!this.compactor || !this.llmLoop) return;
+    if (this.compactionTask) return; // a pass is already in flight
+    if (!this.compactor.shouldCompact(this.history.entries)) return;
+    this.compactionTask = this.runCompaction().finally(() => {
+      this.compactionTask = null;
+    });
+  }
+
+  /** Run one compaction pass and apply the resulting summary to the loop. */
+  private async runCompaction(): Promise<void> {
+    try {
+      const newSummary = await this.compactor!.maybeCompact(this.history.entries);
+      if (newSummary !== null && this.llmLoop) {
+        this.llmLoop.setContextSummary(newSummary);
+      }
+    } catch (e) {
+      getLogger().error(`context compaction failed: ${String(e)}`);
+    }
+  }
+
+  /**
    * Push an assistant turn into history and fire `onTranscript` so host
    * applications observe pipeline-mode replies the same way they observe
    * realtime-mode replies. Mirrors `_emit_assistant_transcript` in the
@@ -6075,6 +6136,10 @@ export class StreamHandler {
         history: [...this.history.entries],
       });
     }
+    // The user+assistant turn is now in history — re-evaluate whether the
+    // working context has outgrown the compaction budget and, if so,
+    // summarize the oldest turns in the background (no turn latency).
+    this.maybeStartCompaction();
   }
 
   /**

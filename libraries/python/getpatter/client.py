@@ -32,6 +32,7 @@ from getpatter.local_config import LocalConfig
 from getpatter.models import (
     Agent,
     CallResult,
+    CompactionConfig,
     ConsultConfig,
     Guardrail,
     MachineDetectionResult,
@@ -1753,6 +1754,9 @@ class Patter:
         tool_call_preambles: bool | str = False,
         preemptive_generation: bool = False,
         preemptive_min_stable_ms: int = 300,
+        max_history: int = 200,
+        compaction: "CompactionConfig | None" = None,
+        context_token_budget: int | None = None,
     ) -> Agent:
         """Create an ``Agent`` configuration.
 
@@ -1792,6 +1796,18 @@ class Patter:
             preemptive_min_stable_ms: How long (ms) a non-punctuated interim
                 transcript must remain unchanged before it qualifies for
                 preemptive generation. Default ``300``.
+            max_history: Maximum conversation-history entries kept in the
+                per-call working memory (FIFO ring). Default ``200`` (prior
+                hard-coded value). Pipeline mode only.
+            compaction: Opt-in :class:`CompactionConfig` enabling token-aware
+                rolling summarization of old turns on long calls (pipeline
+                mode, built-in LLM loop). ``None`` (default) keeps the plain
+                FIFO history.
+            context_token_budget: Opt-in estimated-token budget for the
+                assembled prompt. When set, the built-in LLM loop logs a
+                WARNING once per call when a turn's estimated context crosses
+                ~75% of it. The ``context_tokens`` metric is recorded
+                regardless. ``None`` (default) disables the warning.
             tools: List of ``Tool`` instances (build with the ``tool()`` factory).
             stt: ``STTProvider`` instance for pipeline mode (e.g.
                 ``DeepgramSTT(api_key=...)``).
@@ -2241,6 +2257,9 @@ class Patter:
             tool_call_preambles=tool_call_preambles,
             preemptive_generation=preemptive_generation,
             preemptive_min_stable_ms=preemptive_min_stable_ms,
+            max_history=max_history,
+            compaction=compaction,
+            context_token_budget=context_token_budget,
         )
 
     @staticmethod

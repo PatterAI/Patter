@@ -17,6 +17,7 @@ export type {
   IncomingMessage,
   STTConfig,
   TTSConfig,
+  CompactionConfig,
   LocalOptions,
   AgentOptions,
   ServeOptions,

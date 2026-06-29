@@ -998,7 +998,7 @@ class StreamHandler(ABC):
         self.conversation_history: deque = (
             conversation_history
             if conversation_history is not None
-            else deque(maxlen=200)
+            else deque(maxlen=getattr(agent, "max_history", 200) or 200)
         )
         self.transcript_entries: deque = (
             transcript_entries if transcript_entries is not None else deque(maxlen=200)
@@ -3517,6 +3517,11 @@ class PipelineStreamHandler(StreamHandler):
         self._llm_loop = None
         self._msg_accepts_call = False
         self._remote_handler = None
+        # Opt-in token-aware history compaction (pipeline mode). Constructed in
+        # ``start`` when ``agent.compaction`` is set; ``None`` keeps the plain
+        # FIFO history. Background task that runs a summarization pass.
+        self._compactor = None
+        self._compaction_task: asyncio.Task | None = None
         # Throttle state for back-to-back STT finals — see ``_commit_transcript``.
         self._last_commit_text: str = ""
         self._last_commit_at: float = 0.0
@@ -3984,7 +3989,25 @@ class PipelineStreamHandler(StreamHandler):
                     self.agent, "disable_phone_preamble", False
                 ),
                 on_tool_call=self._record_tool_call,
+                context_token_budget=getattr(self.agent, "context_token_budget", None),
             )
+
+            # Opt-in token-aware compaction: summarize old turns in the
+            # background once the prompt grows past the configured budget,
+            # keeping the last N turns verbatim. Default OFF (compaction=None).
+            compaction_cfg = getattr(self.agent, "compaction", None)
+            if compaction_cfg is not None:
+                from getpatter.services.compaction import ContextCompactor
+
+                _loop = self._llm_loop
+                _target = compaction_cfg.target_tokens
+
+                async def _summarize(prior: str, old: list[dict]) -> str:
+                    return await _loop.summarize(prior, old, _target)
+
+                self._compactor = ContextCompactor(
+                    config=compaction_cfg, summarizer=_summarize
+                )
 
         # Create remote message handler once if on_message is a remote URL
         from getpatter.services.remote_message import (
@@ -4178,6 +4201,48 @@ class PipelineStreamHandler(StreamHandler):
             )
         return json.dumps({"status": "handed_off", "to": name})
 
+    def _maybe_start_compaction(self) -> None:
+        """Kick off a background history-compaction pass when over budget.
+
+        No-op when compaction is disabled (``self._compactor is None``) or a
+        pass is already running. The summarization is async and runs OFF the
+        live turn path so it never adds latency — the new summary is applied to
+        the next turn once it completes (see :meth:`_run_compaction`).
+
+        ``getattr`` defaults keep test doubles / partial inits (which never set
+        these fields) working — a no-op rather than an ``AttributeError``.
+        """
+        compactor = getattr(self, "_compactor", None)
+        if compactor is None or getattr(self, "_llm_loop", None) is None:
+            return
+        existing = getattr(self, "_compaction_task", None)
+        if existing is not None and not existing.done():
+            return
+        if not compactor.should_compact(self.conversation_history):
+            return
+        self._compaction_task = asyncio.create_task(self._run_compaction())
+        self._compaction_task.add_done_callback(self._on_compaction_done)
+
+    async def _run_compaction(self) -> None:
+        """Run one compaction pass and apply the resulting summary to the loop."""
+        try:
+            new_summary = await self._compactor.maybe_compact(self.conversation_history)
+            if new_summary is not None and self._llm_loop is not None:
+                self._llm_loop.set_context_summary(new_summary)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("context compaction failed")
+
+    @staticmethod
+    def _on_compaction_done(task: asyncio.Task) -> None:
+        """Surface a crashed background-compaction task instead of swallowing it."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("context compaction task error: %s", exc)
+
     async def _emit_assistant_transcript(self, text: str) -> None:
         """Push an assistant turn into history+transcript_entries and fire
         ``on_transcript`` so host applications observe pipeline-mode
@@ -4198,6 +4263,10 @@ class PipelineStreamHandler(StreamHandler):
                     "history": list(self.conversation_history),
                 }
             )
+        # The user+assistant turn is now in history — re-evaluate whether the
+        # working context has outgrown the compaction budget and, if so,
+        # summarize the oldest turns in the background (no turn latency).
+        self._maybe_start_compaction()
 
     async def _record_tool_call(self, name: str, arguments: dict, result: Any) -> None:
         """Surface a tool invocation into the transcript timeline. Emits

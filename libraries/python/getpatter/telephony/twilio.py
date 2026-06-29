@@ -487,7 +487,9 @@ async def twilio_stream_bridge(
 
     stream_sid: str | None = None
     call_sid_actual: str = ""
-    conversation_history: deque[dict] = deque(maxlen=200)
+    conversation_history: deque[dict] = deque(
+        maxlen=getattr(agent, "max_history", 200) or 200
+    )
     transcript_entries: deque[dict] = deque(maxlen=200)
 
     handler: (
