@@ -27,18 +27,6 @@
   `services/input_chain.py` / `services/input-chain.ts`, `stream_handler.py` /
   `stream-handler.ts`, `models.py` / `types.ts`, `client.py` (TS via spread).
 
-### Changed
-
-- **AEC scope documented: browser/native only, no-op by design on PSTN.** The
-  NLMS echo canceller (`audio/aec.py` / `audio/aec.ts`) docstrings now state
-  explicitly that on a phone call the carrier round-trip exceeds the 32 ms
-  filter window, so `process_near_end` / `processNearEnd` passes through
-  unchanged — PSTN line echo is handled by the carrier (ITU-T G.168) and the
-  caller device. The existing runtime warning when `echo_cancellation` is
-  enabled on a PSTN carrier is unchanged. No behaviour change.
-
-### Added
-
 - **TTS providers declare their output format; carrier-native μ-law passthrough
   generalised.** Pipeline TTS adapters can now expose `sourceAudioFormat()`
   (TS) / `source_audio_format()` (Py) returning `{ encoding, sampleRate }`, and
@@ -118,6 +106,16 @@
   Python mirror: `engines/openai_realtime.py`, `engines/openai_realtime_2.py`,
   `providers/openai_realtime.py`, `providers/openai_realtime_2.py`, `client.py`,
   `models.py`, `stream_handler.py`.
+
+### Changed
+
+- **AEC scope documented: browser/native only, no-op by design on PSTN.** The
+  NLMS echo canceller (`audio/aec.py` / `audio/aec.ts`) docstrings now state
+  explicitly that on a phone call the carrier round-trip exceeds the 32 ms
+  filter window, so `process_near_end` / `processNearEnd` passes through
+  unchanged — PSTN line echo is handled by the carrier (ITU-T G.168) and the
+  caller device. The existing runtime warning when `echo_cancellation` is
+  enabled on a PSTN carrier is unchanged. No behaviour change.
 
 ### Fixed
 
