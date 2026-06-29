@@ -16,6 +16,22 @@
  * battle-tested DSP, wrap a binding to `webrtc-audio-processing-2`
  * externally.
  *
+ * BROWSER / NATIVE ONLY — on PSTN this stage is a NO-OP BY DESIGN.
+ * The NLMS filter only models an echo path that fits inside its window
+ * (512 taps @ 16 kHz = 32 ms). That holds when the SDK owns the audio path
+ * end-to-end (a browser/WebRTC or native-mobile near-end mic + speaker). On
+ * a phone call the bytes traverse a 250–1500 ms carrier jitter buffer + loop,
+ * so the round-trip echo lands far outside the filter window and the
+ * canceller cannot model it — ``processNearEnd`` self-detects the stale /
+ * under-primed far-end reference and passes the frame through unchanged. That
+ * is intentional: PSTN line echo is already handled by the carrier per
+ * ITU-T G.168 (network echo cancellers) plus the caller device's own acoustic
+ * echo control, so Patter must NOT cancel it a second time. ``echoCancellation``
+ * therefore stays ``false`` by default and the StreamHandler logs a one-shot
+ * warning if it is enabled on a PSTN carrier. A full WebRTC-style APM backend
+ * (AEC3 + NS + AGC running natively) is a future advanced option, not this
+ * filter.
+ *
  * @example
  * ```ts
  * const aec = new NlmsEchoCanceller({ sampleRate: 16000 });

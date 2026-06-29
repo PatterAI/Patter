@@ -15,16 +15,13 @@
  * 16 kHz pipelines. For real phone calls, use the carrier-specific
  * factories instead:
  *
- * - {@link CartesiaTTS.forTwilio} requests `sampleRate=16000` — the rate
- *   the pipeline's carrier-side encoder expects. The previous 8 kHz
- *   shortcut had no consuming hook: the audio sender unconditionally runs
- *   its fixed 16 kHz → 8 kHz decimator, so 8 kHz input was decimated
- *   AGAIN and played back at ~2x speed (chipmunk audio).
- * - {@link CartesiaTTS.forTelnyx} requests `sampleRate=16000`. Telnyx
- *   negotiates L16/16000 on its bidirectional media WebSocket, so
- *   16 kHz PCM is already the format used end-to-end and no
- *   transcoding happens. This is the same as the bare-constructor
- *   default and exists for API symmetry with the Twilio factory.
+ * - {@link CartesiaTTS.forTwilio} emits `pcm_mulaw` @ 8 kHz — Twilio's exact
+ *   wire codec — so the pipeline skips resampling AND PCM → μ-law encoding
+ *   (bit-clean passthrough). The sender now reads the declared output format
+ *   rather than assuming a 16 kHz source, so this no longer chipmunks.
+ * - {@link CartesiaTTS.forTelnyx} emits `pcm_mulaw` @ 8 kHz. The SDK pins the
+ *   Telnyx wire to PCMU/μ-law @ 8 kHz, so this flows end-to-end with zero
+ *   resampling or transcoding — same passthrough win as the Twilio factory.
  */
 
 import { getLogger } from '../logger';
@@ -83,6 +80,13 @@ export interface CartesiaTTSOptions {
   voice?: string;
   language?: string;
   sampleRate?: CartesiaTTSSampleRate | number;
+  /**
+   * Audio encoding Cartesia produces. Default ``pcm_s16le`` (linear PCM16).
+   * Set ``pcm_mulaw`` with ``sampleRate=8000`` to emit Twilio/Telnyx/Plivo
+   * wire-native μ-law directly — the pipeline then skips resampling and PCM →
+   * μ-law encoding entirely (see {@link CartesiaTTS.forTwilio}).
+   */
+  encoding?: CartesiaTTSEncoding;
   speed?: string | number;
   emotion?: string | string[];
   volume?: number;
@@ -99,6 +103,7 @@ export class CartesiaTTS {
   private readonly voice: string;
   private readonly language: string;
   private readonly sampleRate: number;
+  private readonly encoding: CartesiaTTSEncoding;
   private readonly speed?: string | number;
   private readonly emotion?: string[];
   private readonly volume?: number;
@@ -111,6 +116,7 @@ export class CartesiaTTS {
     this.voice = opts.voice ?? CARTESIA_DEFAULT_VOICE_ID;
     this.language = opts.language ?? 'en';
     this.sampleRate = opts.sampleRate ?? CartesiaTTSSampleRate.HZ_16000;
+    this.encoding = opts.encoding ?? CartesiaTTSEncoding.PCM_S16LE;
     this.speed = opts.speed;
     this.emotion =
       typeof opts.emotion === 'string' ? [opts.emotion] : opts.emotion;
@@ -120,39 +126,64 @@ export class CartesiaTTS {
   }
 
   /**
+   * Declare the audio format this adapter emits, so the pipeline sender can
+   * derive the correct resample ratio (or skip it for μ-law passthrough)
+   * instead of assuming a fixed 16 kHz source. See ``audio/format.ts``.
+   *
+   * - ``pcm_mulaw`` → ``{ encoding: 'mulaw', sampleRate }`` (carrier-native).
+   * - ``pcm_alaw``  → ``{ encoding: 'alaw',  sampleRate }``.
+   * - everything else → ``{ encoding: 'pcm_s16le', sampleRate }``.
+   */
+  sourceAudioFormat(): { encoding: 'pcm_s16le' | 'mulaw' | 'alaw'; sampleRate: number } {
+    if (this.encoding === CartesiaTTSEncoding.PCM_MULAW) {
+      return { encoding: 'mulaw', sampleRate: this.sampleRate };
+    }
+    if (this.encoding === CartesiaTTSEncoding.PCM_ALAW) {
+      return { encoding: 'alaw', sampleRate: this.sampleRate };
+    }
+    return { encoding: 'pcm_s16le', sampleRate: this.sampleRate };
+  }
+
+  /**
    * Construct an instance pre-configured for Twilio Media Streams.
    *
-   * Sets `sampleRate=8000` so Cartesia emits PCM_S16LE @ 8 kHz directly.
-   * Twilio's media stream uses μ-law @ 8 kHz so the SDK still does the
-   * PCM → μ-law transcode client-side, but the 16 kHz → 8 kHz resample
-   * step is skipped. Saves ~10–30 ms first-byte plus per-frame CPU and
-   * removes a potential aliasing source.
+   * Emits ``pcm_mulaw`` @ 8 kHz — exactly Twilio's wire codec — so the
+   * pipeline takes the passthrough path: zero resampling, zero PCM → μ-law
+   * encoding, bit-clean audio. This generalises the ElevenLabs
+   * ``setTelephonyCarrier`` μ-law-native trick to Cartesia and removes the
+   * resampler entirely from the hot path (saves ~10–30 ms first-byte plus
+   * per-frame CPU and all resampling aliasing).
+   *
+   * Previously this requested ``pcm_s16le`` @ 16 kHz because the sender
+   * hardcoded a 16 kHz → 8 kHz decimator; now the sender reads the declared
+   * format and an 8 kHz μ-law source flows straight to the wire.
    */
   static forTwilio(
     apiKey: string,
-    options: Omit<CartesiaTTSOptions, 'sampleRate'> = {},
+    options: Omit<CartesiaTTSOptions, 'sampleRate' | 'encoding'> = {},
   ): CartesiaTTS {
     return new CartesiaTTS(apiKey, {
       ...options,
-      sampleRate: CartesiaTTSSampleRate.HZ_16000,
+      encoding: CartesiaTTSEncoding.PCM_MULAW,
+      sampleRate: CartesiaTTSSampleRate.HZ_8000,
     });
   }
 
   /**
    * Construct an instance pre-configured for Telnyx bidirectional media.
    *
-   * Sets `sampleRate=16000` to match Telnyx's L16/16000 default codec —
-   * audio flows end-to-end with zero resampling or transcoding. Same as
-   * the bare-constructor default; exists for API symmetry with
-   * {@link CartesiaTTS.forTwilio}.
+   * The SDK's ``streaming_start`` pins the Telnyx wire to PCMU/μ-law @ 8 kHz,
+   * so emitting ``pcm_mulaw`` @ 8 kHz flows end-to-end with zero resampling or
+   * transcoding — the same passthrough win as {@link CartesiaTTS.forTwilio}.
    */
   static forTelnyx(
     apiKey: string,
-    options: Omit<CartesiaTTSOptions, 'sampleRate'> = {},
+    options: Omit<CartesiaTTSOptions, 'sampleRate' | 'encoding'> = {},
   ): CartesiaTTS {
     return new CartesiaTTS(apiKey, {
       ...options,
-      sampleRate: CartesiaTTSSampleRate.HZ_16000,
+      encoding: CartesiaTTSEncoding.PCM_MULAW,
+      sampleRate: CartesiaTTSSampleRate.HZ_8000,
     });
   }
 
@@ -164,7 +195,7 @@ export class CartesiaTTS {
       transcript: text,
       output_format: {
         container: CartesiaTTSContainer.RAW,
-        encoding: CartesiaTTSEncoding.PCM_S16LE,
+        encoding: this.encoding,
         sample_rate: this.sampleRate,
       },
       language: this.language,

@@ -152,6 +152,13 @@ export interface CallMetrics {
    * `CallMetrics.preemptive_hits` / `preemptive_misses`. */
   readonly preemptive_hits?: number;
   readonly preemptive_misses?: number;
+  /** Peak estimated prompt size (system + rolling summary + history + user, in
+   * the canonical `chars / 4` token unit) observed across the call's turns.
+   * Always populated in pipeline mode (built-in LLM loop); `0` when the loop
+   * never ran (Realtime / ConvAI / custom `onMessage`). Surfaced so dashboards
+   * can chart context growth and validate compaction. Mirrors Python
+   * `CallMetrics.context_tokens`. */
+  readonly context_tokens?: number;
 }
 
 // ---- CallControl interface ----
@@ -303,6 +310,10 @@ export class CallMetricsAccumulator {
   // CallMetrics. Parity with Python `_preemptive_hits` / `_preemptive_misses`.
   private _preemptiveHits = 0;
   private _preemptiveMisses = 0;
+  // Peak estimated prompt size (chars/4 token unit) observed across the call.
+  // Recorded by LLMLoop.run once per turn before dispatch. Surfaced on the
+  // final CallMetrics as `context_tokens`. Parity with Python `_max_context_tokens`.
+  private _maxContextTokens = 0;
   // Last LLM model identifier from a recordLlmUsage call — emitted on
   // CallMetrics.llm_model so the dashboard cost panel can display
   // "Cerebras gpt-oss-120b" instead of just "Cerebras".
@@ -913,6 +924,22 @@ export class CallMetricsAccumulator {
     this._preemptiveMisses += 1;
   }
 
+  /**
+   * Record the estimated prompt size for the current turn. Tracks the per-call
+   * PEAK (the largest single-turn prompt seen) and emits a `context_tokens`
+   * event on the bus. Called once per turn by `LLMLoop.run` before dispatch.
+   * Parity with Python `record_context_tokens`.
+   */
+  recordContextTokens(tokens: number): void {
+    if (tokens > this._maxContextTokens) this._maxContextTokens = tokens;
+    this._eventBus?.emit('context_tokens', { callId: this.callId, tokens });
+  }
+
+  /** Peak estimated prompt size (chars/4 token unit) seen this call. */
+  get maxContextTokens(): number {
+    return this._maxContextTokens;
+  }
+
   /** Override the carrier-billed telephony cost (e.g. exact value reported via Twilio API). */
   setActualTelephonyCost(cost: number): void {
     this._actualTelephonyCost = cost;
@@ -998,6 +1025,7 @@ export class CallMetricsAccumulator {
       error_code: this._errorCode,
       preemptive_hits: this._preemptiveHits,
       preemptive_misses: this._preemptiveMisses,
+      context_tokens: this._maxContextTokens,
     };
 
     this._eventBus?.emit('call_ended', { callId: this.callId, metrics });

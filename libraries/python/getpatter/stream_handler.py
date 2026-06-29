@@ -37,6 +37,13 @@ from getpatter.observability.tracing import (
 from getpatter.services.input_chain import InputProcessingChain
 from getpatter.services.pipeline_hooks import PipelineHookExecutor
 from getpatter.services.sentence_chunker import SentenceChunker
+from getpatter.tools.skills import (
+    USE_SKILL_TOOL_NAME,
+    apply_skill_activation,
+    assert_no_skill_conflicts,
+    build_use_skill_tool,
+    skill_activation_history_text,
+)
 from getpatter.telephony.common import (
     _create_stt_from_config,
     _create_tts_from_config,
@@ -438,6 +445,10 @@ def _apply_handoff_target(current, target):
         text_transforms=target.text_transforms,
         consult=target.consult,
         handoffs=target.handoffs,
+        # Carry the target's own skills so ``use_skill`` after a handoff
+        # advertises the NEW agent's progressive-disclosure skills (additive
+        # feature, distinct from the one-way prompt/tool replace above).
+        skills=getattr(target, "skills", ()),
         disable_phone_preamble=target.disable_phone_preamble,
         tool_call_preambles=target.tool_call_preambles,
     )
@@ -449,6 +460,7 @@ def _handoff_history_text(name: str, reason: str) -> str:
     if reason:
         text += f" — {reason}"
     return text
+
 
 END_CALL_TOOL: dict = {
     "name": "end_call",
@@ -596,6 +608,22 @@ class AudioSender(ABC):
         buffer (e.g. ``TwilioAudioSender``) override this. Matches TS
         parity where ``ttsByteCarry = null`` is reset at every synth
         boundary.
+        """
+        return None
+
+    def set_source_format(self, encoding: str, sample_rate: int) -> None:
+        """Declare the format the pipeline TTS adapter emits so the sender can
+        transcode to the carrier wire from the REAL rate — not a hardcoded
+        16 kHz assumption.
+
+        - ``encoding == "mulaw"`` (and ``sample_rate == 8000``) → the bytes are
+          already the carrier wire codec, so the sender switches to passthrough.
+        - otherwise → rebuild the resampler for ``sample_rate`` -> 8 kHz.
+
+        Default is a no-op for senders that never transcode (e.g. those built
+        with ``input_is_mulaw_8k=True``). Subclasses that resample
+        (Twilio/Telnyx/Plivo) override this. Parity with TS
+        ``StreamHandler.configureOutboundAudio``.
         """
         return None
 
@@ -968,7 +996,9 @@ class StreamHandler(ABC):
         # and the bridge-side deques stayed empty forever — every
         # ``on_call_end`` payload carried an empty transcript/history.
         self.conversation_history: deque = (
-            conversation_history if conversation_history is not None else deque(maxlen=200)
+            conversation_history
+            if conversation_history is not None
+            else deque(maxlen=getattr(agent, "max_history", 200) or 200)
         )
         self.transcript_entries: deque = (
             transcript_entries if transcript_entries is not None else deque(maxlen=200)
@@ -989,6 +1019,11 @@ class StreamHandler(ABC):
         # Closed in ``cleanup``/``fire_call_end`` to free open MCP
         # WebSocket / HTTP connections. Parity with TS field.
         self._mcp_manager: Any = None
+        # Names of SKILLS activated so far this call (progressive-disclosure
+        # ``use_skill``). Tracked so a second ``use_skill`` for the same skill
+        # is an idempotent no-op and a handoff can reset the set. Parity with
+        # TS ``StreamHandler.activeSkills``.
+        self._active_skills: set[str] = set()
         # Carrier-neutral local call recorder (``LocalCallRecorder`` from
         # ``getpatter.audio.call_recorder``) — wired by the telephony bridge
         # right after handler construction when ``serve(local_recording=...)``
@@ -1272,7 +1307,6 @@ class StreamHandler(ABC):
         if task is not None and not task.done():
             task.cancel()
         self._max_call_watchdog = None
-
 
     async def _safe_on_transcript(self, payload: dict) -> None:
         """Invoke the user's ``on_transcript`` with exception containment.
@@ -1645,6 +1679,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # target configures one.
         self.agent = _inject_consult_tool(_apply_handoff_target(self.agent, target))
         self.resolved_prompt = resolve_agent_prompt(self.agent)
+        # A handoff REPLACES the prompt, so any skills activated on the prior
+        # agent are no longer layered in — clear the active-skill set so the
+        # target agent's skills start fresh.
+        self._active_skills = set()
 
         # Build the new wire tool list: target tools + built-ins (+ onward
         # handoff tool when the target has its own handoff map). Mirrors the
@@ -1661,6 +1699,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         new_tools += [TRANSFER_CALL_TOOL, END_CALL_TOOL]
         if getattr(self.agent, "handoffs", None):
             new_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
+        if getattr(self.agent, "skills", None):
+            new_tools.append(build_use_skill_tool(self.agent.skills))
 
         new_instructions = apply_tool_call_preambles(
             self.resolved_prompt,
@@ -1690,6 +1730,105 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         result = json.dumps({"status": "handed_off", "to": name})
         await self._adapter.send_function_result(func_data["call_id"], result)
         await self._emit_tool_event(HANDOFF_TOOL_NAME, args, result)
+
+    async def _handle_use_skill_function_call(self, func_data: dict) -> None:
+        """Dispatch the built-in ``use_skill`` tool on the Realtime path.
+
+        Progressive-disclosure ACTIVATION: layers the chosen skill's
+        ``instructions`` into the system prompt and unlocks its ``tools``
+        ADDITIVELY (via :func:`apply_skill_activation` — distinct from the
+        one-way handoff replace), then pushes the merged state to the live
+        session with a mid-session ``session.update`` (new ``instructions`` +
+        ``tools``). The skill stays active for the rest of the call. ALWAYS
+        sends a function result — an unknown / already-active skill or malformed
+        args produce an envelope, never silence (a missing result would wedge
+        the model). Parity with the Pipeline ``_perform_skill_activation``.
+        """
+        raw_args = func_data.get("arguments", "{}")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (json.JSONDecodeError, ValueError):
+            args = None
+        if not isinstance(args, dict):
+            result = json.dumps(
+                {"error": "Malformed use_skill arguments", "status": "rejected"}
+            )
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(USE_SKILL_TOOL_NAME, {}, result)
+            return
+
+        name = args.get("skill_name", "")
+        skills = getattr(self.agent, "skills", None) or ()
+        skill = next((s for s in skills if s.name == name), None)
+        if skill is None:
+            result = json.dumps(
+                {
+                    "error": f"Unknown skill {name!r}",
+                    "available": sorted(s.name for s in skills),
+                }
+            )
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(USE_SKILL_TOOL_NAME, args, result)
+            return
+        if name in self._active_skills:
+            # Idempotent: re-activating a live skill must not double-layer the
+            # instructions / tools. Acknowledge without mutating state.
+            result = json.dumps({"status": "already_active", "skill": name})
+            await self._adapter.send_function_result(func_data["call_id"], result)
+            await self._emit_tool_event(USE_SKILL_TOOL_NAME, args, result)
+            return
+
+        # Layer the skill in additively and re-resolve the prompt.
+        self.agent = apply_skill_activation(self.agent, skill)
+        self._active_skills.add(name)
+        self.resolved_prompt = resolve_agent_prompt(self.agent)
+
+        # Rebuild the wire tool list: current tools (now incl. the skill's
+        # tools) + built-ins (+ handoff_to when configured) + use_skill again
+        # so further skills can still be activated.
+        new_tools: list[dict] = [
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("parameters", {}),
+                **({"strict": True} if t.get("strict") is True else {}),
+            }
+            for t in (self.agent.tools or [])
+        ]
+        new_tools += [TRANSFER_CALL_TOOL, END_CALL_TOOL]
+        if getattr(self.agent, "handoffs", None):
+            new_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
+        if getattr(self.agent, "skills", None):
+            new_tools.append(build_use_skill_tool(self.agent.skills))
+
+        new_instructions = apply_tool_call_preambles(
+            self.resolved_prompt,
+            getattr(self.agent, "tool_call_preambles", False),
+        )
+        # session.update FIRST, then the function result — the result triggers
+        # the next ``response.create``, which must already run with the skill's
+        # instructions + tools in scope.
+        await self._adapter.update_session(
+            instructions=new_instructions, tools=new_tools
+        )
+
+        history_text = skill_activation_history_text(name)
+        self.conversation_history.append(
+            {"role": "system", "text": history_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "system", "text": history_text})
+        if self.on_transcript:
+            await self.on_transcript(
+                {
+                    "role": "system",
+                    "text": history_text,
+                    "call_id": self.call_id,
+                }
+            )
+
+        result = json.dumps({"status": "skill_activated", "skill": name})
+        await self._adapter.send_function_result(func_data["call_id"], result)
+        await self._emit_tool_event(USE_SKILL_TOOL_NAME, args, result)
 
     async def start(self) -> None:
         """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
@@ -1745,6 +1884,15 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         # ``_forward_events`` (see ``_handle_handoff_function_call``).
         if getattr(self.agent, "handoffs", None):
             openai_tools.append(build_handoff_tool(self.agent.handoffs.keys()))
+        # Progressive-disclosure SKILLS: advertise the built-in ``use_skill``
+        # tool (discovery layer — only skill names + descriptions) when the
+        # agent declares skills. Validated against reserved / collision names
+        # once here, before any activation has merged skill tools into
+        # ``agent.tools``. Dispatched in ``_forward_events`` (see
+        # ``_handle_use_skill_function_call``).
+        if getattr(self.agent, "skills", None):
+            assert_no_skill_conflicts(self.agent.skills, self.agent.tools)
+            openai_tools.append(build_use_skill_tool(self.agent.skills))
 
         # Forward optional engine-level Realtime knobs (carried on the Agent
         # by ``Patter._unpack_engine``) only when set, so the adapter's own
@@ -2121,9 +2269,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             # ``role:user`` turn, so the model REPLIED to
                             # "I can't respond to that" as if the caller had
                             # said it.
-                            send_re = getattr(
-                                self._adapter, "send_reassurance", None
-                            )
+                            send_re = getattr(self._adapter, "send_reassurance", None)
                             if callable(send_re):
                                 await send_re(replacement)
                             else:
@@ -2430,6 +2576,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         self.agent, "handoffs", None
                     ):
                         await self._handle_handoff_function_call(func_data)
+
+                    elif func_data["name"] == USE_SKILL_TOOL_NAME and getattr(
+                        self.agent, "skills", None
+                    ):
+                        await self._handle_use_skill_function_call(func_data)
 
                     else:
                         tool_def = next(
@@ -2962,12 +3113,8 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
             (t for t in (self.agent.tools or []) if t.get("name") == name),
             None,
         )
-        if not tool_def or not (
-            tool_def.get("webhook_url") or tool_def.get("handler")
-        ):
-            logger.warning(
-                "ConvAI client_tool_call for unregistered tool '%s'", name
-            )
+        if not tool_def or not (tool_def.get("webhook_url") or tool_def.get("handler")):
+            logger.warning("ConvAI client_tool_call for unregistered tool '%s'", name)
             await _respond(
                 json.dumps(
                     {"error": f"Tool '{name}' is not registered", "fallback": True}
@@ -3290,9 +3437,7 @@ class PipelineStreamHandler(StreamHandler):
         # ``bargeInMode`` / ``outputPaused``.
         _mode = getattr(agent, "barge_in_mode", "cancel") or "cancel"
         if _mode not in ("cancel", "pause_resume"):
-            logger.warning(
-                "Unknown barge_in_mode %r — falling back to 'cancel'", _mode
-            )
+            logger.warning("Unknown barge_in_mode %r — falling back to 'cancel'", _mode)
             _mode = "cancel"
         self._barge_in_mode: str = _mode
         # True while output is paused: ``_synthesize_sentence`` queues
@@ -3372,6 +3517,11 @@ class PipelineStreamHandler(StreamHandler):
         self._llm_loop = None
         self._msg_accepts_call = False
         self._remote_handler = None
+        # Opt-in token-aware history compaction (pipeline mode). Constructed in
+        # ``start`` when ``agent.compaction`` is set; ``None`` keeps the plain
+        # FIFO history. Background task that runs a summarization pass.
+        self._compactor = None
+        self._compaction_task: asyncio.Task | None = None
         # Throttle state for back-to-back STT finals — see ``_commit_transcript``.
         self._last_commit_text: str = ""
         self._last_commit_at: float = 0.0
@@ -3525,25 +3675,44 @@ class PipelineStreamHandler(StreamHandler):
                     "TTS set_telephony_carrier failed; using construction-time format",
                     exc_info=True,
                 )
-        # Re-evaluate after set_telephony_carrier so the _encode_pipeline_audio
-        # fast path is enabled for the current carrier when the adapter
-        # auto-flipped (or the user constructed with a native format).
-        # Parity with TS ``StreamHandler.ttsOutputFormatNativeForCarrier``.
-        self._tts_output_format_native_for_carrier = (
-            self._is_tts_output_format_native_for_carrier()
+        # Resolve the TTS adapter's DECLARED output format and configure the
+        # outbound audio path (mu-law passthrough vs rate-aware resample) from
+        # it — no fixed 16 kHz source assumption. The carrier wire is mu-law
+        # 8 kHz on every supported carrier. Parity with TS
+        # ``StreamHandler.configureOutboundAudio``.
+        from getpatter.audio.format import (
+            CARRIER_WIRE_FORMAT,
+            formats_match,
+            resolve_tts_source_format,
         )
+
+        carrier = "twilio" if self._for_twilio else "telnyx"
+        wire = CARRIER_WIRE_FORMAT.get(carrier, CARRIER_WIRE_FORMAT["twilio"])
+        source = resolve_tts_source_format(self._tts)
+        self._tts_output_format_native_for_carrier = formats_match(source, wire)
+        # Hand the declared source format to the sender so it resamples from the
+        # REAL rate (or passes mu-law straight through). Senders that never
+        # transcode (``input_is_mulaw_8k=True`` at construction) no-op this.
+        if hasattr(self.audio_sender, "set_source_format"):
+            try:
+                self.audio_sender.set_source_format(source.encoding, source.sample_rate)
+            except Exception:  # pragma: no cover - defensive; sender bug
+                logger.debug("audio_sender.set_source_format failed", exc_info=True)
         if self._tts_output_format_native_for_carrier:
             logger.debug(
-                "TTS outputFormat matches %s wire codec — bypassing client-side transcode",
-                "twilio" if self._for_twilio else "telnyx",
+                "TTS output (%s %d Hz) matches %s wire codec — bypassing "
+                "client-side transcode",
+                source.encoding,
+                source.sample_rate,
+                carrier,
             )
-            # Flip the audio sender into pass-through mode so it stops
-            # transcoding (16 kHz PCM → mulaw) bytes that are already in
-            # the carrier's wire format. Mirrors the ConvAI handler's
-            # ``_native_mulaw_8k`` fast-path and TS ``encodePipelineAudio``
-            # bypass. Parity with TS ``StreamHandler.ttsOutputFormatNativeForCarrier``.
-            if hasattr(self.audio_sender, "_input_is_mulaw_8k"):
-                self.audio_sender._input_is_mulaw_8k = True  # type: ignore[attr-defined]
+        else:
+            logger.debug(
+                "Outbound audio: resample %d Hz -> %d Hz then mu-law encode for %s",
+                source.sample_rate,
+                wire.sample_rate,
+                carrier,
+            )
 
         if self._stt is None:
             logger.warning("Pipeline mode: no STT configured")
@@ -3736,9 +3905,7 @@ class PipelineStreamHandler(StreamHandler):
             and self._tts is not None
         ):
             await self._begin_speaking(is_first_message=True)
-            self._first_message_task = asyncio.create_task(
-                self._play_first_message()
-            )
+            self._first_message_task = asyncio.create_task(self._play_first_message())
 
             def _log_first_message_result(task: asyncio.Task) -> None:
                 if task.cancelled():
@@ -3800,6 +3967,10 @@ class PipelineStreamHandler(StreamHandler):
             # Merge the built-in consult tool (if configured) before the
             # handoff built-ins so the pipeline LLM sees it too.
             self.agent = _inject_consult_tool(self.agent)
+            # Validate skill / reserved-name collisions once, against the
+            # original tool list (before any activation merges skill tools in).
+            if getattr(self.agent, "skills", None):
+                assert_no_skill_conflicts(self.agent.skills, self.agent.tools)
             combined_tools = self._build_combined_pipeline_tools()
             tool_executor = ToolExecutor() if combined_tools else None
             llm_model = self.agent.model
@@ -3818,7 +3989,25 @@ class PipelineStreamHandler(StreamHandler):
                     self.agent, "disable_phone_preamble", False
                 ),
                 on_tool_call=self._record_tool_call,
+                context_token_budget=getattr(self.agent, "context_token_budget", None),
             )
+
+            # Opt-in token-aware compaction: summarize old turns in the
+            # background once the prompt grows past the configured budget,
+            # keeping the last N turns verbatim. Default OFF (compaction=None).
+            compaction_cfg = getattr(self.agent, "compaction", None)
+            if compaction_cfg is not None:
+                from getpatter.services.compaction import ContextCompactor
+
+                _loop = self._llm_loop
+                _target = compaction_cfg.target_tokens
+
+                async def _summarize(prior: str, old: list[dict]) -> str:
+                    return await _loop.summarize(prior, old, _target)
+
+                self._compactor = ContextCompactor(
+                    config=compaction_cfg, summarizer=_summarize
+                )
 
         # Create remote message handler once if on_message is a remote URL
         from getpatter.services.remote_message import (
@@ -3865,9 +4054,11 @@ class PipelineStreamHandler(StreamHandler):
     def _build_combined_pipeline_tools(self) -> list[dict]:
         """Build the full pipeline tool list for the CURRENT ``self.agent``:
         user tools + built-in ``transfer_call`` / ``end_call`` + the
-        ``handoff_to`` tool when handoff targets are configured. Re-invoked
-        after a handoff so the LLM loop advertises the target agent's tools
-        (including its onward handoff map)."""
+        ``handoff_to`` tool when handoff targets are configured + the
+        ``use_skill`` tool when skills are configured. Re-invoked after a
+        handoff or a skill activation so the LLM loop advertises the
+        current agent's tools (including its onward handoff map and any
+        skill tools merged in on activation)."""
         combined = _augment_with_builtin_handoff_tools(
             self.agent.tools,
             transfer_fn=self._transfer_fn,
@@ -3880,6 +4071,13 @@ class PipelineStreamHandler(StreamHandler):
                     "handler": self._handoff_tool_handler,
                 }
             )
+        if getattr(self.agent, "skills", None):
+            combined.append(
+                {
+                    **build_use_skill_tool(self.agent.skills),
+                    "handler": self._use_skill_tool_handler,
+                }
+            )
         return combined
 
     async def _handoff_tool_handler(self, arguments: dict, call_context: dict) -> str:
@@ -3888,6 +4086,61 @@ class PipelineStreamHandler(StreamHandler):
         return await self._perform_handoff(
             args.get("name", ""), args.get("reason") or ""
         )
+
+    async def _use_skill_tool_handler(self, arguments: dict, call_context: dict) -> str:
+        """Handler closure for the built-in ``use_skill`` tool (pipeline)."""
+        args = arguments or {}
+        return await self._perform_skill_activation(args.get("skill_name", ""))
+
+    async def _perform_skill_activation(self, name: str) -> str:
+        """Activate the named SKILL on the live pipeline call (progressive
+        disclosure ACTIVATION).
+
+        Layers the skill's ``instructions`` into the system prompt and unlocks
+        its ``tools`` ADDITIVELY (via :func:`apply_skill_activation`), then
+        swaps the LLM loop's system prompt + rebuilt tool list so the NEXT turn
+        runs with the skill in scope. The skill stays active for the rest of
+        the call. ALWAYS returns a tool-result string — an unknown /
+        already-active skill produces an envelope, never silence. Parity with
+        the Realtime ``_handle_use_skill_function_call``.
+        """
+        skills = getattr(self.agent, "skills", None) or ()
+        skill = next((s for s in skills if s.name == name), None)
+        if skill is None:
+            return json.dumps(
+                {
+                    "error": f"Unknown skill {name!r}",
+                    "available": sorted(s.name for s in skills),
+                }
+            )
+        if name in self._active_skills:
+            return json.dumps({"status": "already_active", "skill": name})
+
+        self.agent = apply_skill_activation(self.agent, skill)
+        self._active_skills.add(name)
+        self.resolved_prompt = resolve_agent_prompt(self.agent)
+        if self._llm_loop is not None:
+            self._llm_loop.update_agent(
+                system_prompt=self.resolved_prompt,
+                tools=self._build_combined_pipeline_tools(),
+                disable_phone_preamble=getattr(
+                    self.agent, "disable_phone_preamble", False
+                ),
+            )
+        history_text = skill_activation_history_text(name)
+        self.conversation_history.append(
+            {"role": "system", "text": history_text, "timestamp": time.time()}
+        )
+        self.transcript_entries.append({"role": "system", "text": history_text})
+        if self.on_transcript is not None:
+            await self.on_transcript(
+                {
+                    "role": "system",
+                    "text": history_text,
+                    "call_id": self.call_id,
+                }
+            )
+        return json.dumps({"status": "skill_activated", "skill": name})
 
     async def _perform_handoff(self, name: str, reason: str) -> str:
         """Swap the live pipeline call to the named handoff target agent.
@@ -3922,6 +4175,9 @@ class PipelineStreamHandler(StreamHandler):
             )
         self.agent = _inject_consult_tool(_apply_handoff_target(self.agent, target))
         self.resolved_prompt = resolve_agent_prompt(self.agent)
+        # A handoff REPLACES the prompt, so skills activated on the prior agent
+        # are no longer layered in — clear the set for the target's skills.
+        self._active_skills = set()
         if self._llm_loop is not None:
             self._llm_loop.update_agent(
                 system_prompt=self.resolved_prompt,
@@ -3945,6 +4201,48 @@ class PipelineStreamHandler(StreamHandler):
             )
         return json.dumps({"status": "handed_off", "to": name})
 
+    def _maybe_start_compaction(self) -> None:
+        """Kick off a background history-compaction pass when over budget.
+
+        No-op when compaction is disabled (``self._compactor is None``) or a
+        pass is already running. The summarization is async and runs OFF the
+        live turn path so it never adds latency — the new summary is applied to
+        the next turn once it completes (see :meth:`_run_compaction`).
+
+        ``getattr`` defaults keep test doubles / partial inits (which never set
+        these fields) working — a no-op rather than an ``AttributeError``.
+        """
+        compactor = getattr(self, "_compactor", None)
+        if compactor is None or getattr(self, "_llm_loop", None) is None:
+            return
+        existing = getattr(self, "_compaction_task", None)
+        if existing is not None and not existing.done():
+            return
+        if not compactor.should_compact(self.conversation_history):
+            return
+        self._compaction_task = asyncio.create_task(self._run_compaction())
+        self._compaction_task.add_done_callback(self._on_compaction_done)
+
+    async def _run_compaction(self) -> None:
+        """Run one compaction pass and apply the resulting summary to the loop."""
+        try:
+            new_summary = await self._compactor.maybe_compact(self.conversation_history)
+            if new_summary is not None and self._llm_loop is not None:
+                self._llm_loop.set_context_summary(new_summary)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("context compaction failed")
+
+    @staticmethod
+    def _on_compaction_done(task: asyncio.Task) -> None:
+        """Surface a crashed background-compaction task instead of swallowing it."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("context compaction task error: %s", exc)
+
     async def _emit_assistant_transcript(self, text: str) -> None:
         """Push an assistant turn into history+transcript_entries and fire
         ``on_transcript`` so host applications observe pipeline-mode
@@ -3965,6 +4263,10 @@ class PipelineStreamHandler(StreamHandler):
                     "history": list(self.conversation_history),
                 }
             )
+        # The user+assistant turn is now in history — re-evaluate whether the
+        # working context has outgrown the compaction budget and, if so,
+        # summarize the oldest turns in the background (no turn latency).
+        self._maybe_start_compaction()
 
     async def _record_tool_call(self, name: str, arguments: dict, result: Any) -> None:
         """Surface a tool invocation into the transcript timeline. Emits
@@ -4653,9 +4955,7 @@ class PipelineStreamHandler(StreamHandler):
                 sanitize_log_value(transcript.text[:40]),
             )
             return
-        if _since_last < 2.0 and _normalised == getattr(
-            self, "_last_commit_text", ""
-        ):
+        if _since_last < 2.0 and _normalised == getattr(self, "_last_commit_text", ""):
             logger.debug(
                 "Barge-in skipped: duplicate of just-committed transcript %r",
                 sanitize_log_value(transcript.text[:40]),
@@ -4692,9 +4992,9 @@ class PipelineStreamHandler(StreamHandler):
         # — interims and noise wait for the resume timer instead. The
         # confirming transcript then continues through the strategy/legacy
         # decision below exactly as today.
-        if getattr(self, "_output_paused", False) and not self._passes_paused_kill_filters(
-            transcript
-        ):
+        if getattr(
+            self, "_output_paused", False
+        ) and not self._passes_paused_kill_filters(transcript):
             logger.debug(
                 "Paused turn: transcript %r cannot confirm the kill "
                 "(interim/hallucination/duplicate) — awaiting resume timer",
@@ -5076,9 +5376,7 @@ class PipelineStreamHandler(StreamHandler):
             len(tail),
         )
         if self._event_bus is not None:
-            self._event_bus.emit(
-                "false_interruption", {"resumed_sentences": len(tail)}
-            )
+            self._event_bus.emit("false_interruption", {"resumed_sentences": len(tail)})
         # Re-send the unheard tail BEFORE unpausing so the in-flight
         # synthesis (which queues while paused) cannot interleave a newer
         # chunk ahead of the replayed audio.
@@ -5157,7 +5455,9 @@ class PipelineStreamHandler(StreamHandler):
                 "pause_resume sentence buffer overflow (%d) — degrading to full cancel",
                 len(buf),
             )
-            await self._do_cancel_for_barge_in("<pause_resume sentence-buffer overflow>")
+            await self._do_cancel_for_barge_in(
+                "<pause_resume sentence-buffer overflow>"
+            )
             return True  # handled; the loop observes _is_speaking=False next
         buf.append(sentence)
         return True
@@ -5193,8 +5493,8 @@ class PipelineStreamHandler(StreamHandler):
         overflow (paused → the turn was just killed; speaking → retention
         was released and the caller falls back to direct sends)."""
         entry["chunks"].append(chunk)
-        self._pause_retained_bytes = (
-            getattr(self, "_pause_retained_bytes", 0) + len(chunk)
+        self._pause_retained_bytes = getattr(self, "_pause_retained_bytes", 0) + len(
+            chunk
         )
         if self._pause_retained_bytes <= self._pause_retained_cap_bytes():
             return True
@@ -5605,9 +5905,7 @@ class PipelineStreamHandler(StreamHandler):
             sanitize_log_value(interim_text[:60]),
         )
 
-    async def _abort_speculation(
-        self, *, reason: str, count_miss: bool = True
-    ) -> None:
+    async def _abort_speculation(self, *, reason: str, count_miss: bool = True) -> None:
         """Discard the current speculation (if any): signal cancel, await the
         task's unwind (bounded), and count a miss unless this is teardown.
         The speculative task never touched history / carrier / per-turn
@@ -5653,9 +5951,7 @@ class PipelineStreamHandler(StreamHandler):
         spec.release_event.set()
         if self._speculation is spec:
             self._speculation = None
-        if self.metrics is not None and hasattr(
-            self.metrics, "record_preemptive_miss"
-        ):
+        if self.metrics is not None and hasattr(self.metrics, "record_preemptive_miss"):
             self.metrics.record_preemptive_miss()
         logger.debug("Preemptive: speculation failed (%s)", reason)
 
@@ -5933,9 +6229,7 @@ class PipelineStreamHandler(StreamHandler):
         if blocked:
             sentence = get_guardrail_replacement(self.agent, guard_name)
         if hook_executor.has_after_llm_sentence():
-            transformed = await hook_executor.run_after_llm_sentence(
-                sentence, hook_ctx
-            )
+            transformed = await hook_executor.run_after_llm_sentence(sentence, hook_ctx)
             if transformed is None:
                 return True  # hook dropped this sentence
             sentence = transformed
@@ -6058,9 +6352,7 @@ class PipelineStreamHandler(StreamHandler):
                     while not next_token.done() and not spec.released:
                         if spec.cancel_event.is_set():
                             break
-                        release_wait = asyncio.ensure_future(
-                            spec.release_event.wait()
-                        )
+                        release_wait = asyncio.ensure_future(spec.release_event.wait())
                         try:
                             await asyncio.wait(
                                 {next_token, release_wait},
@@ -6108,9 +6400,7 @@ class PipelineStreamHandler(StreamHandler):
                             await self._spec_ensure_flushed(spec)
                         # Live continuation — keep the echo-guard reference
                         # and user-perceived TTFT current.
-                        self._current_agent_spoken_text = "".join(
-                            spec.response_parts
-                        )
+                        self._current_agent_spoken_text = "".join(spec.response_parts)
                         if not spec.llm_first_token_recorded:
                             spec.llm_first_token_recorded = True
                             if self.metrics is not None:
@@ -6154,9 +6444,7 @@ class PipelineStreamHandler(StreamHandler):
                             record_segment=False,
                         )
                     except Exception:  # pragma: no cover - defensive
-                        logger.exception(
-                            "llm_error_message fallback synthesis failed"
-                        )
+                        logger.exception("llm_error_message fallback synthesis failed")
 
             if not llm_error and not stopped:
                 for sentence in chunker.flush():
@@ -6473,6 +6761,24 @@ class PipelineStreamHandler(StreamHandler):
                 )
             await self._process_regular_response(response_text, self.call_id)
 
+    def _resolve_agc_config(self) -> object | None:
+        """Resolve ``agent.agc`` (``bool | AgcConfig | None``) to an
+        :class:`~getpatter.models.AgcConfig` or ``None``.
+
+        ``True`` -> defaults; an ``AgcConfig`` -> itself; anything falsy ->
+        ``None`` (stage disabled).
+        """
+        agc = getattr(self.agent, "agc", False)
+        if agc is True:
+            from getpatter.models import AgcConfig
+
+            return AgcConfig()
+        from getpatter.models import AgcConfig
+
+        if isinstance(agc, AgcConfig):
+            return agc
+        return None
+
     async def on_audio_received(self, audio_bytes: bytes) -> None:
         """Forward caller audio to STT (transcoding to PCM16 16 kHz, running VAD/hooks)."""
         # Local-recording tap — ABOVE the STT/barge-in early-returns so the
@@ -6511,8 +6817,11 @@ class PipelineStreamHandler(StreamHandler):
                 input_is_mulaw_8k=self._input_is_mulaw_8k,
                 get_aec=lambda: getattr(self, "_aec", None),
                 get_audio_filter=lambda: getattr(self.agent, "audio_filter", None),
-                get_vad=lambda: getattr(self.agent, "vad", None)
-                or getattr(self, "_auto_vad", None),
+                get_vad=lambda: (
+                    getattr(self.agent, "vad", None) or getattr(self, "_auto_vad", None)
+                ),
+                high_pass_hz=getattr(self.agent, "high_pass_hz", None),
+                agc=self._resolve_agc_config(),
             )
             self._input_chain = chain
         frame = await chain.process(audio_bytes)
@@ -6781,9 +7090,7 @@ class PipelineStreamHandler(StreamHandler):
                 # withheld from STT no transcript could ever arrive — the
                 # pending state always timed out and barge-in was
                 # structurally impossible with strategies configured.
-                _pending = (
-                    getattr(self, "_barge_in_pending_since", None) is not None
-                )
+                _pending = getattr(self, "_barge_in_pending_since", None) is not None
                 if not self._forward_stt_while_speaking and not _pending:
                     return
 
@@ -6872,9 +7179,7 @@ class PipelineStreamHandler(StreamHandler):
         if detector is None:
             return
         try:
-            probability = float(
-                await detector.predict(self._semantic_window_bytes())
-            )
+            probability = float(await detector.predict(self._semantic_window_bytes()))
         except Exception as exc:
             self._semantic_detector_failed = True
             logger.warning(
@@ -7722,9 +8027,7 @@ class PipelineStreamHandler(StreamHandler):
                 # pre-synthesised buffer) still uses
                 # _send_paced_first_message_bytes because that buffer can
                 # be several seconds long and needs pacing.
-                async for audio_chunk in self._tts.synthesize(
-                    self.agent.first_message
-                ):
+                async for audio_chunk in self._tts.synthesize(self.agent.first_message):
                     if not self._is_speaking:
                         break
                     if not first_chunk_sent:

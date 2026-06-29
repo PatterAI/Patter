@@ -2,6 +2,95 @@
 
 ### Added
 
+- **Inbound audio front-end: opt-in high-pass / DC-block and speech-selective
+  AGC, plus inbound sample-rate validation.** The pipeline inbound chain
+  (caller → STT) gained the two canonical audio-processing stages it was
+  missing, both provider-agnostic, opt-in, and fail-open:
+  - `Agent.high_pass_hz` (Py) / `highPassHz` (TS) — a 2nd-order Butterworth
+    high-pass / DC-block (typical 80–120 Hz) runs as the FIRST stage, before
+    AEC, so DC offset, mains hum (50/60 Hz) and handling rumble never reach the
+    echo canceller, VAD or STT. `None`/undefined (default) leaves audio
+    byte-identical to before.
+  - `Agent.agc` (`bool | AgcConfig`) — speech-selective automatic gain control
+    runs after noise suppression and before VAD/STT, normalising the caller's
+    level toward a target RMS to cut WER on quiet / variable-distance talkers.
+    Silence gaps are not amplified (the gain releases toward unity) and a
+    per-frame peak limiter prevents clipping. `false`/undefined (default) keeps
+    today's behaviour; `true` uses defaults; pass `AgcConfig` to tune.
+  - `InputProcessingChain` now takes `input_sample_rate` / `inputSampleRate`
+    (default 16000): a non-mu-law PCM16 carrier at a non-16 kHz rate is
+    resampled to 16 kHz instead of being forwarded blind (a PCM16 @ 8 kHz
+    stream previously reached STT pitched up an octave).
+  The final inbound order is `HPF(opt) → resample → AEC(opt) → audio_filter/NS(opt)
+  → AGC(opt) → VAD → STT`. New pure-DSP modules `audio/high_pass.py` +
+  `audio/agc.py` (Py) and `audio/high-pass.ts` + `audio/agc.ts` (TS), wired in
+  `services/input_chain.py` / `services/input-chain.ts`, `stream_handler.py` /
+  `stream-handler.ts`, `models.py` / `types.ts`, `client.py` (TS via spread).
+
+- **TTS providers declare their output format; carrier-native μ-law passthrough
+  generalised.** Pipeline TTS adapters can now expose `sourceAudioFormat()`
+  (TS) / `source_audio_format()` (Py) returning `{ encoding, sampleRate }`, and
+  Cartesia gained an `encoding` option (`pcm_s16le` default, `pcm_mulaw` for
+  carrier-native output). A new single source of truth (`audio/format.ts` /
+  `getpatter/audio/format.py`) maps each carrier to its wire format (μ-law
+  8 kHz on Twilio/Telnyx/Plivo) so the pipeline picks passthrough when a
+  provider already emits the wire codec — zero resample, zero re-encode. Opt-in
+  and backward compatible: adapters that declare nothing keep the legacy
+  PCM16 @ 16 kHz path. `libraries/typescript/src/audio/format.ts` (new),
+  `providers/cartesia-tts.ts`, `providers/openai-tts.ts`, `tts/cartesia.ts`.
+  Python mirror: `getpatter/audio/format.py` (new), `providers/cartesia_tts.py`,
+  `providers/openai_tts.py`, `tts/cartesia.py`.
+- **Agent SKILLS — on-demand, progressive-disclosure capabilities the primary
+  agent activates inline (no sub-agent spawn).** New `Skill` type and
+  `agent(skills=[...])` (Python) / `phone.agent({ skills: [...] })` (TS). A
+  `Skill` carries `name`, `description`, on-demand `instructions`, and optional
+  scoped `tools`. At call start Patter injects a built-in `use_skill` tool whose
+  `skill_name` is an *enum* of the skill names — only each skill's name +
+  description (~30-50 tokens) is loaded eagerly (the Anthropic Agent Skills
+  *discovery* layer), NOT the full instructions. When the model calls
+  `use_skill(skill_name=…)` Patter layers that skill's `instructions` into the
+  system prompt and unlocks its `tools` ADDITIVELY — in the SAME agent loop (one
+  iteration, no extra round-trip, so no added latency vs. a real sub-agent). The
+  skill stays active for the rest of the call; re-activation is idempotent, and
+  a `handoff_to` resets the active set to the target agent's skills. Skill tool
+  names are guarded against the reserved built-ins (`transfer_call`, `end_call`,
+  `handoff_to`, `use_skill`), top-level agent tools, and other skills at
+  `agent()` build time. Works in both Realtime (`session.update`) and Pipeline
+  (`update_agent`) modes. Opt-in; default empty — zero behaviour change for
+  existing agents. `Skill` is exported from the package root.
+  `libraries/python/getpatter/models.py` (`Skill`, `Agent.skills`),
+  `tools/skills.py` (new), `stream_handler.py`, `client.py`, `__init__.py`.
+  TypeScript mirror: `libraries/typescript/src/types.ts` (`Skill`,
+  `AgentOptions.skills`), `skills.ts` (new), `stream-handler.ts`, `server.ts`,
+  `client.ts`, `index.ts`.
+
+- **Pipeline mode: prompt token-counting + opt-in token-aware history
+  compaction.** The built-in LLM loop now estimates the assembled prompt size
+  (system + rolling summary + history + user, in the canonical `chars / 4`
+  token unit) before every dispatch and records it as a new `context_tokens`
+  field on `CallMetrics` (peak across the call) — so dashboards can chart
+  context growth. A new optional `contextTokenBudget` / `context_token_budget`
+  on the agent makes the loop log a one-shot WARNING when a turn's estimated
+  context crosses ~75% of the budget, an early signal before a model's hard
+  context limit triggers a silent `context_length_exceeded`. Built on top of
+  that, a new optional `compaction` config (`CompactionConfig` with
+  `triggerTokens` / `targetTokens` / `keepLastTurns`) enables a hybrid rolling
+  summarizer: once the summarizable portion of the history crosses
+  `triggerTokens`, the oldest turns are folded into a summary **asynchronously
+  in the background** (using the agent's own LLM, so no turn latency is added)
+  while the most recent `keepLastTurns` turns stay verbatim; the summarized
+  turns are pruned from the working history and the summary is prepended as a
+  system message on subsequent prompts, keeping long calls bounded without
+  losing facts stated early. The previously hard-coded 200-entry history ring
+  is now tunable via `maxHistory` / `max_history`. All four knobs are opt-in
+  with defaults that preserve today's behaviour exactly (no compaction, no
+  warning, 200-entry ring). Pipeline mode only.
+  TS: `libraries/typescript/src/compaction.ts` (new), `types.ts`, `llm-loop.ts`,
+  `metrics.ts`, `stream-handler.ts`, `handler-utils.ts`,
+  `observability/event-bus.ts`, `index.ts`. Python mirror:
+  `libraries/python/getpatter/services/compaction.py` (new), `models.py`,
+  `services/llm_loop.py`, `services/metrics.py`, `stream_handler.py`,
+  `client.py`, `telephony/twilio.py`, `telephony/plivo.py`, `__init__.py`.
 - **OpenAI Realtime: `transcriptionLanguage` option on both engine markers.**
   `OpenAIRealtime` / `OpenAIRealtime2` (TS) and `engines.openai_realtime` /
   `engines.openai_realtime_2` (Python) now accept an optional ISO-639-1
@@ -18,7 +107,41 @@
   `providers/openai_realtime.py`, `providers/openai_realtime_2.py`, `client.py`,
   `models.py`, `stream_handler.py`.
 
+### Changed
+
+- **AEC scope documented: browser/native only, no-op by design on PSTN.** The
+  NLMS echo canceller (`audio/aec.py` / `audio/aec.ts`) docstrings now state
+  explicitly that on a phone call the carrier round-trip exceeds the 32 ms
+  filter window, so `process_near_end` / `processNearEnd` passes through
+  unchanged — PSTN line echo is handled by the carrier (ITU-T G.168) and the
+  caller device. The existing runtime warning when `echo_cancellation` is
+  enabled on a PSTN carrier is unchanged. No behaviour change.
+
 ### Fixed
+
+- **Chipmunk / aliasing on pipeline TTS at non-16 kHz rates.** The outbound
+  sender assumed every TTS source was PCM16 @ 16 kHz and ran a hardcoded
+  16 kHz → 8 kHz decimator before μ-law encoding. A provider configured for any
+  other rate (e.g. `CartesiaTTS({ sampleRate: 8000 })` on Twilio) was decimated
+  *again* and played back at ~2× pitch ("chipmunk"); the 16 kHz default left an
+  aliasing hiss from the gentle 5-tap decimator. The sender now reads the
+  provider's **declared** output rate and resamples from the real rate to the
+  carrier's 8 kHz wire — correct pitch and duration for 8 k / 16 k / 22.05 k /
+  24 k / 44.1 k sources, with an anti-alias FIR low-pass on the downsample
+  (< ~1 ms added latency). `CartesiaTTS.forTwilio()` / `forTelnyx()` now emit
+  μ-law 8 kHz natively (bit-clean passthrough) instead of the broken fixed-rate
+  workaround. `libraries/typescript/src/audio/transcoding.ts` (new
+  `RateAwareResampler`), `stream-handler.ts` (`configureOutboundAudio`).
+  Python mirror: `getpatter/stream_handler.py` (`PipelineStreamHandler.start`),
+  `telephony/{twilio,telnyx,plivo}.py` (new `AudioSender.set_source_format`).
+- **Pipeline LLM loop (TypeScript): malformed tool-argument JSON no longer
+  fires the tool with empty arguments.** When the model streamed truncated /
+  invalid JSON for a tool call, the TS loop parsed it as `{}` and executed the
+  handler anyway — a side-effecting tool (transfer, SMS, booking) could fire on
+  an empty payload. It now matches the Python loop: the malformed call is logged
+  and answered with a `role=tool` error envelope (preserving the
+  `tool_call_id`), the handler is skipped, and the model retries with
+  well-formed arguments. `libraries/typescript/src/llm-loop.ts`.
 
 - **OpenAI Realtime 2: raspy / crackly agent voice on telephony.** The GA
   adapter decimated `gpt-realtime-2`'s 24 kHz output down to mulaw 8 kHz through

@@ -203,6 +203,28 @@ class TelnyxAudioSender(AudioSender):
             self._pcm16_to_mulaw = None
             self._resampler = None
 
+    def set_source_format(self, encoding: str, sample_rate: int) -> None:
+        """Rebuild the transcode chain for the pipeline TTS's DECLARED format.
+
+        ``mulaw`` @ 8 kHz → carrier wire codec → passthrough. Any other
+        (PCM) rate → resample from that REAL rate to 8 kHz then mu-law encode.
+        Replaces the previous hardcoded 16 kHz -> 8 kHz assumption that
+        chipmunked an 8 kHz source. Parity with TS ``configureOutboundAudio``.
+        """
+        if encoding in ("mulaw", "ulaw_8000", "alaw"):
+            self._input_is_mulaw_8k = True
+            self._resampler = None
+            self._pcm16_to_mulaw = None
+            return
+        from getpatter.audio.transcoding import (
+            StatefulResampler,
+            pcm16_to_mulaw,
+        )
+
+        self._input_is_mulaw_8k = False
+        self._pcm16_to_mulaw = pcm16_to_mulaw
+        self._resampler = StatefulResampler(src_rate=int(sample_rate), dst_rate=8000)
+
     async def send_audio(self, audio: bytes) -> None:
         """Send a PCM (or mulaw) audio chunk to the Telnyx media stream."""
         if self._input_is_mulaw_8k:

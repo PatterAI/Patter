@@ -603,6 +603,200 @@ export class StatefulFirLowpass {
   }
 }
 
+// ---------- RateAwareResampler: arbitrary src→dst with anti-alias ----------
+
+/** Options for constructing a {@link RateAwareResampler}. */
+export interface RateAwareResamplerOptions {
+  /** Source sample rate in Hz (the rate the TTS adapter actually emits). */
+  srcRate: number;
+  /** Destination sample rate in Hz (the carrier wire rate, e.g. 8000). */
+  dstRate: number;
+  /**
+   * Number of anti-alias FIR taps for the downsample pre-filter. Must be a
+   * positive ODD integer. Default scales with the decimation ratio (more
+   * decimation → sharper filter) and is capped to keep per-frame CPU and
+   * group-delay latency bounded (~1 ms at telephony rates).
+   */
+  antiAliasTaps?: number;
+  /**
+   * Disable the anti-alias pre-filter (downsample only). Default ``true``
+   * (filter ON). Exists so tests can measure the aliasing the filter removes.
+   */
+  antiAlias?: boolean;
+}
+
+/** Pick an odd FIR tap count scaled by the decimation ratio (clamped 31..95). */
+function defaultAntiAliasTaps(srcRate: number, dstRate: number): number {
+  const ratio = srcRate / dstRate;
+  let taps = Math.round(ratio * 16);
+  if (taps < 31) taps = 31;
+  if (taps > 95) taps = 95;
+  if (taps % 2 === 0) taps += 1; // force odd for linear phase
+  return taps;
+}
+
+/**
+ * Rate-aware, anti-aliased PCM16 resampler for ANY src→dst pair.
+ *
+ * This replaces the fixed-ratio helpers in the outbound telephony sender. The
+ * sender no longer assumes the TTS source is 16 kHz — it builds one of these
+ * from the provider's DECLARED rate (see {@link AudioFormat}) so 8 k / 16 k /
+ * 22.05 k / 24 k / 44.1 k all transcode to the carrier's 8 kHz wire with
+ * correct pitch and duration.
+ *
+ * Pipeline:
+ * - ``src === dst``  → identity (odd-byte aligned passthrough, zero cost).
+ * - ``src > dst`` (downsample) → linear-phase FIR low-pass at ~0.45·dst
+ *   (band-limits below the new Nyquist so the decimation has nothing to
+ *   alias) followed by fractional-phase linear interpolation.
+ * - ``src < dst`` (upsample) → fractional-phase linear interpolation.
+ *
+ * State (FIR history + interpolation phase + odd-byte carry) is carried across
+ * ``process()`` calls so chunked streaming is continuous (no per-chunk
+ * transient). Interface mirrors {@link StatefulResampler}: ``process`` /
+ * ``flush`` / ``reset``, all PCM16-LE mono.
+ */
+export class RateAwareResampler {
+  private readonly srcRate: number;
+  private readonly dstRate: number;
+  private readonly step: number; // src/dst fractional advance per output sample
+  private readonly lowpass: StatefulFirLowpass | null;
+  private readonly carry = new PcmCarry();
+
+  // Fractional-phase interpolation state (shared up/down path).
+  private last = 0;
+  private hasHistory = false;
+  private phase = 0;
+
+  /** Group-delay latency the anti-alias pre-filter adds, in milliseconds. */
+  readonly antiAliasLatencyMs: number;
+
+  constructor(opts: RateAwareResamplerOptions) {
+    this.srcRate = opts.srcRate;
+    this.dstRate = opts.dstRate;
+    if (!(this.srcRate > 0) || !(this.dstRate > 0)) {
+      throw new Error(
+        `RateAwareResampler: src/dst rates must be positive, got ${this.srcRate}->${this.dstRate}`,
+      );
+    }
+    this.step = this.srcRate / this.dstRate;
+
+    const downsample = this.dstRate < this.srcRate;
+    const wantFilter = opts.antiAlias !== false && downsample;
+    if (wantFilter) {
+      const numTaps = opts.antiAliasTaps ?? defaultAntiAliasTaps(this.srcRate, this.dstRate);
+      // Cutoff a touch below the destination Nyquist to leave a transition band.
+      const cutoffHz = 0.45 * this.dstRate;
+      this.lowpass = new StatefulFirLowpass({
+        numTaps,
+        cutoffHz,
+        sampleRateHz: this.srcRate,
+      });
+      this.antiAliasLatencyMs = ((numTaps - 1) / 2 / this.srcRate) * 1000;
+    } else {
+      this.lowpass = null;
+      this.antiAliasLatencyMs = 0;
+    }
+  }
+
+  /** Process a PCM16-LE chunk; returns resampled PCM16-LE at ``dstRate``. */
+  process(pcm: Buffer): Buffer {
+    const aligned = this.carry.push(pcm);
+    if (aligned.length === 0) return Buffer.alloc(0);
+
+    // Identity fast path — same rate in and out.
+    if (this.srcRate === this.dstRate) return aligned;
+
+    const filtered = this.lowpass ? this.lowpass.process(aligned) : aligned;
+    return this._interpolate(filtered);
+  }
+
+  /**
+   * Flush any deferred output. The interpolator may hold a final sample whose
+   * neighbour never arrived; emit it edge-replicated so duration is preserved
+   * to within one sample. Resets all state.
+   */
+  flush(): Buffer {
+    const carryTail = this.carry.flush();
+    if (carryTail.length > 0) {
+      getLogger().warn(
+        '[patter] RateAwareResampler.flush: trailing odd byte discarded — upstream produced odd-length PCM stream',
+      );
+    }
+    // Drain the interpolator: while the next output position still lands on or
+    // before the last buffered input sample, emit it (edge-replicating the
+    // missing lookahead). Bounded by construction (phase advances by step>0).
+    if (this.srcRate === this.dstRate || !this.hasHistory) {
+      this.reset();
+      return Buffer.alloc(0);
+    }
+    const out: number[] = [];
+    // ``phase`` is measured from the start of the NEXT (empty) chunk; negative
+    // means an output still straddles the boundary into history.
+    let guard = 0;
+    while (this.phase < 0 && guard < 8) {
+      out.push(this.last);
+      this.phase += this.step;
+      guard += 1;
+    }
+    this.reset();
+    if (out.length === 0) return Buffer.alloc(0);
+    const buf = Buffer.alloc(out.length * 2);
+    for (let i = 0; i < out.length; i++) {
+      buf.writeInt16LE(Math.max(-32768, Math.min(32767, out[i])), i * 2);
+    }
+    return buf;
+  }
+
+  /** Reset all carried state (call at call boundaries). */
+  reset(): void {
+    this.lowpass?.reset();
+    this.carry.reset();
+    this.last = 0;
+    this.hasHistory = false;
+    this.phase = 0;
+  }
+
+  /**
+   * Fractional-phase linear interpolation from ``srcRate`` to ``dstRate``.
+   * ``phase`` is the fractional input index of the next output relative to the
+   * START of this chunk; carried negative across chunk boundaries (handled via
+   * ``last``). Handles both up- and down-sampling.
+   */
+  private _interpolate(buf: Buffer): Buffer {
+    const sampleCount = buf.length >> 1;
+    if (sampleCount === 0) return Buffer.alloc(0);
+
+    const out: number[] = [];
+    let phase = this.phase;
+    while (true) {
+      const idx = Math.floor(phase);
+      if (idx >= sampleCount) break;
+      const frac = phase - idx;
+      let s0: number;
+      let s1: number;
+      if (idx < 0) {
+        s0 = this.hasHistory ? this.last : buf.readInt16LE(0);
+        s1 = buf.readInt16LE(0);
+      } else {
+        s0 = buf.readInt16LE(idx * 2);
+        s1 = idx + 1 < sampleCount ? buf.readInt16LE((idx + 1) * 2) : s0;
+      }
+      const interp = Math.round(s0 + (s1 - s0) * frac);
+      out.push(Math.max(-32768, Math.min(32767, interp)));
+      phase += this.step;
+    }
+
+    this.last = buf.readInt16LE((sampleCount - 1) * 2);
+    this.hasHistory = true;
+    this.phase = phase - sampleCount;
+
+    const outBuf = Buffer.alloc(out.length * 2);
+    for (let j = 0; j < out.length; j++) outBuf.writeInt16LE(out[j], j * 2);
+    return outBuf;
+  }
+}
+
 /** Create a stateful 16 kHz → 8 kHz downsampling resampler. */
 export function createResampler16kTo8k(): StatefulResampler {
   return new StatefulResampler({ srcRate: 16000, dstRate: 8000 });

@@ -14,10 +14,17 @@ import { DeepgramSTT } from './providers/deepgram-stt';
 import { createTTS } from './provider-factory';
 import type { STTAdapter, TTSAdapter, STTTranscript } from './provider-factory';
 import { CallMetricsAccumulator } from './metrics';
-import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, createResampler16kTo8k } from './audio/transcoding';
+import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, RateAwareResampler } from './audio/transcoding';
+import {
+  resolveTtsSourceFormat,
+  CARRIER_WIRE_FORMAT,
+  formatsMatch,
+  type AudioFormat,
+} from './audio/format';
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager } from './handler-utils';
+import { ContextCompactor } from './compaction';
 import { DefaultToolExecutor } from './llm-loop';
 import { MCPManager } from './tools/mcp-client';
 import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, TransferCallOptions, TransferCallResult, VADProvider, CarrierKind } from './types';
@@ -25,6 +32,13 @@ import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import { validateTwilioSid, TRANSFER_CALL_TOOL, END_CALL_TOOL } from './server';
 import { buildConsultTool } from './consult';
+import {
+  USE_SKILL_TOOL_NAME,
+  applySkillActivation,
+  assertNoSkillConflicts,
+  buildUseSkillTool,
+  skillActivationHistoryText,
+} from './skills';
 import type { ProviderPricing } from './pricing';
 import { SentenceChunker } from './sentence-chunker';
 import { PipelineHookExecutor } from './pipeline-hooks';
@@ -345,6 +359,10 @@ export function applyHandoffTarget(current: AgentOptions, target: AgentOptions):
     textTransforms: target.textTransforms,
     consult: target.consult,
     handoffs: target.handoffs,
+    // Carry the target's own skills so `use_skill` after a handoff advertises
+    // the NEW agent's progressive-disclosure skills (additive feature, distinct
+    // from the one-way prompt/tool replace above).
+    skills: target.skills,
     disablePhonePreamble: target.disablePhonePreamble,
     toolCallPreambles: target.toolCallPreambles,
   };
@@ -1530,7 +1548,19 @@ export class StreamHandler {
    * ``self.agent`` swap.
    */
   private currentAgent: AgentOptions;
+  /**
+   * Names of SKILLS activated so far this call (progressive-disclosure
+   * `use_skill`). Tracked so a second `use_skill` for the same skill is an
+   * idempotent no-op and a handoff can reset the set. Parity with Python
+   * `StreamHandler._active_skills`.
+   */
+  private activeSkills = new Set<string>();
   private llmLoop: LLMLoop | null = null;
+  // Opt-in token-aware history compaction (pipeline mode). Constructed in the
+  // LLM-loop setup when `agent.compaction` is set; `null` keeps the plain FIFO
+  // history. `compactionTask` tracks the in-flight background summarization.
+  private compactor: ContextCompactor | null = null;
+  private compactionTask: Promise<void> | null = null;
   /**
    * Per-call tool executor — provides retry-with-exponential-backoff and a
    * per-tool circuit breaker for Realtime function calls. Pipeline mode
@@ -1667,7 +1697,17 @@ export class StreamHandler {
   // Per-session stateful resamplers eliminate chunk-boundary discontinuities.
   // Created lazily on first use; reset() on call end.
   private readonly inboundResampler: StatefulResampler = createResampler8kTo16k();
-  private readonly outboundResampler: StatefulResampler = createResampler16kTo8k();
+  // Outbound TTS→carrier resampler. Rate-aware and anti-aliased: rebuilt at
+  // initPipeline from the TTS provider's DECLARED output rate (see
+  // audio/format.ts) so an 8 k / 22.05 k / 24 k / 44.1 k source resamples to
+  // the 8 kHz carrier wire with correct pitch — no fixed 16 kHz assumption.
+  // Defaults to 16k→8k (the historical assumption) until initPipeline runs so
+  // unit suites that exercise encodePipelineAudio without initPipeline behave
+  // exactly as before.
+  private outboundResampler: RateAwareResampler = new RateAwareResampler({
+    srcRate: 16000,
+    dstRate: 8000,
+  });
   /**
    * Inbound audio processing chain: decode (mulaw→PCM16) → stateful 8k→16k
    * resample → AEC near-end → ``agent.audioFilter`` → VAD (slice 1 of the
@@ -1678,12 +1718,10 @@ export class StreamHandler {
    * after construction. Owns the per-call VAD error kill switch that
    * previously lived here as ``vadDisabled``.
    */
-  private readonly inputChain: InputProcessingChain = new InputProcessingChain({
-    resampler: this.inboundResampler,
-    getAec: () => this.aec,
-    getAudioFilter: () => this.deps.agent.audioFilter,
-    getVad: () => this.deps.agent.vad ?? this.autoVad,
-  });
+  // Constructed in the constructor body (after ``this.deps`` is set) because
+  // the high-pass / AGC stages are built eagerly from ``deps.agent`` config —
+  // a field initialiser would read ``this.deps`` before it is assigned.
+  private readonly inputChain: InputProcessingChain;
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -1695,6 +1733,19 @@ export class StreamHandler {
     this.caller = caller;
     this.callee = callee;
     this.currentAgent = deps.agent;
+
+    // Inbound chain: HPF (opt) -> resample -> AEC (opt) -> audioFilter/NS (opt)
+    // -> AGC (opt) -> VAD. AEC / filter / VAD are late-bound getters because
+    // ``initPipeline`` installs ``aec`` / ``autoVad`` after construction;
+    // HPF / AGC are built eagerly from the immutable ``agent`` config here.
+    this.inputChain = new InputProcessingChain({
+      resampler: this.inboundResampler,
+      getAec: () => this.aec,
+      getAudioFilter: () => this.deps.agent.audioFilter,
+      getVad: () => this.deps.agent.vad ?? this.autoVad,
+      highPassHz: this.deps.agent.highPassHz,
+      agc: this.deps.agent.agc,
+    });
 
     if (this.forwardSttWhileSpeaking) {
       getLogger().warn(
@@ -1732,7 +1783,15 @@ export class StreamHandler {
         ? holdMs
         : 1200;
 
-    this.history = createHistoryManager(200);
+    // ``maxHistory`` sizes the per-call working-memory ring (default 200 —
+    // byte-identical to the prior hard-coded value). Parity with Python
+    // ``Agent.max_history``.
+    const maxHistory = deps.agent.maxHistory;
+    this.history = createHistoryManager(
+      typeof maxHistory === 'number' && Number.isFinite(maxHistory) && maxHistory > 0
+        ? Math.floor(maxHistory)
+        : 200,
+    );
 
     // v0.5.0+: ``agent.stt`` / ``agent.tts`` are always STTAdapter / TTSAdapter
     // instances (or undefined). Provider classes expose a static
@@ -2067,6 +2126,16 @@ export class StreamHandler {
     // Merge the built-in consult tool (if configured) into the per-call tool
     // list so it reaches both the Realtime adapter and the pipeline LLM loop.
     this.injectConsultTool();
+    // Validate skill / reserved-name collisions once, against the original
+    // tool list (before any activation merges skill tools in). The built-in
+    // `use_skill` tool itself is advertised by `buildAIAdapter` (Realtime) and
+    // `buildPipelineLlmTools` (Pipeline).
+    if (this.currentAgent.skills && this.currentAgent.skills.length > 0) {
+      assertNoSkillConflicts(
+        this.currentAgent.skills,
+        (this.resolvedTools ?? this.currentAgent.tools) as ReadonlyArray<{ name?: string }> | undefined,
+      );
+    }
 
     if (provider === 'pipeline') {
       await this.initPipeline(resolvedPrompt);
@@ -2933,34 +3002,52 @@ export class StreamHandler {
   }
 
   /**
-   * Cached result of ``isTtsOutputFormatNativeForCarrier()`` — settled
-   * once at ``initPipeline`` time after ``setTelephonyCarrier`` has run
-   * on the TTS adapter. Stable for the call lifetime: changes to the
-   * adapter's output format mid-call would NOT flip this. ``true`` means
-   * ``encodePipelineAudio`` can take the bypass path.
+   * Cached result of ``configureOutboundAudio()`` — settled once at
+   * ``initPipeline`` time after ``setTelephonyCarrier`` has run on the TTS
+   * adapter. Stable for the call lifetime: changes to the adapter's output
+   * format mid-call would NOT flip this. ``true`` means ``encodePipelineAudio``
+   * can take the bypass path.
    */
   private ttsOutputFormatNativeForCarrier: boolean = false;
 
   /**
-   * Probe whether the TTS adapter is configured to emit bytes already in
-   * the carrier's wire codec. Currently: Twilio expects ``ulaw_8000``,
-   * Telnyx expects ``pcm_16000`` (no client transcode in either case if
-   * matched). Anything else takes the resample-and-encode path.
+   * Configure the outbound TTS → carrier audio path from the provider's
+   * DECLARED output format. This is the single rate-aware decision point:
+   *
+   * - If the TTS already emits the carrier's wire format (μ-law 8 kHz) the
+   *   bytes pass straight through — no resample, no re-encode, bit-clean.
+   * - Otherwise build a {@link RateAwareResampler} from the provider's REAL
+   *   sample rate → the carrier wire rate (8 kHz), so 8 k / 16 k / 22.05 k /
+   *   24 k / 44.1 k sources all play at correct pitch. The old path hardcoded
+   *   a 16 kHz source and chipmunked anything else.
+   *
+   * Settled once at initPipeline; stable for the call lifetime.
    */
-  private isTtsOutputFormatNativeForCarrier(): boolean {
-    if (!this.tts) return false;
-    const fmt = (this.tts as { outputFormat?: string }).outputFormat;
-    if (typeof fmt !== 'string') return false;
+  private configureOutboundAudio(): void {
     const carrier = this.deps.bridge.telephonyProvider;
-    // Every supported carrier wire is μ-law 8 kHz — the SDK's own
-    // ``streaming_start`` pins Telnyx to PCMU (the old 'pcm_16000'
-    // expectation shipped raw PCM16 onto the μ-law wire: static). When the
-    // TTS output is already μ-law the pipeline must bypass the PCM
-    // resample/re-encode path — otherwise the encoded bytes are mangled.
-    if (carrier === 'twilio' || carrier === 'telnyx' || carrier === 'plivo') {
-      return fmt === 'ulaw_8000';
+    const wire: AudioFormat =
+      CARRIER_WIRE_FORMAT[carrier] ?? { encoding: 'mulaw', sampleRate: 8000 };
+    const source = resolveTtsSourceFormat(this.tts);
+
+    if (formatsMatch(source, wire)) {
+      // Provider emits the carrier wire codec directly → passthrough.
+      this.ttsOutputFormatNativeForCarrier = true;
+      getLogger().debug(
+        `TTS output (${source.encoding} ${source.sampleRate} Hz) matches ${carrier} wire codec — bypassing client-side transcode`,
+      );
+      return;
     }
-    return false;
+
+    this.ttsOutputFormatNativeForCarrier = false;
+    // Build a resampler from the REAL declared source rate to the wire rate.
+    this.outboundResampler = new RateAwareResampler({
+      srcRate: source.sampleRate,
+      dstRate: wire.sampleRate,
+    });
+    getLogger().debug(
+      `Outbound audio: resample ${source.sampleRate} Hz → ${wire.sampleRate} Hz ` +
+        `(anti-alias +${this.outboundResampler.antiAliasLatencyMs.toFixed(2)} ms) then μ-law encode for ${carrier}`,
+    );
   }
 
   /**
@@ -3180,15 +3267,11 @@ export class StreamHandler {
           getLogger().debug(`TTS setTelephonyCarrier failed (${label}): ${String(e)}`);
         }
       }
-      // Re-evaluate after setTelephonyCarrier so the encodePipelineAudio
-      // fast path is enabled for the current carrier when the adapter
-      // auto-flipped (or the user constructed with a native format).
-      this.ttsOutputFormatNativeForCarrier = this.isTtsOutputFormatNativeForCarrier();
-      if (this.ttsOutputFormatNativeForCarrier) {
-        getLogger().debug(
-          `TTS outputFormat matches ${this.deps.bridge.telephonyProvider} wire codec — bypassing client-side transcode`,
-        );
-      }
+      // Re-evaluate after setTelephonyCarrier: resolve the TTS provider's
+      // DECLARED output format and configure the outbound audio path
+      // (μ-law passthrough vs rate-aware resample) from it — no fixed-rate
+      // assumption. See audio/format.ts.
+      this.configureOutboundAudio();
     }
 
     if (!this.stt) {
@@ -3391,9 +3474,11 @@ export class StreamHandler {
         augmentedTools,
         this.deps.agent.llm,
         this.deps.agent.disablePhonePreamble ?? false,
+        this.deps.agent.contextTokenBudget,
       );
       this.llmLoop.setEventBus(this._eventBus);
       this.llmLoop.setOnToolCall((n, a, r) => this.recordToolCall(n, a, r));
+      this.setupCompaction();
       const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label}, llm=${llmLabel})`);
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
@@ -3407,9 +3492,11 @@ export class StreamHandler {
         augmentedTools,
         undefined,
         this.deps.agent.disablePhonePreamble ?? false,
+        this.deps.agent.contextTokenBudget,
       );
       this.llmLoop.setEventBus(this._eventBus);
       this.llmLoop.setOnToolCall((n, a, r) => this.recordToolCall(n, a, r));
+      this.setupCompaction();
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label})`);
     }
 
@@ -5990,6 +6077,49 @@ export class StreamHandler {
   }
 
   /**
+   * Construct the opt-in {@link ContextCompactor} when `agent.compaction` is
+   * set. The default summarizer uses the agent's own LLM (`llmLoop.summarize`).
+   * No-op when compaction is disabled. Mirrors the Python handler wiring.
+   */
+  private setupCompaction(): void {
+    const cfg = this.deps.agent.compaction;
+    if (!cfg || !this.llmLoop) return;
+    const loop = this.llmLoop;
+    const target = cfg.targetTokens ?? 3000;
+    this.compactor = new ContextCompactor(cfg, (prior, old) =>
+      loop.summarize(prior, old, target),
+    );
+  }
+
+  /**
+   * Kick off a background history-compaction pass when over budget. No-op when
+   * compaction is disabled or a pass is already running. The summarization is
+   * async and runs OFF the live turn path so it never adds latency — the new
+   * summary is applied to the next turn once it completes. Mirrors Python
+   * `_maybe_start_compaction`.
+   */
+  private maybeStartCompaction(): void {
+    if (!this.compactor || !this.llmLoop) return;
+    if (this.compactionTask) return; // a pass is already in flight
+    if (!this.compactor.shouldCompact(this.history.entries)) return;
+    this.compactionTask = this.runCompaction().finally(() => {
+      this.compactionTask = null;
+    });
+  }
+
+  /** Run one compaction pass and apply the resulting summary to the loop. */
+  private async runCompaction(): Promise<void> {
+    try {
+      const newSummary = await this.compactor!.maybeCompact(this.history.entries);
+      if (newSummary !== null && this.llmLoop) {
+        this.llmLoop.setContextSummary(newSummary);
+      }
+    } catch (e) {
+      getLogger().error(`context compaction failed: ${String(e)}`);
+    }
+  }
+
+  /**
    * Push an assistant turn into history and fire `onTranscript` so host
    * applications observe pipeline-mode replies the same way they observe
    * realtime-mode replies. Mirrors `_emit_assistant_transcript` in the
@@ -6006,6 +6136,10 @@ export class StreamHandler {
         history: [...this.history.entries],
       });
     }
+    // The user+assistant turn is now in history — re-evaluate whether the
+    // working context has outgrown the compaction budget and, if so,
+    // summarize the oldest turns in the background (no turn latency).
+    this.maybeStartCompaction();
   }
 
   /**
@@ -6442,6 +6576,15 @@ export class StreamHandler {
       return;
     }
 
+    if (
+      fc.name === USE_SKILL_TOOL_NAME &&
+      this.currentAgent.skills &&
+      this.currentAgent.skills.length > 0
+    ) {
+      await this.handleUseSkillFunctionCall(fc);
+      return;
+    }
+
     // User-defined tool — supports either `handler` (in-process function)
     // or `webhookUrl` (HTTP POST). Dispatched through ``DefaultToolExecutor``
     // so both paths get retry-with-exponential-backoff and a per-tool
@@ -6605,12 +6748,15 @@ export class StreamHandler {
     }
 
     this.currentAgent = applyHandoffTarget(this.currentAgent, target);
+    // A handoff REPLACES the prompt, so any skills activated on the prior
+    // agent are no longer layered in — clear the set for the target's skills.
+    this.activeSkills = new Set<string>();
     const effective = this.effectiveToolsForCurrentAgent();
     this.resolvedTools = effective;
 
     // Build the new wire tool list: target tools + built-ins (+ onward
-    // handoff tool when the target has its own handoff map). Mirrors the
-    // construction in `buildAIAdapter`.
+    // handoff tool when the target has its own handoff map, + use_skill when
+    // the target declares skills). Mirrors the construction in `buildAIAdapter`.
     const wireTools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> = effective.map((t) => {
       const entry: { name: string; description: string; parameters: Record<string, unknown>; strict?: boolean } = {
         name: t.name,
@@ -6624,6 +6770,9 @@ export class StreamHandler {
     const onwardHandoffs = this.currentAgent.handoffs;
     if (onwardHandoffs && Object.keys(onwardHandoffs).length > 0) {
       wireTools.push(buildHandoffTool(Object.keys(onwardHandoffs)));
+    }
+    if (this.currentAgent.skills && this.currentAgent.skills.length > 0) {
+      wireTools.push(buildUseSkillTool(this.currentAgent.skills));
     }
 
     const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
@@ -6647,6 +6796,103 @@ export class StreamHandler {
     const result = JSON.stringify({ status: 'handed_off', to: name });
     await adapter.sendFunctionResult(fc.call_id, result);
     await this.emitToolEvent(HANDOFF_TOOL_NAME, args, result);
+  }
+
+  /**
+   * Dispatch the built-in `use_skill` tool on the Realtime path.
+   *
+   * Progressive-disclosure ACTIVATION: layers the chosen skill's `instructions`
+   * into the system prompt and unlocks its `tools` ADDITIVELY (via
+   * `applySkillActivation` — distinct from the one-way handoff replace), then
+   * pushes the merged state to the live session with a mid-session
+   * `session.update` (new `instructions` + `tools`). The skill stays active for
+   * the rest of the call. ALWAYS sends a function result — an unknown /
+   * already-active skill or malformed args produce an envelope, never silence.
+   * Parity with the Pipeline `performSkillActivation` and Python
+   * `_handle_use_skill_function_call`.
+   */
+  private async handleUseSkillFunctionCall(fc: { call_id: string; name: string; arguments: string }): Promise<void> {
+    const adapter = this.adapter as OpenAIRealtimeAdapter;
+    let args: { skill_name?: string } | null;
+    try {
+      args = JSON.parse(fc.arguments || '{}') as { skill_name?: string };
+    } catch {
+      args = null;
+    }
+    if (!args || typeof args !== 'object') {
+      const result = JSON.stringify({ error: 'Malformed use_skill arguments', status: 'rejected' });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(USE_SKILL_TOOL_NAME, {}, result);
+      return;
+    }
+    const name = typeof args.skill_name === 'string' ? args.skill_name : '';
+    const skills = this.currentAgent.skills ?? [];
+    const skill = skills.find((s) => s.name === name);
+    if (!skill) {
+      const result = JSON.stringify({
+        error: `Unknown skill '${name}'`,
+        available: skills.map((s) => s.name).sort(),
+      });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(USE_SKILL_TOOL_NAME, args, result);
+      return;
+    }
+    if (this.activeSkills.has(name)) {
+      // Idempotent: re-activating a live skill must not double-layer the
+      // instructions / tools. Acknowledge without mutating state.
+      const result = JSON.stringify({ status: 'already_active', skill: name });
+      await adapter.sendFunctionResult(fc.call_id, result);
+      await this.emitToolEvent(USE_SKILL_TOOL_NAME, args, result);
+      return;
+    }
+
+    // Layer the skill in additively and re-derive the effective tool list.
+    this.currentAgent = applySkillActivation(this.currentAgent, skill);
+    this.activeSkills.add(name);
+    const effective = this.effectiveToolsForCurrentAgent();
+    this.resolvedTools = effective;
+
+    // Rebuild the wire tool list: current tools (now incl. the skill's tools)
+    // + built-ins (+ handoff_to when configured) + use_skill again so further
+    // skills can still activate.
+    const wireTools: Array<{ name: string; description: string; parameters: Record<string, unknown>; strict?: boolean }> = effective.map((t) => {
+      const entry: { name: string; description: string; parameters: Record<string, unknown>; strict?: boolean } = {
+        name: t.name,
+        description: t.description ?? '',
+        parameters: (t.parameters ?? {}) as Record<string, unknown>,
+      };
+      if ((t as { strict?: boolean }).strict === true) entry.strict = true;
+      return entry;
+    });
+    wireTools.push(TRANSFER_CALL_TOOL, END_CALL_TOOL);
+    const onwardHandoffs = this.currentAgent.handoffs;
+    if (onwardHandoffs && Object.keys(onwardHandoffs).length > 0) {
+      wireTools.push(buildHandoffTool(Object.keys(onwardHandoffs)));
+    }
+    if (this.currentAgent.skills && this.currentAgent.skills.length > 0) {
+      wireTools.push(buildUseSkillTool(this.currentAgent.skills));
+    }
+
+    const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
+    const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
+    const newInstructions = applyToolCallPreambles(
+      resolvedPrompt,
+      (this.currentAgent as { toolCallPreambles?: boolean | string }).toolCallPreambles,
+    );
+
+    // session.update FIRST, then the function result — the result triggers the
+    // next `response.create`, which must already run with the skill in scope.
+    await adapter.updateSession({ instructions: newInstructions, tools: wireTools });
+
+    const historyText = skillActivationHistoryText(name);
+    this.history.push({ role: 'system', text: historyText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({ role: 'system', text: historyText, call_id: this.callId });
+    }
+
+    const result = JSON.stringify({ status: 'skill_activated', skill: name });
+    await adapter.sendFunctionResult(fc.call_id, result);
+    await this.emitToolEvent(USE_SKILL_TOOL_NAME, args, result);
   }
 
   /**
@@ -6679,6 +6925,9 @@ export class StreamHandler {
       );
     }
     this.currentAgent = applyHandoffTarget(this.currentAgent, target);
+    // A handoff REPLACES the prompt, so skills activated on the prior agent
+    // are no longer layered in — clear the set for the target's skills.
+    this.activeSkills = new Set<string>();
     this.resolvedTools = this.effectiveToolsForCurrentAgent();
     const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
     const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
@@ -6699,10 +6948,12 @@ export class StreamHandler {
 
   /**
    * Build the full pipeline tool list for the CURRENT agent: user tools +
-   * built-in `transfer_call` / `end_call` + the `handoff_to` tool when
-   * handoff targets are configured. Re-invoked after a handoff so the LLM
-   * loop advertises the target agent's tools (including its onward handoff
-   * map). Parity with the Python `_build_combined_pipeline_tools`.
+   * built-in `transfer_call` / `end_call` + the `handoff_to` tool when handoff
+   * targets are configured + the `use_skill` tool when skills are configured.
+   * Re-invoked after a handoff or a skill activation so the LLM loop advertises
+   * the current agent's tools (including its onward handoff map and any skill
+   * tools merged in on activation). Parity with the Python
+   * `_build_combined_pipeline_tools`.
    */
   private buildPipelineLlmTools(): ToolDefinition[] {
     const augmented = augmentWithBuiltinHandoffTools(
@@ -6723,7 +6974,58 @@ export class StreamHandler {
           ),
       });
     }
+    if (this.currentAgent.skills && this.currentAgent.skills.length > 0) {
+      augmented.push({
+        ...buildUseSkillTool(this.currentAgent.skills),
+        handler: async (args: Record<string, unknown>): Promise<string> =>
+          this.performSkillActivation(typeof args.skill_name === 'string' ? args.skill_name : ''),
+      });
+    }
     return augmented;
+  }
+
+  /**
+   * Activate the named SKILL on the live pipeline call (progressive-disclosure
+   * ACTIVATION).
+   *
+   * Layers the skill's `instructions` into the system prompt and unlocks its
+   * `tools` ADDITIVELY (via `applySkillActivation`), then swaps the LLM loop's
+   * system prompt + rebuilt tool list so the NEXT turn runs with the skill in
+   * scope. The skill stays active for the rest of the call. ALWAYS returns a
+   * tool-result string — an unknown / already-active skill produces an
+   * envelope, never silence. Parity with the Realtime
+   * `handleUseSkillFunctionCall` and Python `_perform_skill_activation`.
+   */
+  private async performSkillActivation(name: string): Promise<string> {
+    const skills = this.currentAgent.skills ?? [];
+    const skill = skills.find((s) => s.name === name);
+    if (!skill) {
+      return JSON.stringify({
+        error: `Unknown skill '${name}'`,
+        available: skills.map((s) => s.name).sort(),
+      });
+    }
+    if (this.activeSkills.has(name)) {
+      return JSON.stringify({ status: 'already_active', skill: name });
+    }
+    this.currentAgent = applySkillActivation(this.currentAgent, skill);
+    this.activeSkills.add(name);
+    this.resolvedTools = this.effectiveToolsForCurrentAgent();
+    const vars = this.deps.sanitizeVariables({ ...(this.currentAgent.variables ?? {}) });
+    const resolvedPrompt = this.deps.resolveVariables(this.currentAgent.systemPrompt, vars);
+    if (this.llmLoop) {
+      this.llmLoop.updateAgent({
+        systemPrompt: resolvedPrompt,
+        tools: this.buildPipelineLlmTools(),
+        disablePhonePreamble: this.currentAgent.disablePhonePreamble ?? false,
+      });
+    }
+    const historyText = skillActivationHistoryText(name);
+    this.history.push({ role: 'system', text: historyText, timestamp: Date.now() });
+    if (this.deps.onTranscript) {
+      await this.deps.onTranscript({ role: 'system', text: historyText, call_id: this.callId });
+    }
+    return JSON.stringify({ status: 'skill_activated', skill: name });
   }
 
   // ---------------------------------------------------------------------------

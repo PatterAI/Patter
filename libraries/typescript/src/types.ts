@@ -57,6 +57,38 @@ export interface TTSConfig {
   options?: Record<string, unknown>;
 }
 
+/**
+ * Opt-in token-aware history compaction for pipeline mode (built-in LLM loop).
+ *
+ * When set on {@link AgentOptions.compaction}, the loop summarizes the OLDEST
+ * turns of a long call into a rolling summary once the estimated prompt size
+ * crosses {@link triggerTokens}, keeping the most recent {@link keepLastTurns}
+ * turns verbatim. The summary is generated ASYNCHRONOUSLY (a background task
+ * using the agent's own LLM) so it never adds latency to the live turn, and it
+ * replaces the summarized turns in the working history — bounding the context
+ * sent to the model and avoiding a silent `context_length_exceeded` while
+ * preserving facts/decisions stated in earlier turns.
+ *
+ * All thresholds are estimates in the canonical OpenAI `chars / 4` token unit
+ * (the same baseline the SDK uses for fallback billing) — no extra tokenizer
+ * dependency is pulled in. Omitting `compaction` (the default) keeps today's
+ * plain FIFO history (see {@link AgentOptions.maxHistory}).
+ *
+ * Mirrors Python `CompactionConfig`.
+ */
+export interface CompactionConfig {
+  /** Estimated-token size of the summarizable history (old turns + prior
+   * summary) at or above which a compaction pass triggers. Default 8000. */
+  readonly triggerTokens?: number;
+  /** Soft ceiling (estimated tokens) the rolling summary aims to stay under —
+   * passed to the summarizer prompt as guidance. Default 3000. */
+  readonly targetTokens?: number;
+  /** Number of most-recent turns kept VERBATIM (never summarized). A "turn" is
+   * approximated as a user+assistant pair, so the loop keeps the last
+   * `keepLastTurns * 2` history entries untouched. Default 4 (minimum 1). */
+  readonly keepLastTurns?: number;
+}
+
 /** Single-turn message handler — receives the user's transcript, returns the agent's reply. */
 export type MessageHandler = (msg: IncomingMessage) => Promise<string>;
 /** Generic call-lifecycle callback (start/end/transcript/metrics). */
@@ -550,6 +582,30 @@ export interface AudioFilter {
   close(): Promise<void>;
 }
 
+/**
+ * Automatic-gain-control tuning for the inbound (caller -> STT) chain.
+ *
+ * Passed to {@link AgentOptions.agc}. Speech-selective: the gain is only
+ * driven up on frames above {@link speechFloorDbfs}, so silence / line-noise
+ * gaps are never amplified into a hiss. A per-frame peak limiter holds the
+ * output below {@link limiterCeiling} of full scale to avoid clipping on a
+ * loud transient. Defaults match Python ``AgcConfig`` byte-for-byte (parity).
+ */
+export interface AgcConfig {
+  /** Target output RMS in dBFS. Must be < 0. Default -18. */
+  readonly targetRmsDbfs?: number;
+  /** Symmetric gain bound in dB (noise floor never amplified beyond this). Default 30. */
+  readonly maxGainDb?: number;
+  /** Frames below this RMS (dBFS) are non-speech: gain releases toward unity. Default -45. */
+  readonly speechFloorDbfs?: number;
+  /** Smoothing time constant when gain DECREASES (signal got louder) — fast. Default 10 ms. */
+  readonly attackMs?: number;
+  /** Smoothing time constant when gain INCREASES (signal got quieter) — slow. Default 200 ms. */
+  readonly releaseMs?: number;
+  /** Peak ceiling as a fraction of full scale (0, 1]. Default 0.99. */
+  readonly limiterCeiling?: number;
+}
+
 /** Mixes background audio (hold music, thinking cues) with TTS output. */
 export interface BackgroundAudioPlayer {
   start(): Promise<void>;
@@ -592,6 +648,48 @@ export interface SessionContext {
   readonly callee?: string;
   readonly callerHash?: string;
 }
+
+/**
+ * A named, on-demand capability the PRIMARY agent can activate mid-call
+ * (progressive disclosure — the Anthropic Agent Skills pattern).
+ *
+ * At call start only each skill's `name` + `description` are advertised to the
+ * model (via the built-in `use_skill` tool), NOT the full `instructions`. When
+ * the model calls `use_skill({ skillName })` Patter layers the skill's
+ * `instructions` into the system prompt and unlocks its `tools` — INLINE in the
+ * same agent loop (no sub-agent spawn, no extra round-trip). The skill then
+ * stays active for the rest of the call.
+ *
+ * Distinct from a multi-agent `handoff` (which REPLACES the agent one-way): a
+ * skill is ADDITIVE — the base prompt and existing tools remain, the skill
+ * stacks on top. Mirrors Python `getpatter.Skill`.
+ */
+export interface Skill {
+  /**
+   * Short identifier the model passes to `use_skill` (the discovery enum
+   * value). Must be unique within an agent and must not collide with the
+   * reserved built-in tool names (`transfer_call`, `end_call`, `handoff_to`,
+   * `use_skill`).
+   */
+  readonly name: string;
+  /**
+   * One-line summary surfaced at call start so the model knows WHEN to activate
+   * the skill. Keep it to ~30-50 tokens — this is the only part loaded eagerly.
+   */
+  readonly description: string;
+  /**
+   * The full playbook / prompt loaded ON DEMAND when the skill activates.
+   * Layered into the system prompt as a `# Skill: <name>` block.
+   */
+  readonly instructions: string;
+  /**
+   * Optional tools exposed ONLY while the skill is active. `Tool` instances
+   * built with the `tool(...)` factory. Names must not collide with the
+   * reserved built-ins, the top-level agent tools, or another skill's tools.
+   */
+  readonly tools?: ReadonlyArray<ToolInstance>;
+}
+
 /** Configuration for a local-mode voice AI agent (passed to `phone.agent({...})`). */
 export interface AgentOptions {
   readonly systemPrompt: string;
@@ -692,6 +790,19 @@ export interface AgentOptions {
    */
   readonly handoffs?: Readonly<Record<string, AgentOptions>>;
   /**
+   * On-demand SKILLS the PRIMARY agent can activate mid-call (progressive
+   * disclosure — the Anthropic Agent Skills pattern). When set, Patter
+   * auto-injects a built-in ``use_skill`` tool (Realtime + Pipeline modes)
+   * whose ``skillName`` enum advertises ONLY each skill's name + description
+   * (~30-50 tokens each) at call start. When the model calls
+   * ``use_skill({ skillName })`` Patter layers that skill's full
+   * ``instructions`` into the system prompt and unlocks its ``tools`` — INLINE
+   * in the same agent loop (no sub-agent spawn / extra latency). Additive and
+   * stackable (unlike the one-way ``handoffs`` swap). ``undefined`` (default)
+   * disables the tool. Mirrors Python ``Agent.skills``. See {@link Skill}.
+   */
+  readonly skills?: ReadonlyArray<Skill>;
+  /**
    * When ``true``, ship ``systemPrompt`` to the LLM verbatim. Default
    * (``false``) prepends a phone-friendly preamble that instructs the
    * model to avoid markdown, emojis, bullet lists, and verbose replies —
@@ -710,6 +821,25 @@ export interface AgentOptions {
    * spoke before any TTS played.
    */
   readonly echoCancellation?: boolean;
+  /**
+   * Inbound high-pass / DC-block cutoff in Hz (pipeline mode only). When set
+   * (typical 80–120), the SDK runs a 2nd-order Butterworth high-pass biquad as
+   * the FIRST stage of the inbound chain — before AEC, noise suppression, VAD
+   * and STT — stripping DC offset, mains hum (50/60 Hz) and handling rumble
+   * that otherwise bias the echo canceller and inflate the VAD energy estimate.
+   * Pure-DSP, stateful, <<1 % CPU. Undefined (default) leaves the inbound audio
+   * byte-identical to today.
+   */
+  readonly highPassHz?: number;
+  /**
+   * Inbound automatic gain control (pipeline mode only). Normalises the
+   * caller's level toward a target RMS just before VAD/STT, cutting WER on
+   * quiet / variable-distance talkers. Runs AFTER noise suppression and BEFORE
+   * VAD. Speech-selective (silence gaps are not amplified) with a peak limiter
+   * to avoid clipping. `false`/undefined (default) disables it; `true` uses
+   * {@link AgcConfig} defaults; pass an {@link AgcConfig} to tune.
+   */
+  readonly agc?: boolean | AgcConfig;
   /**
    * Realtime / ConvAI engine instance. When present, the agent runs in the
    * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,
@@ -889,6 +1019,29 @@ export interface AgentOptions {
    * Mirrors Python ``preemptive_min_stable_ms``.
    */
   readonly preemptiveMinStableMs?: number;
+  /**
+   * Maximum number of conversation-history entries retained in the per-call
+   * working memory (FIFO ring). Was hard-coded to 200; exposed here so very
+   * long calls or low-context models can tune it. Pipeline mode only; the
+   * dashboard transcript log is independent. Default 200 — byte-identical to
+   * prior behaviour. Mirrors Python `Agent.max_history`.
+   */
+  readonly maxHistory?: number;
+  /**
+   * Opt-in token-aware history compaction (pipeline mode, built-in LLM loop
+   * only). Omitted (default) keeps the plain FIFO ring with no summarization.
+   * See {@link CompactionConfig}. Mirrors Python `Agent.compaction`.
+   */
+  readonly compaction?: CompactionConfig;
+  /**
+   * Opt-in estimated-token budget for the assembled prompt (system + summary +
+   * history + user). When set, the built-in LLM loop logs a WARNING the first
+   * time a turn's estimated context crosses ~75% of this budget, so operators
+   * get an early signal before a model's hard context limit is hit. The
+   * `context_tokens` metric is recorded regardless. Omitted (default) disables
+   * the warning. Pipeline mode only. Mirrors Python `Agent.context_token_budget`.
+   */
+  readonly contextTokenBudget?: number;
   /**
    * Input noise reduction for speakerphone / conference audio (OpenAI
    * Realtime mode only). `undefined` (default) omits the field entirely

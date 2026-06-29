@@ -248,6 +248,54 @@ NLMS AEC adds CPU work proportional to `filter_taps × frame_samples` per inboun
 This is a lightweight time-domain AEC, not a drop-in replacement for production-grade DSP (WebRTC's AEC3, Speex AEC). For tight integration with battle-tested DSP, wrap a binding to `libwebrtc-audio-processing` externally and feed it via `audio_filter=` instead.
 </Warning>
 
+<Warning>
+**Browser / native only — a no-op by design on PSTN.** The NLMS filter only models an echo path that fits inside its 32 ms window. On a phone call the audio traverses a 250–1500 ms carrier jitter buffer + loop, so the round-trip echo lands far outside that window and the filter passes the frame through unchanged. PSTN line echo is already handled by the carrier (ITU-T G.168) plus the caller's own device, so `echo_cancellation` should stay `False` on Twilio / Telnyx / Plivo — enable it only for browser/WebRTC or native-mobile deployments where Patter owns the mic-and-speaker path end-to-end. The SDK logs a one-shot warning if you enable it on a PSTN carrier.
+</Warning>
+
+---
+
+## Inbound Audio Front-End (High-Pass & AGC)
+
+Two opt-in, provider-agnostic stages clean up the caller audio before it reaches VAD and STT — they run once per frame regardless of which STT you choose, and both fail open (a stage error degrades to passthrough, never drops the call). The full inbound order is `high-pass → resample → AEC → noise suppression → AGC → VAD → STT`.
+
+```python
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AnthropicLLM(),
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    high_pass_hz=100,   # strip DC / mains hum / rumble below 100 Hz
+    agc=True,           # normalise caller level toward the target RMS
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `high_pass_hz` | `int \| None` | `None` | High-pass / DC-block cutoff in Hz (typical 80–120). Runs as the **first** stage, before AEC, removing DC offset, mains hum (50/60 Hz) and handling rumble that otherwise bias the echo canceller and inflate the VAD energy estimate. `None` disables it. |
+| `agc` | `bool \| AgcConfig` | `False` | Speech-selective automatic gain control. Runs **after** noise suppression and **before** VAD/STT, normalising the caller's level toward a target RMS to cut word-error rate on quiet / variable-distance talkers. `True` uses defaults; pass an `AgcConfig` to tune. |
+
+The AGC is **speech-selective** — gain is only driven up on speech frames, so the quiet gaps between words are never amplified into a hiss — and **peak-limited** so an aggressive boost never clips. Tune it with `AgcConfig`:
+
+```python
+from getpatter import AgcConfig
+
+agent = phone.agent(
+    # ...
+    agc=AgcConfig(
+        target_rms_dbfs=-18.0,   # desired output level
+        max_gain_db=30.0,        # never amplify the noise floor by more than this
+        speech_floor_dbfs=-45.0, # frames below this are treated as non-speech
+        attack_ms=10.0,          # fast gain reduction when the talker gets loud
+        release_ms=200.0,        # slow gain increase when the talker gets quiet
+        limiter_ceiling=0.99,    # peak ceiling as a fraction of full scale
+    ),
+)
+```
+
+<Note>
+Both stages are pure DSP (no numpy required) and cost well under 1 % of one core. They are pipeline-mode only — Realtime / ConvAI providers own their own inbound audio path.
+</Note>
+
 ---
 
 ## Aggressive First-Flush (Low-Latency)

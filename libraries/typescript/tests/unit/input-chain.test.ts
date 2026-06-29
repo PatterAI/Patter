@@ -424,3 +424,170 @@ describe('StreamHandler — agent.audioFilter wiring (dead-parameter regression)
     expect((sttSendAudio.mock.calls[0][0] as Buffer).equals(decodeReference(mulaw))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// New APM stages — high-pass / DC-block, AGC, inbound sample-rate validation
+// ---------------------------------------------------------------------------
+
+const FULL_SCALE = 32768;
+
+function sineFrames(dbfs: number, freqHz: number, frames: number, n = 320): Buffer[] {
+  const amp = FULL_SCALE * 10 ** (dbfs / 20) * Math.SQRT2;
+  const out: Buffer[] = [];
+  let idx = 0;
+  for (let f = 0; f < frames; f += 1) {
+    const buf = Buffer.alloc(n * 2);
+    for (let i = 0; i < n; i += 1) {
+      buf.writeInt16LE(Math.round(amp * Math.sin((2 * Math.PI * freqHz * idx) / 16000)), i * 2);
+      idx += 1;
+    }
+    out.push(buf);
+  }
+  return out;
+}
+
+function rmsOf(pcm: Buffer): number {
+  const n = pcm.length / 2;
+  if (n === 0) return 0;
+  let acc = 0;
+  for (let i = 0; i < n; i += 1) {
+    const s = pcm.readInt16LE(i * 2);
+    acc += s * s;
+  }
+  return Math.sqrt(acc / n);
+}
+
+/** Identity AudioFilter (returns its input unchanged) that records order. */
+class PassRecordingFilter implements AudioFilter {
+  last: Buffer = Buffer.alloc(0);
+  constructor(private readonly order: string[]) {}
+  async process(pcmChunk: Buffer, _sr: number): Promise<Buffer> {
+    this.order.push('filter');
+    this.last = pcmChunk;
+    return pcmChunk;
+  }
+  async close(): Promise<void> {
+    /* no-op */
+  }
+}
+
+function pcmChain(opts: {
+  inputSampleRate?: number;
+  highPassHz?: number;
+  agc?: boolean;
+  audioFilter?: AudioFilter | null;
+  vad?: VADProvider | null;
+}): InputProcessingChain {
+  return new InputProcessingChain({
+    resampler: createResampler8kTo16k(),
+    getAec: () => null,
+    getAudioFilter: () => opts.audioFilter ?? null,
+    getVad: () => opts.vad ?? null,
+    inputIsMulaw8k: false,
+    inputSampleRate: opts.inputSampleRate ?? 16000,
+    highPassHz: opts.highPassHz,
+    agc: opts.agc,
+  });
+}
+
+describe('InputProcessingChain — high-pass stage', () => {
+  it('attenuates a sub-cutoff (50 Hz) tone in the chain output', async () => {
+    const chain = pcmChain({ highPassHz: 100 });
+    const frames = sineFrames(-12, 50, 30);
+    const inRms = rmsOf(Buffer.concat(frames));
+    const parts: Buffer[] = [];
+    for (const f of frames) parts.push((await chain.process(f)).pcm16k);
+    const out = Buffer.concat(parts);
+    const attenDb = 20 * Math.log10(rmsOf(out.subarray(1600 * 2)) / inRms);
+    expect(attenDb).toBeLessThan(-10);
+  });
+
+  it('passes a 440 Hz tone through', async () => {
+    const chain = pcmChain({ highPassHz: 100 });
+    const frames = sineFrames(-12, 440, 30);
+    const inRms = rmsOf(Buffer.concat(frames));
+    const parts: Buffer[] = [];
+    for (const f of frames) parts.push((await chain.process(f)).pcm16k);
+    const out = Buffer.concat(parts);
+    const attenDb = 20 * Math.log10(rmsOf(out.subarray(1600 * 2)) / inRms);
+    expect(Math.abs(attenDb)).toBeLessThan(1);
+  });
+
+  it('is length-preserving on the mu-law path (HPF runs at 8 kHz before resample)', async () => {
+    const plain = new InputProcessingChain({
+      resampler: createResampler8kTo16k(),
+      getAec: () => null,
+      getAudioFilter: () => null,
+      getVad: () => null,
+    });
+    const hp = new InputProcessingChain({
+      resampler: createResampler8kTo16k(),
+      getAec: () => null,
+      getAudioFilter: () => null,
+      getVad: () => null,
+      highPassHz: 100,
+    });
+    const mulaw = fakeMulawBuffer(20);
+    const plainOut = (await plain.process(mulaw)).pcm16k;
+    const hpOut = (await hp.process(mulaw)).pcm16k;
+    expect(hpOut.length).toBe(plainOut.length);
+  });
+});
+
+describe('InputProcessingChain — AGC stage', () => {
+  it('boosts a quiet input toward the target', async () => {
+    const chain = pcmChain({ agc: true });
+    const frames = sineFrames(-30, 220, 200);
+    let last = Buffer.alloc(0);
+    for (const f of frames) last = (await chain.process(f)).pcm16k;
+    const outDbfs = 20 * Math.log10(rmsOf(last) / FULL_SCALE);
+    expect(Math.abs(outDbfs - -18)).toBeLessThan(2.5);
+  });
+
+  it('runs after the filter and before VAD', async () => {
+    const order: string[] = [];
+    const filter = new PassRecordingFilter(order);
+    const vad = new RecordingVad(order);
+    const chain = pcmChain({ agc: true, audioFilter: filter, vad });
+    const frames = sineFrames(-30, 220, 200);
+    let result: Awaited<ReturnType<InputProcessingChain['process']>> | null = null;
+    for (const f of frames) result = await chain.process(f);
+    expect(order.slice(-2)).toEqual(['filter', 'vad']);
+    // VAD saw a louder frame than the filter output → AGC sat between them.
+    expect(rmsOf(vad.seen[vad.seen.length - 1].pcm)).toBeGreaterThan(rmsOf(filter.last) * 2);
+    expect(result!.pcm16k.equals(vad.seen[vad.seen.length - 1].pcm)).toBe(true);
+  });
+
+  it('is off by default (bytes identical)', async () => {
+    const chain = pcmChain({});
+    const frame = sineFrames(-30, 220, 1)[0];
+    expect((await chain.process(frame)).pcm16k.equals(frame)).toBe(true);
+  });
+});
+
+describe('InputProcessingChain — inbound sample rate', () => {
+  it('resamples PCM16 @ 8 kHz up to 16 kHz instead of forwarding it blind', async () => {
+    const chain = pcmChain({ inputSampleRate: 8000 });
+    const frame = Buffer.alloc(320); // 160 samples of PCM16 @ 8 kHz silence
+    const out = (await chain.process(frame)).pcm16k;
+    expect(out.length).toBeGreaterThan(frame.length * 1.8);
+  });
+
+  it('passes PCM16 @ 16 kHz through untouched', async () => {
+    const chain = pcmChain({ inputSampleRate: 16000 });
+    const frame = sineFrames(-20, 300, 1)[0];
+    expect((await chain.process(frame)).pcm16k.equals(frame)).toBe(true);
+  });
+
+  it('rejects an invalid input sample rate', () => {
+    expect(() =>
+      new InputProcessingChain({
+        resampler: createResampler8kTo16k(),
+        getAec: () => null,
+        getAudioFilter: () => null,
+        getVad: () => null,
+        inputSampleRate: 0,
+      }),
+    ).toThrow();
+  });
+});

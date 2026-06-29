@@ -45,6 +45,16 @@ export class OpenAITTS {
   }
 
   /**
+   * Declare the audio format this adapter emits. OpenAI returns 24 kHz PCM16
+   * which this adapter resamples internally to ``targetSampleRate`` (16 kHz by
+   * default, 8 kHz when configured). The pipeline sender reads this so it
+   * resamples from the REAL output rate rather than assuming 16 kHz.
+   */
+  sourceAudioFormat(): { encoding: 'pcm_s16le'; sampleRate: number } {
+    return { encoding: 'pcm_s16le', sampleRate: this.targetSampleRate };
+  }
+
+  /**
    * Synthesise text to speech and return the full audio as a single Buffer.
    *
    * For large chunks (or when latency matters) call `synthesizeStream` instead.

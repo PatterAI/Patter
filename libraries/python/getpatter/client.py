@@ -32,11 +32,13 @@ from getpatter.local_config import LocalConfig
 from getpatter.models import (
     Agent,
     CallResult,
+    CompactionConfig,
     ConsultConfig,
     Guardrail,
     MachineDetectionResult,
     PipelineHooks,
     RealtimeTurnDetection,
+    Skill,
 )
 from getpatter.providers.base import (
     AudioFilter,
@@ -1735,12 +1737,15 @@ class Patter:
         aggressive_first_flush: bool = False,
         disable_phone_preamble: bool = False,
         echo_cancellation: bool = False,
+        high_pass_hz: int | None = None,
+        agc: "bool | AgcConfig | None" = False,
         engine: Any = None,
         provider: str | None = None,
         llm: LLMProvider | None = None,
         mcp_servers: list | None = None,
         consult: ConsultConfig | None = None,
         handoffs: dict[str, Agent] | None = None,
+        skills: list[Skill] | tuple[Skill, ...] | None = None,
         prewarm_first_message: bool | None = None,
         openai_realtime_noise_reduction: Literal["near_field", "far_field"]
         | None = None,
@@ -1749,6 +1754,9 @@ class Patter:
         tool_call_preambles: bool | str = False,
         preemptive_generation: bool = False,
         preemptive_min_stable_ms: int = 300,
+        max_history: int = 200,
+        compaction: "CompactionConfig | None" = None,
+        context_token_budget: int | None = None,
     ) -> Agent:
         """Create an ``Agent`` configuration.
 
@@ -1788,6 +1796,18 @@ class Patter:
             preemptive_min_stable_ms: How long (ms) a non-punctuated interim
                 transcript must remain unchanged before it qualifies for
                 preemptive generation. Default ``300``.
+            max_history: Maximum conversation-history entries kept in the
+                per-call working memory (FIFO ring). Default ``200`` (prior
+                hard-coded value). Pipeline mode only.
+            compaction: Opt-in :class:`CompactionConfig` enabling token-aware
+                rolling summarization of old turns on long calls (pipeline
+                mode, built-in LLM loop). ``None`` (default) keeps the plain
+                FIFO history.
+            context_token_budget: Opt-in estimated-token budget for the
+                assembled prompt. When set, the built-in LLM loop logs a
+                WARNING once per call when a turn's estimated context crosses
+                ~75% of it. The ``context_tokens`` metric is recorded
+                regardless. ``None`` (default) disables the warning.
             tools: List of ``Tool`` instances (build with the ``tool()`` factory).
             stt: ``STTProvider`` instance for pipeline mode (e.g.
                 ``DeepgramSTT(api_key=...)``).
@@ -1809,6 +1829,17 @@ class Patter:
                 voice on engines that cannot switch voice mid-session) is
                 retained. Chained handoffs follow the target's own
                 ``handoffs`` map.
+            skills: On-demand capabilities the PRIMARY agent can activate
+                mid-call — a list of ``Skill`` instances (progressive
+                disclosure / the Anthropic Agent Skills pattern). When set,
+                Patter injects a built-in ``use_skill`` tool whose
+                ``skill_name`` enum advertises ONLY each skill's name +
+                description at call start (~30-50 tokens each, low latency).
+                When the model calls ``use_skill(skill_name=...)``, Patter
+                layers that skill's full ``instructions`` into the system
+                prompt and unlocks its dedicated ``tools`` — INLINE in the same
+                agent loop (no sub-agent spawn). Additive and stackable (unlike
+                the one-way ``handoffs`` swap). Realtime + Pipeline modes.
             engine: ``OpenAIRealtime(...)`` or ``ElevenLabsConvAI(...)``.
             tool_call_preambles: Realtime modes only. ``False`` (default) ships
                 ``system_prompt`` unchanged. ``True`` prepends a native
@@ -2129,6 +2160,48 @@ class Patter:
                     "modes and will be ignored for this agent."
                 )
 
+        # --- Normalise + validate skills (progressive-disclosure use_skill) ---
+        skills_out: tuple[Skill, ...] = ()
+        if skills:
+            if not isinstance(skills, (list, tuple)):
+                raise TypeError(
+                    f"skills must be a list of Skill, got {type(skills).__name__}."
+                )
+            import dataclasses as _dc
+
+            normalised: list[Skill] = []
+            for i, s in enumerate(skills):
+                if not isinstance(s, Skill):
+                    raise TypeError(
+                        f"skills[{i}] must be a Skill (build with "
+                        f"getpatter.Skill(...)), got {type(s).__name__}."
+                    )
+                # Normalise the skill's tools (Tool instances → internal dicts)
+                # exactly like top-level ``tools``; dict tools pass through so
+                # ``Agent(skills=...)`` constructed directly in tests still work.
+                skill_tools = [
+                    t if isinstance(t, dict) else self._tool_to_dict(t, index=j)
+                    for j, t in enumerate(s.tools or ())
+                ]
+                if skill_tools:
+                    from getpatter.tools.schema_validation import (
+                        validate_all_tool_schemas,
+                    )
+
+                    validate_all_tool_schemas(skill_tools)
+                normalised.append(_dc.replace(s, tools=tuple(skill_tools)))
+            skills_out = tuple(normalised)
+            # Reserved-name / cross-skill / skill↔agent-tool collision guard.
+            from getpatter.tools.skills import assert_no_skill_conflicts
+
+            assert_no_skill_conflicts(skills_out, tools_out)
+            if provider == "elevenlabs_convai":
+                logger.warning(
+                    "skills is set but provider is ElevenLabs ConvAI; the "
+                    "use_skill tool is only injected in Realtime and Pipeline "
+                    "modes and will be ignored for this agent."
+                )
+
         # Apply the documented defaults to slots neither the caller nor an
         # engine marker filled (sentinel ``None`` distinguishes "unset" from an
         # explicit value equal to the default).
@@ -2167,10 +2240,13 @@ class Patter:
             aggressive_first_flush=aggressive_first_flush,
             disable_phone_preamble=disable_phone_preamble,
             echo_cancellation=echo_cancellation,
+            high_pass_hz=high_pass_hz,
+            agc=agc,
             llm=llm,
             mcp_servers=tuple(mcp_servers) if mcp_servers is not None else None,
             consult=consult,
             handoffs=dict(handoffs) if handoffs is not None else None,
+            skills=skills_out,
             prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,
             openai_realtime_input_audio_transcription_model=openai_realtime_input_audio_transcription_model,
@@ -2181,6 +2257,9 @@ class Patter:
             tool_call_preambles=tool_call_preambles,
             preemptive_generation=preemptive_generation,
             preemptive_min_stable_ms=preemptive_min_stable_ms,
+            max_history=max_history,
+            compaction=compaction,
+            context_token_budget=context_token_budget,
         )
 
     @staticmethod

@@ -232,6 +232,31 @@ class PlivoAudioSender(AudioSender):
         if self._pcm_carry is not None:
             self._pcm_carry.reset()
 
+    def set_source_format(self, encoding: str, sample_rate: int) -> None:
+        """Rebuild the transcode chain for the pipeline TTS's DECLARED format.
+
+        ``mulaw`` @ 8 kHz → carrier wire codec → passthrough. Any other
+        (PCM) rate → resample from that REAL rate to 8 kHz then mu-law encode.
+        Replaces the previous hardcoded 16 kHz -> 8 kHz assumption that
+        chipmunked an 8 kHz source. Parity with TS ``configureOutboundAudio``.
+        """
+        if encoding in ("mulaw", "ulaw_8000", "alaw"):
+            self._input_is_mulaw_8k = True
+            self._resampler = None
+            self._pcm16_to_mulaw = None
+            self._pcm_carry = None
+            return
+        from getpatter.audio.transcoding import (
+            PcmCarry,
+            StatefulResampler,
+            pcm16_to_mulaw,
+        )
+
+        self._input_is_mulaw_8k = False
+        self._pcm16_to_mulaw = pcm16_to_mulaw
+        self._resampler = StatefulResampler(src_rate=int(sample_rate), dst_rate=8000)
+        self._pcm_carry = PcmCarry()
+
     async def _send_play_audio(self, mulaw: bytes) -> None:
         encoded = base64.b64encode(mulaw).decode("ascii")
         await self._ws.send_text(
@@ -353,7 +378,9 @@ async def plivo_stream_bridge(
 
     stream_id: str | None = None
     call_id_actual: str = ""
-    conversation_history: deque[dict] = deque(maxlen=200)
+    conversation_history: deque[dict] = deque(
+        maxlen=getattr(agent, "max_history", 200) or 200
+    )
     transcript_entries: deque[dict] = deque(maxlen=200)
 
     handler: (

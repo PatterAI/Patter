@@ -1,0 +1,116 @@
+---
+title: "Skills"
+description: "Give the primary agent on-demand capabilities it activates inline — progressive disclosure, no sub-agent latency."
+---
+
+A **Skill** is a named capability your primary agent can activate mid-call: a
+focused playbook (`instructions`) plus optional dedicated `tools`. Skills follow
+**progressive disclosure** (the Anthropic Agent Skills pattern) so the agent
+stays fast:
+
+- **Discovery** (call start): only each skill's `name` + `description` are
+  loaded — about 30-50 tokens each — via a built-in `use_skill` tool. The full
+  instructions are *not* in the prompt yet.
+- **Activation** (the model calls `use_skill`): the chosen skill's
+  `instructions` are layered into the system prompt and its `tools` are
+  unlocked — **inline, in the same agent loop**. There is no sub-agent spawn and
+  no extra round-trip, so a skill adds no latency the way a delegated agent
+  would.
+
+Skills are **additive**: the base prompt and existing tools stay, the skill
+stacks on top, and it remains active for the rest of the call. (This is the
+opposite of a [handoff](/typescript-sdk/agents), which *replaces* the agent
+one-way.)
+
+## When to use it
+
+- Your agent handles several distinct procedures (refunds, scheduling,
+  troubleshooting) and you don't want every procedure's full instructions in the
+  prompt for every call.
+- A procedure needs its own tools that should only be reachable once the agent
+  has committed to that procedure.
+- You want the model to *decide* which playbook fits, rather than cramming all
+  of them into one long system prompt.
+
+## Quickstart
+
+```typescript
+import { tool } from 'getpatter';
+import type { Skill } from 'getpatter';
+
+const refunds: Skill = {
+  name: 'refunds',
+  description: 'Process a customer refund end to end.',
+  instructions:
+    'Verify the order id. Confirm the amount with the caller. Then call ' +
+    'process_refund. Never refund more than $500 without escalating with ' +
+    'transfer_call.',
+  tools: [
+    tool({
+      name: 'process_refund',
+      description: 'Issue a refund for an order.',
+      handler: async () => JSON.stringify({ status: 'refunded' }),
+    }),
+  ],
+};
+
+const agent = phone.agent({
+  systemPrompt: 'You are a friendly support line for Acme.',
+  skills: [refunds],
+});
+```
+
+At call start the model sees a `use_skill` tool listing `refunds` and its
+description. When a caller asks for a refund, the model calls
+`use_skill({ skill_name: 'refunds' })`; from that point on the refund playbook is
+in its context and `process_refund` is callable.
+
+## The `Skill` type
+
+```typescript
+interface Skill {
+  readonly name: string;            // enum value the model passes to use_skill
+  readonly description: string;     // one-liner loaded eagerly (when to use it)
+  readonly instructions: string;    // full playbook, loaded on activation
+  readonly tools?: readonly Tool[]; // tools exposed only while active
+}
+```
+
+| Field | Loaded at call start? | Notes |
+| --- | --- | --- |
+| `name` | Yes | Must be unique; cannot be a reserved name. |
+| `description` | Yes | Keep it short — this is the discovery hint. |
+| `instructions` | **No** | Layered into the prompt only on activation. |
+| `tools` | **No** | Unlocked only while the skill is active. |
+
+## Naming rules
+
+Skill tool names must not collide with:
+
+- the reserved built-ins `transfer_call`, `end_call`, `handoff_to`, `use_skill`;
+- your top-level `tools`;
+- another skill's tools.
+
+These are checked when you build the agent, so a collision fails fast with a
+clear error instead of surfacing mid-call.
+
+## Behaviour notes
+
+- **Idempotent**: calling `use_skill` again for an already-active skill is a
+  no-op (it returns `already_active`, no double-layering).
+- **Stackable**: activating a second skill layers it on top of the first; both
+  stay active.
+- **Realtime and Pipeline**: skills work the same in both modes — Realtime
+  pushes the new instructions/tools via a session update, Pipeline swaps them
+  into the next turn.
+- **With handoffs**: a `handoff_to` replaces the prompt, so it resets the active
+  skills to the *target* agent's skills.
+
+## Skills vs. the other primitives
+
+| Primitive | Latency | Shape |
+| --- | --- | --- |
+| **Skill** | None (inline, same loop) | Additive playbook + scoped tools, on demand. |
+| [Tool](/typescript-sdk/tools) | None | Always-on function the model can call. |
+| [Handoff](/typescript-sdk/agents) | None | One-way swap to a different agent. |
+| [Consult](/typescript-sdk/consult) | Per-call HTTP | Escalate to your own back-office agent. |

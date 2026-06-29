@@ -9,7 +9,13 @@
 import type { ToolDefinition, HookContext } from './types';
 import type { PipelineHookExecutor } from './pipeline-hooks';
 import type { EventBus } from './observability/event-bus';
+import { estimateMessagesTokens, formatOldMessages } from './compaction';
 import { getLogger } from './logger';
+
+/** Fraction of `contextTokenBudget` at which the over-budget WARNING fires
+ * (once per call). 0.75 leaves headroom before a model's hard context limit
+ * triggers a silent `context_length_exceeded`. Parity with Python. */
+const CONTEXT_WARN_RATIO = 0.75;
 import { validateWebhookUrl } from './server';
 import { SPAN_TOOL, withSpan } from './observability/tracing';
 import { PatterConnectionError } from './errors';
@@ -35,6 +41,11 @@ export interface LlmUsageRecorder {
     cacheReadTokens?: number,
     cacheWriteTokens?: number,
   ): void;
+  /** Optional — record the estimated assembled-prompt size for the current
+   * turn (chars/4 token unit). Present on `CallMetricsAccumulator`; optional so
+   * lightweight test doubles need not implement it. Mirrors Python
+   * `record_context_tokens`. */
+  recordContextTokens?(tokens: number): void;
 }
 
 const DEFAULT_TOOL_MAX_RETRIES = 2;
@@ -852,6 +863,14 @@ export class LLMLoop {
   // — keeps recordLlmUsage's public signature unchanged. Parity with Python.
   private _usageMissingCount = 0;
   private _loggedUsageFallback = false;
+  // --- Context token-counting + compaction support ---
+  // Rolling summary prepended to every prompt (set by the StreamHandler's
+  // ContextCompactor when it folds old turns away). '' == no summary.
+  private _contextSummary = '';
+  // Optional estimated-token budget for the warning (undefined == no warning).
+  private readonly _contextTokenBudget?: number;
+  // One-shot guard so the over-budget warning logs once per call.
+  private _loggedContextWarning = false;
   // Optional async observer fired after a successful tool execution so
   // the host SDK (StreamHandler in pipeline mode) can surface tool calls
   // into the transcript timeline / `onTranscript` callback. Mirrors the
@@ -869,7 +888,9 @@ export class LLMLoop {
     tools?: ToolDefinition[] | null,
     llmProvider?: LLMProvider,
     disablePhonePreamble: boolean = false,
+    contextTokenBudget?: number,
   ) {
+    this._contextTokenBudget = contextTokenBudget;
     this.provider = llmProvider ?? new OpenAILLMProvider(apiKey, model);
     this.disablePhonePreamble = disablePhonePreamble;
     this.systemPrompt = LLMLoop.applyPhonePreamble(systemPrompt, disablePhonePreamble);
@@ -995,6 +1016,49 @@ export class LLMLoop {
   }
 
   /**
+   * Set the rolling conversation summary prepended to every prompt. Wired by
+   * the `StreamHandler` after a `ContextCompactor` compaction folds older turns
+   * into a summary. `buildMessages` inserts it as a system message right after
+   * the main system prompt. Mirrors Python `LLMLoop.set_context_summary`.
+   */
+  setContextSummary(summary: string): void {
+    this._contextSummary = summary || '';
+  }
+
+  /**
+   * Summarize `oldMessages` (folding `priorSummary`) via the agent LLM. Runs a
+   * single non-tool completion against the configured provider and returns the
+   * collected text. Used as the default summarizer for `ContextCompactor`.
+   * Mirrors Python `LLMLoop.summarize`.
+   */
+  async summarize(
+    priorSummary: string,
+    oldMessages: Array<{ role: string; text: string }>,
+    targetTokens: number,
+  ): Promise<string> {
+    const transcript = formatOldMessages(oldMessages);
+    const system =
+      'You are a conversation summarizer for a live phone call. Produce a ' +
+      'concise summary that PRESERVES every fact, name, number, date, ' +
+      'decision, and unresolved question stated so far — this summary will ' +
+      'REPLACE the older turns in the model\'s context, so anything omitted is ' +
+      'lost. Write in compact note form, third person. Aim to stay under ' +
+      `roughly ${Math.max(1, targetTokens)} tokens.`;
+    const userParts: string[] = [];
+    if (priorSummary) userParts.push(`Existing summary:\n${priorSummary}`);
+    userParts.push(`New conversation turns to fold in:\n${transcript}`);
+    const messages: OpenAIMessage[] = [
+      { role: 'system', content: system },
+      { role: 'user', content: userParts.join('\n\n') },
+    ];
+    const parts: string[] = [];
+    for await (const chunk of this.provider.stream(messages, null)) {
+      if (chunk.type === 'text' && chunk.content) parts.push(chunk.content);
+    }
+    return parts.join('').trim();
+  }
+
+  /**
    * Stream LLM response tokens, handling tool calls automatically.
    * Yields text tokens as they arrive from the LLM.
    *
@@ -1025,6 +1089,31 @@ export class LLMLoop {
         messages as Array<Record<string, unknown>>,
         hookCtx,
       )) as OpenAIMessage[];
+    }
+
+    // Token counting: estimate the assembled prompt size (system + rolling
+    // summary + history + user) BEFORE dispatch and record it as the
+    // `context_tokens` metric. When a budget is configured, warn once per call
+    // as it approaches the model's context limit — the measurable prerequisite
+    // for compaction. Always chars/4 (no extra tokenizer dep).
+    if (metrics?.recordContextTokens) {
+      const contextTokens = estimateMessagesTokens(messages as Array<{ content?: unknown }>);
+      metrics.recordContextTokens(contextTokens);
+      const budget = this._contextTokenBudget;
+      if (
+        budget !== undefined &&
+        budget > 0 &&
+        !this._loggedContextWarning &&
+        contextTokens >= budget * CONTEXT_WARN_RATIO
+      ) {
+        this._loggedContextWarning = true;
+        getLogger().warn(
+          `context_tokens_high tokens=${contextTokens} budget=${budget} ` +
+            `pct=${Math.floor((100 * contextTokens) / budget)}% ` +
+            '(approaching model context limit; enable agent.compaction to bound ' +
+            'long-call context)',
+        );
+      }
     }
     // Tier 3 (`onResponse`) — and the deprecated legacy callable that maps
     // to it — buffer streaming tokens, run the hook against the final
@@ -1200,8 +1289,26 @@ export class LLMLoop {
         let args: Record<string, unknown>;
         try {
           args = JSON.parse(tcData.function.arguments);
-        } catch {
-          args = {};
+        } catch (je) {
+          // Malformed argument JSON (truncated stream, model error). Do NOT
+          // execute with guessed/empty arguments — a side-effecting tool
+          // (transfer, SMS, booking) must never fire with an empty payload.
+          // Answer the model with an error envelope instead, preserving the
+          // tool_call_id pairing. Parity with the Python loop
+          // (`llm_loop.py` malformed-args branch).
+          getLogger().warn(
+            `Tool '${toolName}' received malformed arguments JSON (skipping execution): ${String(je)}`,
+          );
+          messages.push({
+            role: 'tool',
+            tool_call_id: tcData.id,
+            content: JSON.stringify({
+              error:
+                'Tool arguments were not valid JSON; the call was not executed. ' +
+                'Retry with well-formed arguments.',
+            }),
+          });
+          continue;
         }
 
         const result = await this.executeTool(toolName, args, callContext);
@@ -1248,6 +1355,18 @@ export class LLMLoop {
     const messages: OpenAIMessage[] = [
       { role: 'system', content: this.systemPrompt },
     ];
+
+    // When a rolling compaction summary is set (see `setContextSummary`),
+    // insert it as a system message right after the main system prompt so the
+    // model still "remembers" the summarized older turns pruned from `history`.
+    if (this._contextSummary) {
+      messages.push({
+        role: 'system',
+        content:
+          'Summary of earlier conversation (older turns have been condensed):\n' +
+          this._contextSummary,
+      });
+    }
 
     for (const entry of history) {
       // Tool entries in conversation history are display/dashboard

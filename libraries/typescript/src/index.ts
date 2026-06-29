@@ -17,6 +17,7 @@ export type {
   IncomingMessage,
   STTConfig,
   TTSConfig,
+  CompactionConfig,
   LocalOptions,
   AgentOptions,
   ServeOptions,
@@ -33,8 +34,10 @@ export type {
   HookContext,
   RealtimeTurnDetection,
   SessionContext,
+  Skill,
   TransferCallOptions,
   TransferCallResult,
+  AgcConfig,
 } from "./types";
 // `Guardrail` is intentionally not re-exported from `./types` — the public
 // `Guardrail` identifier is the class from `./public-api` (exported below),

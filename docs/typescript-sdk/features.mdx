@@ -202,6 +202,50 @@ NLMS AEC adds CPU work proportional to `filterTaps × frameSamples` per inbound 
 This is a lightweight time-domain AEC, not a drop-in replacement for production-grade DSP (WebRTC's AEC3, Speex AEC). For tight integration with battle-tested DSP, wrap a binding externally and feed it via `audioFilter` instead.
 </Warning>
 
+<Warning>
+**Browser / native only — a no-op by design on PSTN.** The NLMS filter only models an echo path that fits inside its 32 ms window. On a phone call the audio traverses a 250–1500 ms carrier jitter buffer + loop, so the round-trip echo lands far outside that window and the filter passes the frame through unchanged. PSTN line echo is already handled by the carrier (ITU-T G.168) plus the caller's own device, so `echoCancellation` should stay `false` on Twilio / Telnyx / Plivo — enable it only for browser/WebRTC or native-mobile deployments where Patter owns the mic-and-speaker path end-to-end. The SDK logs a one-shot warning if you enable it on a PSTN carrier.
+</Warning>
+
+## Inbound Audio Front-End (High-Pass & AGC)
+
+Two opt-in, provider-agnostic stages clean up the caller audio before it reaches VAD and STT — they run once per frame regardless of which STT you choose, and both fail open (a stage error degrades to passthrough, never drops the call). The full inbound order is `high-pass → resample → AEC → noise suppression → AGC → VAD → STT`.
+
+```ts
+const agent = phone.agent({
+  stt: deepgram(),
+  llm: anthropic(),
+  tts: elevenlabs({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  highPassHz: 100,   // strip DC / mains hum / rumble below 100 Hz
+  agc: true,         // normalise caller level toward the target RMS
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `highPassHz` | `number` | `undefined` | High-pass / DC-block cutoff in Hz (typical 80–120). Runs as the **first** stage, before AEC, removing DC offset, mains hum (50/60 Hz) and handling rumble that otherwise bias the echo canceller and inflate the VAD energy estimate. |
+| `agc` | `boolean \| AgcConfig` | `false` | Speech-selective automatic gain control. Runs **after** noise suppression and **before** VAD/STT, normalising the caller's level toward a target RMS to cut word-error rate on quiet / variable-distance talkers. `true` uses defaults; pass an `AgcConfig` to tune. |
+
+The AGC is **speech-selective** — gain is only driven up on speech frames, so the quiet gaps between words are never amplified into a hiss — and **peak-limited** so an aggressive boost never clips:
+
+```ts
+const agent = phone.agent({
+  // ...
+  agc: {
+    targetRmsDbfs: -18,    // desired output level
+    maxGainDb: 30,         // never amplify the noise floor by more than this
+    speechFloorDbfs: -45,  // frames below this are treated as non-speech
+    attackMs: 10,          // fast gain reduction when the talker gets loud
+    releaseMs: 200,        // slow gain increase when the talker gets quiet
+    limiterCeiling: 0.99,  // peak ceiling as a fraction of full scale
+  },
+});
+```
+
+<Note>
+Both stages are pure DSP and cost well under 1 % of one core. They are pipeline-mode only — Realtime / ConvAI providers own their own inbound audio path.
+</Note>
+
 ## Aggressive First-Flush (Low-Latency)
 
 In **pipeline mode**, the sentence chunker normally waits for a hard sentence terminator (`.`, `!`, `?`, etc.) before emitting a chunk to TTS. With `aggressiveFirstFlush: true` on `phone.agent({ ... })`, the chunker emits the **first clause** of each response on a soft punctuation boundary (`,`, em-dash `—`, en-dash `–`) once the buffer reaches ~40 characters.
