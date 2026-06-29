@@ -353,7 +353,9 @@ async def plivo_stream_bridge(
 
     stream_id: str | None = None
     call_id_actual: str = ""
-    conversation_history: deque[dict] = deque(maxlen=200)
+    conversation_history: deque[dict] = deque(
+        maxlen=getattr(agent, "max_history", 200) or 200
+    )
     transcript_entries: deque[dict] = deque(maxlen=200)
 
     handler: (

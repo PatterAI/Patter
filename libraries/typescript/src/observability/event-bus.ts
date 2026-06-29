@@ -26,6 +26,10 @@ export type PatterEventType =
   | 'llm_chunk'
   | 'tts_chunk'
   | 'tool_call_started'
+  // Per-turn estimated prompt size (chars/4 token unit) recorded before LLM
+  // dispatch. Payload: ``{ callId: string; tokens: number }``. Mirrors the
+  // Python ``context_tokens`` emit.
+  | 'context_tokens'
   // Pause-and-resume (bargeInMode: 'pause_resume'): a pause that no
   // transcript confirmed resumed from the unheard tail. Payload:
   // ``{ resumedSentences: number }``. Mirrors the Python emit.

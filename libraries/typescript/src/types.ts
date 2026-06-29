@@ -57,6 +57,38 @@ export interface TTSConfig {
   options?: Record<string, unknown>;
 }
 
+/**
+ * Opt-in token-aware history compaction for pipeline mode (built-in LLM loop).
+ *
+ * When set on {@link AgentOptions.compaction}, the loop summarizes the OLDEST
+ * turns of a long call into a rolling summary once the estimated prompt size
+ * crosses {@link triggerTokens}, keeping the most recent {@link keepLastTurns}
+ * turns verbatim. The summary is generated ASYNCHRONOUSLY (a background task
+ * using the agent's own LLM) so it never adds latency to the live turn, and it
+ * replaces the summarized turns in the working history — bounding the context
+ * sent to the model and avoiding a silent `context_length_exceeded` while
+ * preserving facts/decisions stated in earlier turns.
+ *
+ * All thresholds are estimates in the canonical OpenAI `chars / 4` token unit
+ * (the same baseline the SDK uses for fallback billing) — no extra tokenizer
+ * dependency is pulled in. Omitting `compaction` (the default) keeps today's
+ * plain FIFO history (see {@link AgentOptions.maxHistory}).
+ *
+ * Mirrors Python `CompactionConfig`.
+ */
+export interface CompactionConfig {
+  /** Estimated-token size of the summarizable history (old turns + prior
+   * summary) at or above which a compaction pass triggers. Default 8000. */
+  readonly triggerTokens?: number;
+  /** Soft ceiling (estimated tokens) the rolling summary aims to stay under —
+   * passed to the summarizer prompt as guidance. Default 3000. */
+  readonly targetTokens?: number;
+  /** Number of most-recent turns kept VERBATIM (never summarized). A "turn" is
+   * approximated as a user+assistant pair, so the loop keeps the last
+   * `keepLastTurns * 2` history entries untouched. Default 4 (minimum 1). */
+  readonly keepLastTurns?: number;
+}
+
 /** Single-turn message handler — receives the user's transcript, returns the agent's reply. */
 export type MessageHandler = (msg: IncomingMessage) => Promise<string>;
 /** Generic call-lifecycle callback (start/end/transcript/metrics). */
@@ -889,6 +921,29 @@ export interface AgentOptions {
    * Mirrors Python ``preemptive_min_stable_ms``.
    */
   readonly preemptiveMinStableMs?: number;
+  /**
+   * Maximum number of conversation-history entries retained in the per-call
+   * working memory (FIFO ring). Was hard-coded to 200; exposed here so very
+   * long calls or low-context models can tune it. Pipeline mode only; the
+   * dashboard transcript log is independent. Default 200 — byte-identical to
+   * prior behaviour. Mirrors Python `Agent.max_history`.
+   */
+  readonly maxHistory?: number;
+  /**
+   * Opt-in token-aware history compaction (pipeline mode, built-in LLM loop
+   * only). Omitted (default) keeps the plain FIFO ring with no summarization.
+   * See {@link CompactionConfig}. Mirrors Python `Agent.compaction`.
+   */
+  readonly compaction?: CompactionConfig;
+  /**
+   * Opt-in estimated-token budget for the assembled prompt (system + summary +
+   * history + user). When set, the built-in LLM loop logs a WARNING the first
+   * time a turn's estimated context crosses ~75% of this budget, so operators
+   * get an early signal before a model's hard context limit is hit. The
+   * `context_tokens` metric is recorded regardless. Omitted (default) disables
+   * the warning. Pipeline mode only. Mirrors Python `Agent.context_token_budget`.
+   */
+  readonly contextTokenBudget?: number;
   /**
    * Input noise reduction for speakerphone / conference audio (OpenAI
    * Realtime mode only). `undefined` (default) omits the field entirely

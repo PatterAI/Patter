@@ -2,6 +2,33 @@
 
 ### Added
 
+- **Pipeline mode: prompt token-counting + opt-in token-aware history
+  compaction.** The built-in LLM loop now estimates the assembled prompt size
+  (system + rolling summary + history + user, in the canonical `chars / 4`
+  token unit) before every dispatch and records it as a new `context_tokens`
+  field on `CallMetrics` (peak across the call) — so dashboards can chart
+  context growth. A new optional `contextTokenBudget` / `context_token_budget`
+  on the agent makes the loop log a one-shot WARNING when a turn's estimated
+  context crosses ~75% of the budget, an early signal before a model's hard
+  context limit triggers a silent `context_length_exceeded`. Built on top of
+  that, a new optional `compaction` config (`CompactionConfig` with
+  `triggerTokens` / `targetTokens` / `keepLastTurns`) enables a hybrid rolling
+  summarizer: once the summarizable portion of the history crosses
+  `triggerTokens`, the oldest turns are folded into a summary **asynchronously
+  in the background** (using the agent's own LLM, so no turn latency is added)
+  while the most recent `keepLastTurns` turns stay verbatim; the summarized
+  turns are pruned from the working history and the summary is prepended as a
+  system message on subsequent prompts, keeping long calls bounded without
+  losing facts stated early. The previously hard-coded 200-entry history ring
+  is now tunable via `maxHistory` / `max_history`. All four knobs are opt-in
+  with defaults that preserve today's behaviour exactly (no compaction, no
+  warning, 200-entry ring). Pipeline mode only.
+  TS: `libraries/typescript/src/compaction.ts` (new), `types.ts`, `llm-loop.ts`,
+  `metrics.ts`, `stream-handler.ts`, `handler-utils.ts`,
+  `observability/event-bus.ts`, `index.ts`. Python mirror:
+  `libraries/python/getpatter/services/compaction.py` (new), `models.py`,
+  `services/llm_loop.py`, `services/metrics.py`, `stream_handler.py`,
+  `client.py`, `telephony/twilio.py`, `telephony/plivo.py`, `__init__.py`.
 - **OpenAI Realtime: `transcriptionLanguage` option on both engine markers.**
   `OpenAIRealtime` / `OpenAIRealtime2` (TS) and `engines.openai_realtime` /
   `engines.openai_realtime_2` (Python) now accept an optional ISO-639-1

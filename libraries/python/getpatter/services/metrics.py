@@ -187,6 +187,13 @@ class CallMetricsAccumulator:
         self._preemptive_hits: int = 0
         self._preemptive_misses: int = 0
 
+        # --- Context-size tracking (pipeline mode, built-in LLM loop) ---
+        # Peak estimated prompt size (chars/4 token unit) observed across the
+        # call. Recorded by ``LLMLoop.run`` once per turn before dispatch.
+        # Surfaced on the final CallMetrics as ``context_tokens``. Parity with
+        # TS ``_maxContextTokens``.
+        self._max_context_tokens: int = 0
+
     # ---- EventBus attachment ----
 
     def attach_event_bus(self, bus: "EventBus") -> None:
@@ -786,6 +793,26 @@ class CallMetricsAccumulator:
         speculation, replaced by a newer interim, or buffer overflow)."""
         self._preemptive_misses += 1
 
+    def record_context_tokens(self, tokens: int) -> None:
+        """Record the estimated prompt size for the current turn.
+
+        Tracks the per-call PEAK (the largest single-turn prompt seen) and
+        emits a ``context_tokens`` event on the bus. Called once per turn by
+        ``LLMLoop.run`` before dispatch. Parity with TS
+        ``recordContextTokens``.
+        """
+        if tokens > self._max_context_tokens:
+            self._max_context_tokens = tokens
+        if self._event_bus is not None:
+            self._event_bus.emit(
+                "context_tokens", {"call_id": self.call_id, "tokens": tokens}
+            )
+
+    @property
+    def max_context_tokens(self) -> int:
+        """Peak estimated prompt size (chars/4 token unit) seen this call."""
+        return self._max_context_tokens
+
     def set_actual_telephony_cost(self, cost: float) -> None:
         """Set the actual telephony cost from the provider API (post-call).
 
@@ -848,6 +875,7 @@ class CallMetricsAccumulator:
             error_code=self._error_code,
             preemptive_hits=self._preemptive_hits,
             preemptive_misses=self._preemptive_misses,
+            context_tokens=self._max_context_tokens,
         )
 
         if self._event_bus is not None:
@@ -1028,11 +1056,7 @@ class CallMetricsAccumulator:
         # true — when record_llm_first_token never fired (non-streaming
         # on_message, custom handlers) the flagship SLO metric silently
         # EXCLUDED the entire LLM segment. TS already leaves it undefined.
-        if (
-            endpoint_ms is not None
-            and self._llm_first_token is not None
-            and tts_ms > 0
-        ):
+        if endpoint_ms is not None and self._llm_first_token is not None and tts_ms > 0:
             agent_response_ms = round(endpoint_ms + llm_ttft_ms + tts_ms, 1)
 
         # Post-barge-in anchor hygiene: when the current turn began within

@@ -726,6 +726,23 @@ class Agent:
     # for speculation only once it has remained unchanged for this long.
     # Only consulted when ``preemptive_generation=True``. Default 300.
     preemptive_min_stable_ms: int = 300
+    # Maximum number of conversation-history entries retained in the per-call
+    # working memory (FIFO ring). Was hard-coded to 200; exposed here so very
+    # long calls or low-context models can tune it. Pipeline mode only; the
+    # dashboard transcript log is independent and always retains its own cap.
+    # Default 200 — byte-identical to prior behaviour.
+    max_history: int = 200
+    # Opt-in token-aware history compaction (pipeline mode, built-in LLM loop
+    # only). ``None`` (default) keeps the plain FIFO ring with no
+    # summarization. See :class:`CompactionConfig`.
+    compaction: "CompactionConfig | None" = None
+    # Opt-in estimated-token budget for the assembled prompt (system + summary
+    # + history + user). When set, the built-in LLM loop logs a WARNING the
+    # first time a turn's estimated context crosses ~75% of this budget, so
+    # operators get an early signal before a model's hard context limit is hit.
+    # The ``context_tokens`` metric is always recorded regardless. ``None``
+    # (default) disables the warning. Pipeline mode only.
+    context_token_budget: int | None = None
 
 
 @dataclass(frozen=True)
@@ -820,6 +837,40 @@ class TTSConfig:
         if self.options:
             out["options"] = dict(self.options)
         return out
+
+
+@dataclass(frozen=True)
+class CompactionConfig:
+    """Opt-in token-aware history compaction for pipeline mode.
+
+    When set on :class:`Agent`, the built-in LLM loop summarizes the OLDEST
+    turns of a long call into a rolling summary once the estimated prompt size
+    crosses ``trigger_tokens``, keeping the most recent ``keep_last_turns``
+    turns verbatim. The summary is generated ASYNCHRONOUSLY (a background task
+    using the agent's own LLM) so it never adds latency to the live turn, and
+    it replaces the summarized turns in the working history. This bounds the
+    context sent to the model on long calls, avoiding a silent
+    ``context_length_exceeded`` while preserving the facts/decisions stated in
+    earlier turns.
+
+    All thresholds are estimates in the canonical OpenAI ``chars / 4`` token
+    unit (the same baseline the SDK uses for fallback billing) — no extra
+    tokenizer dependency is pulled in.
+
+    ``None`` on the agent (the default) keeps today's behaviour: the history
+    is a plain FIFO ring (see ``max_history``) with no summarization.
+    """
+
+    # Estimated-token size of the summarizable history (old turns + prior
+    # summary) at or above which a compaction pass is triggered.
+    trigger_tokens: int = 8000
+    # Soft ceiling (estimated tokens) the rolling summary aims to stay under —
+    # passed to the summarizer prompt as guidance.
+    target_tokens: int = 3000
+    # Number of most-recent turns kept VERBATIM (never summarized). A "turn"
+    # is approximated as a user+assistant message pair, so the loop keeps the
+    # last ``keep_last_turns * 2`` history entries untouched. Minimum 1.
+    keep_last_turns: int = 4
 
 
 @dataclass(frozen=True)
@@ -938,6 +989,12 @@ class CallMetrics:
     # overflow) — i.e. wasted LLM/TTS spend.
     preemptive_hits: int = 0
     preemptive_misses: int = 0
+    # Peak estimated prompt size (system + rolling summary + history + user, in
+    # the canonical ``chars / 4`` token unit) observed across the call's turns.
+    # Always populated in pipeline mode (built-in LLM loop); ``0`` when the
+    # loop never ran (Realtime / ConvAI / custom ``on_message``). Surfaced so
+    # dashboards can chart context growth and validate compaction.
+    context_tokens: int = 0
 
 
 # Carrier-agnostic terminal outcomes for an outbound call. ``answered`` means a

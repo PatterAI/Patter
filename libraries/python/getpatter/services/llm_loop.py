@@ -44,6 +44,11 @@ logger = logging.getLogger("getpatter")
 # feature) keeps getting just ``call_id`` and is unaffected by the additions.
 _CALL_CONTEXT_STREAM_KWARGS = ("call_id", "caller", "callee")
 
+# Fraction of ``context_token_budget`` at which the over-budget WARNING fires
+# (once per call). 0.75 leaves headroom to react before a model's hard context
+# limit triggers a silent ``context_length_exceeded``. Parity with TS.
+_CONTEXT_WARN_RATIO = 0.75
+
 # Per-provider-TYPE memo of which call-context kwargs ``stream`` accepts.
 # Built-in providers declare ``call_id`` (or ``**kwargs``) and hit the fast
 # path after the first call; a user's minimal custom provider whose ``stream``
@@ -906,6 +911,7 @@ class LLMLoop:
         event_bus=None,
         disable_phone_preamble: bool = False,
         on_tool_call: (Callable[[str, dict, Any], Awaitable[None]] | None) = None,
+        context_token_budget: int | None = None,
     ) -> None:
         if llm_provider is not None:
             self._provider = llm_provider
@@ -951,6 +957,15 @@ class LLMLoop:
         # — keeps record_llm_usage's public signature unchanged.
         self._usage_missing_count = 0
         self._logged_usage_fallback = False
+
+        # --- Context token-counting + compaction support ---
+        # Rolling summary prepended to every prompt (set by the StreamHandler's
+        # ContextCompactor when it folds old turns away). "" == no summary.
+        self._context_summary: str = ""
+        # Optional estimated-token budget for the warning (None == no warning).
+        self._context_token_budget = context_token_budget
+        # One-shot guard so the over-budget warning logs once per call.
+        self._logged_context_warning = False
 
         # Build OpenAI-format tool definitions (without handler/webhook_url)
         self._openai_tools: list[dict] | None = None
@@ -1027,6 +1042,52 @@ class LLMLoop:
         """
         self._on_tool_call = callback
 
+    def set_context_summary(self, summary: str) -> None:
+        """Set the rolling conversation summary prepended to every prompt.
+
+        Wired by :class:`StreamHandler` after a :class:`ContextCompactor`
+        compaction folds older turns into a summary. ``_build_messages``
+        inserts it as a system message right after the main system prompt.
+        Mirrors TS ``LLMLoop.setContextSummary``.
+        """
+        self._context_summary = summary or ""
+
+    async def summarize(
+        self, prior_summary: str, old_messages: list[dict], target_tokens: int
+    ) -> str:
+        """Summarize ``old_messages`` (folding ``prior_summary``) via the agent LLM.
+
+        Runs a single non-tool completion against the configured provider and
+        returns the collected text. Used as the default summarizer for
+        :class:`ContextCompactor`. Mirrors TS ``LLMLoop.summarize``.
+        """
+        from getpatter.services.compaction import _format_old_messages
+
+        transcript = _format_old_messages(old_messages)
+        system = (
+            "You are a conversation summarizer for a live phone call. Produce a "
+            "concise summary that PRESERVES every fact, name, number, date, "
+            "decision, and unresolved question stated so far — this summary will "
+            "REPLACE the older turns in the model's context, so anything omitted "
+            "is lost. Write in compact note form, third person. Aim to stay "
+            f"under roughly {max(1, target_tokens)} tokens."
+        )
+        user_parts: list[str] = []
+        if prior_summary:
+            user_parts.append(f"Existing summary:\n{prior_summary}")
+        user_parts.append(f"New conversation turns to fold in:\n{transcript}")
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ]
+        parts: list[str] = []
+        async for chunk in self._provider.stream(messages, None):
+            if chunk.get("type") == "text":
+                content = chunk.get("content", "")
+                if content:
+                    parts.append(content)
+        return "".join(parts).strip()
+
     async def run(
         self,
         user_text: str,
@@ -1079,6 +1140,38 @@ class LLMLoop:
         )
         if hook_executor is not None and hook_ctx is not None:
             messages = await hook_executor.run_before_llm(messages, hook_ctx)
+
+        # Token counting: estimate the assembled prompt size (system + rolling
+        # summary + history + user) BEFORE dispatch and record it as the
+        # ``context_tokens`` metric. When a budget is configured, warn once per
+        # call as it approaches the model's context limit — the measurable
+        # prerequisite for compaction. Always char/4 (no extra tokenizer dep).
+        if self._metrics is not None and hasattr(
+            self._metrics, "record_context_tokens"
+        ):
+            from getpatter.services.compaction import estimate_messages_tokens
+
+            context_tokens = estimate_messages_tokens(messages)
+            self._metrics.record_context_tokens(context_tokens)
+            # ``getattr`` defaults keep test doubles that build LLMLoop via
+            # ``__new__`` (bypassing ``__init__``) working.
+            budget = getattr(self, "_context_token_budget", None)
+            if (
+                budget is not None
+                and budget > 0
+                and not getattr(self, "_logged_context_warning", False)
+                and context_tokens >= budget * _CONTEXT_WARN_RATIO
+            ):
+                self._logged_context_warning = True
+                logger.warning(
+                    "context_tokens_high tokens=%d budget=%d pct=%d%% "
+                    "(approaching model context limit; enable Agent.compaction "
+                    "to bound long-call context)",
+                    context_tokens,
+                    budget,
+                    int(100 * context_tokens / budget),
+                )
+
         # Accumulate yielded text across iterations for after_llm hook.
         all_emitted_text: list[str] = []
 
@@ -1384,10 +1477,29 @@ class LLMLoop:
         return json.dumps({"error": f"No executor available for tool '{tool_name}'"})
 
     def _build_messages(self, history: list[dict], user_text: str) -> list[dict]:
-        """Build OpenAI messages array from conversation history."""
+        """Build OpenAI messages array from conversation history.
+
+        When a rolling compaction summary is set (see
+        :meth:`set_context_summary`), it is inserted as a system message right
+        after the main system prompt so the model still "remembers" the
+        summarized older turns that were pruned from ``history``.
+        """
         messages: list[dict] = [
             {"role": "system", "content": self._system_prompt},
         ]
+        # ``getattr`` default keeps test doubles that build LLMLoop via
+        # ``__new__`` (bypassing ``__init__``) working without the new field.
+        context_summary = getattr(self, "_context_summary", "")
+        if context_summary:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Summary of earlier conversation (older turns have been "
+                        "condensed):\n" + context_summary
+                    ),
+                }
+            )
         for entry in history:
             role = entry.get("role", "user")
             text = entry.get("text", "")
