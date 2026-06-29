@@ -2,6 +2,20 @@
 
 ### Added
 
+- **TTS providers declare their output format; carrier-native μ-law passthrough
+  generalised.** Pipeline TTS adapters can now expose `sourceAudioFormat()`
+  (TS) / `source_audio_format()` (Py) returning `{ encoding, sampleRate }`, and
+  Cartesia gained an `encoding` option (`pcm_s16le` default, `pcm_mulaw` for
+  carrier-native output). A new single source of truth (`audio/format.ts` /
+  `getpatter/audio/format.py`) maps each carrier to its wire format (μ-law
+  8 kHz on Twilio/Telnyx/Plivo) so the pipeline picks passthrough when a
+  provider already emits the wire codec — zero resample, zero re-encode. Opt-in
+  and backward compatible: adapters that declare nothing keep the legacy
+  PCM16 @ 16 kHz path. `libraries/typescript/src/audio/format.ts` (new),
+  `providers/cartesia-tts.ts`, `providers/openai-tts.ts`, `tts/cartesia.ts`.
+  Python mirror: `getpatter/audio/format.py` (new), `providers/cartesia_tts.py`,
+  `providers/openai_tts.py`, `tts/cartesia.py`.
+
 - **OpenAI Realtime: `transcriptionLanguage` option on both engine markers.**
   `OpenAIRealtime` / `OpenAIRealtime2` (TS) and `engines.openai_realtime` /
   `engines.openai_realtime_2` (Python) now accept an optional ISO-639-1
@@ -19,6 +33,22 @@
   `models.py`, `stream_handler.py`.
 
 ### Fixed
+
+- **Chipmunk / aliasing on pipeline TTS at non-16 kHz rates.** The outbound
+  sender assumed every TTS source was PCM16 @ 16 kHz and ran a hardcoded
+  16 kHz → 8 kHz decimator before μ-law encoding. A provider configured for any
+  other rate (e.g. `CartesiaTTS({ sampleRate: 8000 })` on Twilio) was decimated
+  *again* and played back at ~2× pitch ("chipmunk"); the 16 kHz default left an
+  aliasing hiss from the gentle 5-tap decimator. The sender now reads the
+  provider's **declared** output rate and resamples from the real rate to the
+  carrier's 8 kHz wire — correct pitch and duration for 8 k / 16 k / 22.05 k /
+  24 k / 44.1 k sources, with an anti-alias FIR low-pass on the downsample
+  (< ~1 ms added latency). `CartesiaTTS.forTwilio()` / `forTelnyx()` now emit
+  μ-law 8 kHz natively (bit-clean passthrough) instead of the broken fixed-rate
+  workaround. `libraries/typescript/src/audio/transcoding.ts` (new
+  `RateAwareResampler`), `stream-handler.ts` (`configureOutboundAudio`).
+  Python mirror: `getpatter/stream_handler.py` (`PipelineStreamHandler.start`),
+  `telephony/{twilio,telnyx,plivo}.py` (new `AudioSender.set_source_format`).
 
 - **OpenAI Realtime 2: raspy / crackly agent voice on telephony.** The GA
   adapter decimated `gpt-realtime-2`'s 24 kHz output down to mulaw 8 kHz through

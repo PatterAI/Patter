@@ -101,6 +101,18 @@ class OpenAITTS(TTSProvider):
     def __repr__(self) -> str:
         return f"OpenAITTS(model={self.model!r}, voice={self.voice!r})"
 
+    def source_audio_format(self) -> "AudioFormat":
+        """Declare the audio format this adapter emits. OpenAI returns 24 kHz
+        PCM16 which this adapter resamples internally to ``target_sample_rate``
+        (16 kHz default, 8 kHz when configured). The pipeline sender reads this
+        so it resamples from the REAL output rate rather than assuming 16 kHz.
+        """
+        from getpatter.audio.format import AudioFormat
+
+        return AudioFormat(
+            encoding="pcm_s16le", sample_rate=int(self.target_sample_rate)
+        )
+
     def _record_synthesis_cost(self, text: str) -> None:
         """Emit ``patter.cost.tts_chars`` for the synthesised text."""
         try:

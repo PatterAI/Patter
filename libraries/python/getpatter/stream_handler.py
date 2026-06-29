@@ -599,6 +599,22 @@ class AudioSender(ABC):
         """
         return None
 
+    def set_source_format(self, encoding: str, sample_rate: int) -> None:
+        """Declare the format the pipeline TTS adapter emits so the sender can
+        transcode to the carrier wire from the REAL rate — not a hardcoded
+        16 kHz assumption.
+
+        - ``encoding == "mulaw"`` (and ``sample_rate == 8000``) → the bytes are
+          already the carrier wire codec, so the sender switches to passthrough.
+        - otherwise → rebuild the resampler for ``sample_rate`` -> 8 kHz.
+
+        Default is a no-op for senders that never transcode (e.g. those built
+        with ``input_is_mulaw_8k=True``). Subclasses that resample
+        (Twilio/Telnyx/Plivo) override this. Parity with TS
+        ``StreamHandler.configureOutboundAudio``.
+        """
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -3525,25 +3541,44 @@ class PipelineStreamHandler(StreamHandler):
                     "TTS set_telephony_carrier failed; using construction-time format",
                     exc_info=True,
                 )
-        # Re-evaluate after set_telephony_carrier so the _encode_pipeline_audio
-        # fast path is enabled for the current carrier when the adapter
-        # auto-flipped (or the user constructed with a native format).
-        # Parity with TS ``StreamHandler.ttsOutputFormatNativeForCarrier``.
-        self._tts_output_format_native_for_carrier = (
-            self._is_tts_output_format_native_for_carrier()
+        # Resolve the TTS adapter's DECLARED output format and configure the
+        # outbound audio path (mu-law passthrough vs rate-aware resample) from
+        # it — no fixed 16 kHz source assumption. The carrier wire is mu-law
+        # 8 kHz on every supported carrier. Parity with TS
+        # ``StreamHandler.configureOutboundAudio``.
+        from getpatter.audio.format import (
+            CARRIER_WIRE_FORMAT,
+            formats_match,
+            resolve_tts_source_format,
         )
+
+        carrier = "twilio" if self._for_twilio else "telnyx"
+        wire = CARRIER_WIRE_FORMAT.get(carrier, CARRIER_WIRE_FORMAT["twilio"])
+        source = resolve_tts_source_format(self._tts)
+        self._tts_output_format_native_for_carrier = formats_match(source, wire)
+        # Hand the declared source format to the sender so it resamples from the
+        # REAL rate (or passes mu-law straight through). Senders that never
+        # transcode (``input_is_mulaw_8k=True`` at construction) no-op this.
+        if hasattr(self.audio_sender, "set_source_format"):
+            try:
+                self.audio_sender.set_source_format(source.encoding, source.sample_rate)
+            except Exception:  # pragma: no cover - defensive; sender bug
+                logger.debug("audio_sender.set_source_format failed", exc_info=True)
         if self._tts_output_format_native_for_carrier:
             logger.debug(
-                "TTS outputFormat matches %s wire codec — bypassing client-side transcode",
-                "twilio" if self._for_twilio else "telnyx",
+                "TTS output (%s %d Hz) matches %s wire codec — bypassing "
+                "client-side transcode",
+                source.encoding,
+                source.sample_rate,
+                carrier,
             )
-            # Flip the audio sender into pass-through mode so it stops
-            # transcoding (16 kHz PCM → mulaw) bytes that are already in
-            # the carrier's wire format. Mirrors the ConvAI handler's
-            # ``_native_mulaw_8k`` fast-path and TS ``encodePipelineAudio``
-            # bypass. Parity with TS ``StreamHandler.ttsOutputFormatNativeForCarrier``.
-            if hasattr(self.audio_sender, "_input_is_mulaw_8k"):
-                self.audio_sender._input_is_mulaw_8k = True  # type: ignore[attr-defined]
+        else:
+            logger.debug(
+                "Outbound audio: resample %d Hz -> %d Hz then mu-law encode for %s",
+                source.sample_rate,
+                wire.sample_rate,
+                carrier,
+            )
 
         if self._stt is None:
             logger.warning("Pipeline mode: no STT configured")

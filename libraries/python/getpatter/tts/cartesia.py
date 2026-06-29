@@ -36,10 +36,9 @@ class TTS(_CartesiaTTS):
 
     Telephony optimization
     ----------------------
-    Use :meth:`for_twilio` (PCM @ 16 kHz (the pipeline decimates to the 8 kHz wire itself), skipping the SDK-side
-    16 kHz → 16 kHz (the pipeline decimates to the 8 kHz wire itself) resample before μ-law transcoding) or
-    :meth:`for_telnyx` (PCM @ 16 kHz, native Telnyx default) on phone
-    calls.
+    Use :meth:`for_twilio` or :meth:`for_telnyx` on phone calls. Both emit
+    mu-law @ 8 kHz natively (the carrier wire codec), so the pipeline skips
+    resampling and PCM → mu-law encoding entirely (bit-clean passthrough).
     """
 
     provider_key: ClassVar[str] = "cartesia_tts"
@@ -52,6 +51,7 @@ class TTS(_CartesiaTTS):
         voice: str = "f786b574-daa5-4673-aa0c-cbe3e8534c02",
         language: str = "en",
         sample_rate: int = 16000,
+        encoding: str = "pcm_s16le",
         speed: Optional[str | float] = None,
     ) -> None:
         super().__init__(
@@ -60,6 +60,7 @@ class TTS(_CartesiaTTS):
             voice=voice,
             language=language,
             sample_rate=sample_rate,
+            encoding=encoding,
             speed=speed,
         )
 
@@ -73,19 +74,20 @@ class TTS(_CartesiaTTS):
         language: str = "en",
         speed: Optional[str | float] = None,
     ) -> "TTS":
-        """Pipeline TTS pre-configured for Twilio Media Streams (PCM @ 16 kHz (the pipeline decimates to the 8 kHz wire itself)).
+        """Pipeline TTS pre-configured for Twilio Media Streams.
 
-        Falls back to ``CARTESIA_API_KEY`` from the env when ``api_key``
-        is omitted. See
-        :class:`getpatter.providers.cartesia_tts.CartesiaTTS.for_twilio`
-        for rationale.
+        Emits mu-law @ 8 kHz natively — Twilio's wire codec — so the pipeline
+        passes the bytes straight through (no resample, no PCM → mu-law
+        encode). Falls back to ``CARTESIA_API_KEY`` from the env when
+        ``api_key`` is omitted.
         """
         return cls(
             api_key=_resolve_api_key(api_key),
             model=model,
             voice=voice,
             language=language,
-            sample_rate=16000,
+            sample_rate=8000,
+            encoding="pcm_mulaw",
             speed=speed,
         )
 
@@ -99,18 +101,19 @@ class TTS(_CartesiaTTS):
         language: str = "en",
         speed: Optional[str | float] = None,
     ) -> "TTS":
-        """Pipeline TTS pre-configured for Telnyx (PCM @ 16 kHz).
+        """Pipeline TTS pre-configured for Telnyx bidirectional media.
 
-        Falls back to ``CARTESIA_API_KEY`` from the env when ``api_key``
-        is omitted. See
-        :class:`getpatter.providers.cartesia_tts.CartesiaTTS.for_telnyx`
-        for the trade-off.
+        Emits mu-law @ 8 kHz natively — the SDK pins the Telnyx wire to
+        PCMU/mu-law @ 8 kHz — so audio flows end-to-end with zero resampling
+        or transcoding. Falls back to ``CARTESIA_API_KEY`` from the env when
+        ``api_key`` is omitted.
         """
         return cls(
             api_key=_resolve_api_key(api_key),
             model=model,
             voice=voice,
             language=language,
-            sample_rate=16000,
+            sample_rate=8000,
+            encoding="pcm_mulaw",
             speed=speed,
         )

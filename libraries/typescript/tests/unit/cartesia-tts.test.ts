@@ -81,12 +81,13 @@ describe('Cartesia TTS — model and API version', () => {
 });
 
 /**
- * Telephony sample-rate factories.
+ * Telephony format factories.
  *
- * Cartesia accepts `sample_rate` directly in the request body. Asking for
- * 8 kHz at the source skips the SDK-side 16 kHz → 8 kHz resample step
- * before PCM → μ-law transcoding for Twilio. Telnyx's L16/16000 default
- * already matches the bare-constructor default.
+ * `forTwilio` / `forTelnyx` now request `pcm_mulaw` @ 8 kHz directly — the
+ * carrier wire codec — so the pipeline takes the bit-clean passthrough path
+ * (no resample, no PCM → μ-law encode). The sender reads the declared output
+ * format via `sourceAudioFormat()`, so the old "8 kHz gets decimated again →
+ * chipmunk" failure mode is gone.
  */
 describe('Cartesia TTS — telephony factories', () => {
   const ORIGINAL_FETCH = global.fetch;
@@ -105,37 +106,37 @@ describe('Cartesia TTS — telephony factories', () => {
   });
 
   describe('low-level CartesiaTTS', () => {
-    it('forTwilio sets sampleRate to 16000 (the pipeline decimates to 8k itself)', async () => {
-      // 8 kHz here was decimated AGAIN by the sender's fixed 16k→8k
-      // resampler → ~2x-speed chipmunk audio.
+    it('forTwilio emits μ-law @ 8 kHz natively (carrier-wire passthrough)', async () => {
       const tts = CartesiaTTS.forTwilio('ct-key');
       await tts.synthesize('hello');
       const outputFormat = lastBody?.output_format as { sample_rate: number; encoding: string };
-      expect(outputFormat.sample_rate).toBe(16000);
-      // Encoding stays PCM — μ-law transcoding still happens client-side.
-      expect(outputFormat.encoding).toBe('pcm_s16le');
+      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.encoding).toBe('pcm_mulaw');
+      // And the declared source format is the carrier wire codec → passthrough.
+      expect(tts.sourceAudioFormat()).toEqual({ encoding: 'mulaw', sampleRate: 8000 });
     });
 
-    it('forTwilio honours overrides (voice, language, speed) but pins sampleRate', async () => {
+    it('forTwilio honours overrides (voice, language, speed) but pins the μ-law 8 kHz wire', async () => {
       const tts = CartesiaTTS.forTwilio('ct-key', {
         voice: 'custom-voice-id',
         language: 'es',
         speed: 'fast',
-        sampleRate: 24000, // ignored — the factory wins
-      } as unknown as Parameters<typeof CartesiaTTS.forTwilio>[1]);
+      });
       await tts.synthesize('hola');
-      const outputFormat = lastBody?.output_format as { sample_rate: number };
-      expect(outputFormat.sample_rate).toBe(16000);
+      const outputFormat = lastBody?.output_format as { sample_rate: number; encoding: string };
+      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.encoding).toBe('pcm_mulaw');
       const voice = lastBody?.voice as { id: string };
       expect(voice.id).toBe('custom-voice-id');
       expect(lastBody?.language).toBe('es');
     });
 
-    it('forTelnyx sets sampleRate to 16000', async () => {
+    it('forTelnyx emits μ-law @ 8 kHz natively (PCMU wire passthrough)', async () => {
       const tts = CartesiaTTS.forTelnyx('ct-key');
       await tts.synthesize('hello');
-      const outputFormat = lastBody?.output_format as { sample_rate: number };
-      expect(outputFormat.sample_rate).toBe(16000);
+      const outputFormat = lastBody?.output_format as { sample_rate: number; encoding: string };
+      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.encoding).toBe('pcm_mulaw');
     });
 
     it('constructor default unchanged (16000)', async () => {
@@ -147,27 +148,28 @@ describe('Cartesia TTS — telephony factories', () => {
   });
 
   describe('pipeline-mode TTS class', () => {
-    it('forTwilio (options-object form) sets sampleRate to 16000', async () => {
-      // 8 kHz was decimated AGAIN by the sender's fixed 16k→8k resampler
-      // → chipmunk audio; the pipeline expects 16 kHz input.
+    it('forTwilio (options-object form) emits μ-law @ 8 kHz natively', async () => {
       const tts = CartesiaPipelineTTS.forTwilio({ apiKey: 'ct-key' });
       await tts.synthesize('hello');
-      const outputFormat = lastBody?.output_format as { sample_rate: number };
-      expect(outputFormat.sample_rate).toBe(16000);
+      const outputFormat = lastBody?.output_format as { sample_rate: number; encoding: string };
+      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.encoding).toBe('pcm_mulaw');
     });
 
     it('forTwilio (positional form) is parent-compatible', async () => {
       const tts = CartesiaPipelineTTS.forTwilio('ct-key');
       await tts.synthesize('hello');
-      const outputFormat = lastBody?.output_format as { sample_rate: number };
-      expect(outputFormat.sample_rate).toBe(16000);
+      const outputFormat = lastBody?.output_format as { sample_rate: number; encoding: string };
+      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.encoding).toBe('pcm_mulaw');
     });
 
-    it('forTelnyx (options-object form) sets sampleRate to 16000', async () => {
+    it('forTelnyx (options-object form) emits μ-law @ 8 kHz natively', async () => {
       const tts = CartesiaPipelineTTS.forTelnyx({ apiKey: 'ct-key' });
       await tts.synthesize('hello');
-      const outputFormat = lastBody?.output_format as { sample_rate: number };
-      expect(outputFormat.sample_rate).toBe(16000);
+      const outputFormat = lastBody?.output_format as { sample_rate: number; encoding: string };
+      expect(outputFormat.sample_rate).toBe(8000);
+      expect(outputFormat.encoding).toBe('pcm_mulaw');
     });
 
     it('forTwilio falls back to CARTESIA_API_KEY env var', async () => {
@@ -177,7 +179,7 @@ describe('Cartesia TTS — telephony factories', () => {
         const tts = CartesiaPipelineTTS.forTwilio();
         await tts.synthesize('hello');
         const outputFormat = lastBody?.output_format as { sample_rate: number };
-        expect(outputFormat.sample_rate).toBe(16000);
+        expect(outputFormat.sample_rate).toBe(8000);
       } finally {
         if (prev === undefined) delete process.env.CARTESIA_API_KEY;
         else process.env.CARTESIA_API_KEY = prev;

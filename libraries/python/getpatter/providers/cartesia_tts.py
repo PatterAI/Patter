@@ -103,18 +103,15 @@ class CartesiaTTS(TTSProvider):
     playback, dashboard previews, and 16 kHz pipelines. For real phone
     calls use the carrier-specific factories instead:
 
-    * :meth:`for_twilio` — requests ``sample_rate=16000`` (pipeline rate) from
-      Cartesia. Twilio's media-stream WebSocket expects μ-law @ 8 kHz, so
-      the SDK normally resamples 16 kHz → 8 kHz before doing the PCM →
-      μ-law transcode in ``TwilioAudioSender``. Asking Cartesia for
-      8 kHz PCM at the source skips the resample step (saves ~10–30 ms
-      first-byte plus per-frame CPU and removes a potential aliasing
-      source). The PCM → μ-law transcode still happens client-side.
-    * :meth:`for_telnyx` — requests ``sample_rate=16000``. Telnyx
-      negotiates L16/16000 on its bidirectional media WebSocket, so
-      16 kHz PCM is already the format used end-to-end and no
-      transcoding happens. This is the same as the bare constructor
-      default and exists for API symmetry with the Twilio factory.
+    * :meth:`for_twilio` — emits ``pcm_mulaw`` @ 8 kHz, Twilio's exact wire
+      codec, so the pipeline skips resampling AND PCM -> mu-law encoding
+      (bit-clean passthrough). The sender reads the declared output format
+      via :meth:`source_audio_format` rather than assuming a 16 kHz source,
+      so this no longer chipmunks.
+    * :meth:`for_telnyx` — emits ``pcm_mulaw`` @ 8 kHz. The SDK pins the
+      Telnyx wire to PCMU/mu-law @ 8 kHz, so this flows end-to-end with
+      zero resampling or transcoding — same passthrough win as the Twilio
+      factory.
     """
 
     #: Stable pricing/dashboard key — read by stream-handler/metrics.
@@ -128,6 +125,7 @@ class CartesiaTTS(TTSProvider):
         voice: str = CARTESIA_DEFAULT_VOICE_ID,
         language: str = "en",
         sample_rate: int = 16000,
+        encoding: str = "pcm_s16le",
         speed: Optional[str | float] = None,
         emotion: Optional[str | list[str]] = None,
         volume: Optional[float] = None,
@@ -153,6 +151,7 @@ class CartesiaTTS(TTSProvider):
         self.voice = voice
         self.language = language
         self.sample_rate = sample_rate
+        self.encoding = encoding
         self.speed = speed
         self.emotion = [emotion] if isinstance(emotion, str) else emotion
         self.volume = volume
@@ -180,18 +179,19 @@ class CartesiaTTS(TTSProvider):
     ) -> "CartesiaTTS":
         """Build an instance pre-configured for Twilio Media Streams.
 
-        Emits PCM_S16LE @ 16 kHz — the rate the pipeline's carrier-side
-        encoder expects. The previous ``sample_rate=8000`` shortcut had no
-        consuming hook: the audio sender unconditionally runs its fixed
-        16 kHz → 8 kHz decimator, so 8 kHz input was decimated AGAIN and
-        played back at ~2x speed (chipmunk audio) on every call using this
-        factory. Revisit only if the sender ever learns to read a declared
-        TTS output rate. Original rationale (kept for context): skipping
-        the 16→8 resample saved ~10–30 ms first-
-        byte plus per-frame CPU and removes a potential aliasing source.
+        Emits ``pcm_mulaw`` @ 8 kHz — exactly Twilio's wire codec — so the
+        pipeline takes the passthrough path: zero resampling, zero PCM ->
+        mu-law encoding, bit-clean audio. This generalises the ElevenLabs
+        ``set_telephony_carrier`` mu-law-native trick to Cartesia.
+
+        Previously this requested ``pcm_s16le`` @ 16 kHz because the sender
+        hardcoded a 16 kHz -> 8 kHz decimator; now the sender reads the
+        declared format (:meth:`source_audio_format`) so an 8 kHz mu-law
+        source flows straight to the wire with correct pitch.
         """
         kwargs.pop("sample_rate", None)
-        return cls(api_key=api_key, sample_rate=16000, **kwargs)
+        kwargs.pop("encoding", None)
+        return cls(api_key=api_key, encoding="pcm_mulaw", sample_rate=8000, **kwargs)
 
     @classmethod
     def for_telnyx(
@@ -201,13 +201,27 @@ class CartesiaTTS(TTSProvider):
     ) -> "CartesiaTTS":
         """Build an instance pre-configured for Telnyx bidirectional media.
 
-        Sets ``sample_rate=16000`` to match Telnyx's L16/16000 default
-        codec — audio flows end-to-end with zero resampling or
-        transcoding. This is the same as the bare-constructor default
-        and exists for API symmetry with :meth:`for_twilio`.
+        The SDK's ``streaming_start`` pins the Telnyx wire to PCMU/mu-law @
+        8 kHz, so emitting ``pcm_mulaw`` @ 8 kHz flows end-to-end with zero
+        resampling or transcoding — the same passthrough win as
+        :meth:`for_twilio`.
         """
         kwargs.pop("sample_rate", None)
-        return cls(api_key=api_key, sample_rate=16000, **kwargs)
+        kwargs.pop("encoding", None)
+        return cls(api_key=api_key, encoding="pcm_mulaw", sample_rate=8000, **kwargs)
+
+    def source_audio_format(self) -> "AudioFormat":
+        """Declare the audio format this adapter emits, so the pipeline sender
+        derives the correct resample ratio (or skips it for mu-law passthrough)
+        instead of assuming a fixed 16 kHz source. See ``getpatter.audio.format``.
+        """
+        from getpatter.audio.format import AudioFormat
+
+        if self.encoding == "pcm_mulaw":
+            return AudioFormat(encoding="mulaw", sample_rate=int(self.sample_rate))
+        if self.encoding == "pcm_alaw":
+            return AudioFormat(encoding="alaw", sample_rate=int(self.sample_rate))
+        return AudioFormat(encoding="pcm_s16le", sample_rate=int(self.sample_rate))
 
     def _ensure_session(self) -> "aiohttp.ClientSession":
         if self._session is None:
@@ -224,7 +238,7 @@ class CartesiaTTS(TTSProvider):
             "transcript": text,
             "output_format": {
                 "container": "raw",
-                "encoding": "pcm_s16le",
+                "encoding": self.encoding,
                 "sample_rate": self.sample_rate,
             },
             "language": self.language,

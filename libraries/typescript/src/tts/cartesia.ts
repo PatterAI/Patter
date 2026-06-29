@@ -1,5 +1,5 @@
 /** Cartesia TTS for Patter pipeline mode. */
-import { CartesiaTTS as _CartesiaTTS } from "../providers/cartesia-tts";
+import { CartesiaTTS as _CartesiaTTS, CartesiaTTSEncoding } from "../providers/cartesia-tts";
 
 /** Constructor options for the Cartesia `TTS` adapter. */
 export interface CartesiaTTSOptions {
@@ -9,6 +9,8 @@ export interface CartesiaTTSOptions {
   voice?: string;
   language?: string;
   sampleRate?: number;
+  /** Audio encoding. Default `pcm_s16le`; `pcm_mulaw` @ 8 kHz = carrier-native. */
+  encoding?: CartesiaTTSEncoding;
   speed?: string | number;
   emotion?: string | string[];
   volume?: number;
@@ -16,8 +18,8 @@ export interface CartesiaTTSOptions {
   apiVersion?: string;
 }
 
-/** Options for the carrier-specific factories — same as the constructor minus `sampleRate`. */
-export type CartesiaCarrierOptions = Omit<CartesiaTTSOptions, "sampleRate">;
+/** Options for the carrier-specific factories — same as the constructor minus `sampleRate`/`encoding`. */
+export type CartesiaCarrierOptions = Omit<CartesiaTTSOptions, "sampleRate" | "encoding">;
 
 function resolveApiKey(apiKey: string | undefined): string {
   const key = apiKey ?? process.env.CARTESIA_API_KEY;
@@ -44,10 +46,10 @@ function resolveApiKey(apiKey: string | undefined): string {
  * const tts = new cartesia.TTS({ apiKey: "..." });
  * ```
  *
- * **Telephony** — use {@link TTS.forTwilio} (PCM @ 16 kHz; the pipeline's
- * carrier-side encoder performs the 16 kHz → 8 kHz + μ-law step itself)
- * or {@link TTS.forTelnyx} (PCM @ 16 kHz, native Telnyx default) on
- * phone calls.
+ * **Telephony** — use {@link TTS.forTwilio} or {@link TTS.forTelnyx} on phone
+ * calls. Both emit μ-law @ 8 kHz natively (the carrier wire codec), so the
+ * pipeline skips resampling and PCM → μ-law encoding entirely (bit-clean
+ * passthrough).
  */
 export class TTS extends _CartesiaTTS {
   static readonly providerKey = "cartesia_tts";
@@ -58,34 +60,34 @@ export class TTS extends _CartesiaTTS {
     super(key, rest);
   }
 
-  /** Pipeline TTS pre-configured for Twilio Media Streams (PCM @ 16 kHz — the pipeline decimates to the 8 kHz wire itself; 8 kHz here was decimated AGAIN → chipmunk audio). */
+  /** Pipeline TTS pre-configured for Twilio Media Streams (μ-law @ 8 kHz native — carrier-wire passthrough, no resample/encode). */
   static override forTwilio(opts?: CartesiaCarrierOptions): TTS;
   // Parent-compatible overload — accepts the legacy positional form too.
   static override forTwilio(
     apiKey: string,
-    options?: Omit<CartesiaTTSOptions, "sampleRate">,
+    options?: CartesiaCarrierOptions,
   ): TTS;
   static override forTwilio(
     arg1?: string | CartesiaCarrierOptions,
-    arg2?: Omit<CartesiaTTSOptions, "sampleRate">,
+    arg2?: CartesiaCarrierOptions,
   ): TTS {
     const opts: CartesiaCarrierOptions =
       typeof arg1 === "string" ? { apiKey: arg1, ...(arg2 ?? {}) } : (arg1 ?? {});
-    return new TTS({ ...opts, sampleRate: 16000 });
+    return new TTS({ ...opts, encoding: CartesiaTTSEncoding.PCM_MULAW, sampleRate: 8000 });
   }
 
-  /** Pipeline TTS pre-configured for Telnyx (PCM @ 16 kHz). */
+  /** Pipeline TTS pre-configured for Telnyx (μ-law @ 8 kHz native — PCMU wire passthrough). */
   static override forTelnyx(opts?: CartesiaCarrierOptions): TTS;
   static override forTelnyx(
     apiKey: string,
-    options?: Omit<CartesiaTTSOptions, "sampleRate">,
+    options?: CartesiaCarrierOptions,
   ): TTS;
   static override forTelnyx(
     arg1?: string | CartesiaCarrierOptions,
-    arg2?: Omit<CartesiaTTSOptions, "sampleRate">,
+    arg2?: CartesiaCarrierOptions,
   ): TTS {
     const opts: CartesiaCarrierOptions =
       typeof arg1 === "string" ? { apiKey: arg1, ...(arg2 ?? {}) } : (arg1 ?? {});
-    return new TTS({ ...opts, sampleRate: 16000 });
+    return new TTS({ ...opts, encoding: CartesiaTTSEncoding.PCM_MULAW, sampleRate: 8000 });
   }
 }

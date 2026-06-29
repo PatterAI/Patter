@@ -14,7 +14,13 @@ import { DeepgramSTT } from './providers/deepgram-stt';
 import { createTTS } from './provider-factory';
 import type { STTAdapter, TTSAdapter, STTTranscript } from './provider-factory';
 import { CallMetricsAccumulator } from './metrics';
-import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, createResampler16kTo8k } from './audio/transcoding';
+import { mulawToPcm16, pcm16ToMulaw, StatefulResampler, createResampler8kTo16k, RateAwareResampler } from './audio/transcoding';
+import {
+  resolveTtsSourceFormat,
+  CARRIER_WIRE_FORMAT,
+  formatsMatch,
+  type AudioFormat,
+} from './audio/format';
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager } from './handler-utils';
@@ -1667,7 +1673,17 @@ export class StreamHandler {
   // Per-session stateful resamplers eliminate chunk-boundary discontinuities.
   // Created lazily on first use; reset() on call end.
   private readonly inboundResampler: StatefulResampler = createResampler8kTo16k();
-  private readonly outboundResampler: StatefulResampler = createResampler16kTo8k();
+  // Outbound TTS→carrier resampler. Rate-aware and anti-aliased: rebuilt at
+  // initPipeline from the TTS provider's DECLARED output rate (see
+  // audio/format.ts) so an 8 k / 22.05 k / 24 k / 44.1 k source resamples to
+  // the 8 kHz carrier wire with correct pitch — no fixed 16 kHz assumption.
+  // Defaults to 16k→8k (the historical assumption) until initPipeline runs so
+  // unit suites that exercise encodePipelineAudio without initPipeline behave
+  // exactly as before.
+  private outboundResampler: RateAwareResampler = new RateAwareResampler({
+    srcRate: 16000,
+    dstRate: 8000,
+  });
   /**
    * Inbound audio processing chain: decode (mulaw→PCM16) → stateful 8k→16k
    * resample → AEC near-end → ``agent.audioFilter`` → VAD (slice 1 of the
@@ -2933,34 +2949,52 @@ export class StreamHandler {
   }
 
   /**
-   * Cached result of ``isTtsOutputFormatNativeForCarrier()`` — settled
-   * once at ``initPipeline`` time after ``setTelephonyCarrier`` has run
-   * on the TTS adapter. Stable for the call lifetime: changes to the
-   * adapter's output format mid-call would NOT flip this. ``true`` means
-   * ``encodePipelineAudio`` can take the bypass path.
+   * Cached result of ``configureOutboundAudio()`` — settled once at
+   * ``initPipeline`` time after ``setTelephonyCarrier`` has run on the TTS
+   * adapter. Stable for the call lifetime: changes to the adapter's output
+   * format mid-call would NOT flip this. ``true`` means ``encodePipelineAudio``
+   * can take the bypass path.
    */
   private ttsOutputFormatNativeForCarrier: boolean = false;
 
   /**
-   * Probe whether the TTS adapter is configured to emit bytes already in
-   * the carrier's wire codec. Currently: Twilio expects ``ulaw_8000``,
-   * Telnyx expects ``pcm_16000`` (no client transcode in either case if
-   * matched). Anything else takes the resample-and-encode path.
+   * Configure the outbound TTS → carrier audio path from the provider's
+   * DECLARED output format. This is the single rate-aware decision point:
+   *
+   * - If the TTS already emits the carrier's wire format (μ-law 8 kHz) the
+   *   bytes pass straight through — no resample, no re-encode, bit-clean.
+   * - Otherwise build a {@link RateAwareResampler} from the provider's REAL
+   *   sample rate → the carrier wire rate (8 kHz), so 8 k / 16 k / 22.05 k /
+   *   24 k / 44.1 k sources all play at correct pitch. The old path hardcoded
+   *   a 16 kHz source and chipmunked anything else.
+   *
+   * Settled once at initPipeline; stable for the call lifetime.
    */
-  private isTtsOutputFormatNativeForCarrier(): boolean {
-    if (!this.tts) return false;
-    const fmt = (this.tts as { outputFormat?: string }).outputFormat;
-    if (typeof fmt !== 'string') return false;
+  private configureOutboundAudio(): void {
     const carrier = this.deps.bridge.telephonyProvider;
-    // Every supported carrier wire is μ-law 8 kHz — the SDK's own
-    // ``streaming_start`` pins Telnyx to PCMU (the old 'pcm_16000'
-    // expectation shipped raw PCM16 onto the μ-law wire: static). When the
-    // TTS output is already μ-law the pipeline must bypass the PCM
-    // resample/re-encode path — otherwise the encoded bytes are mangled.
-    if (carrier === 'twilio' || carrier === 'telnyx' || carrier === 'plivo') {
-      return fmt === 'ulaw_8000';
+    const wire: AudioFormat =
+      CARRIER_WIRE_FORMAT[carrier] ?? { encoding: 'mulaw', sampleRate: 8000 };
+    const source = resolveTtsSourceFormat(this.tts);
+
+    if (formatsMatch(source, wire)) {
+      // Provider emits the carrier wire codec directly → passthrough.
+      this.ttsOutputFormatNativeForCarrier = true;
+      getLogger().debug(
+        `TTS output (${source.encoding} ${source.sampleRate} Hz) matches ${carrier} wire codec — bypassing client-side transcode`,
+      );
+      return;
     }
-    return false;
+
+    this.ttsOutputFormatNativeForCarrier = false;
+    // Build a resampler from the REAL declared source rate to the wire rate.
+    this.outboundResampler = new RateAwareResampler({
+      srcRate: source.sampleRate,
+      dstRate: wire.sampleRate,
+    });
+    getLogger().debug(
+      `Outbound audio: resample ${source.sampleRate} Hz → ${wire.sampleRate} Hz ` +
+        `(anti-alias +${this.outboundResampler.antiAliasLatencyMs.toFixed(2)} ms) then μ-law encode for ${carrier}`,
+    );
   }
 
   /**
@@ -3180,15 +3214,11 @@ export class StreamHandler {
           getLogger().debug(`TTS setTelephonyCarrier failed (${label}): ${String(e)}`);
         }
       }
-      // Re-evaluate after setTelephonyCarrier so the encodePipelineAudio
-      // fast path is enabled for the current carrier when the adapter
-      // auto-flipped (or the user constructed with a native format).
-      this.ttsOutputFormatNativeForCarrier = this.isTtsOutputFormatNativeForCarrier();
-      if (this.ttsOutputFormatNativeForCarrier) {
-        getLogger().debug(
-          `TTS outputFormat matches ${this.deps.bridge.telephonyProvider} wire codec — bypassing client-side transcode`,
-        );
-      }
+      // Re-evaluate after setTelephonyCarrier: resolve the TTS provider's
+      // DECLARED output format and configure the outbound audio path
+      // (μ-law passthrough vs rate-aware resample) from it — no fixed-rate
+      // assumption. See audio/format.ts.
+      this.configureOutboundAudio();
     }
 
     if (!this.stt) {
