@@ -2,6 +2,30 @@
 
 ### Added
 
+- **Agent SKILLS — on-demand, progressive-disclosure capabilities the primary
+  agent activates inline (no sub-agent spawn).** New `Skill` type and
+  `agent(skills=[...])` (Python) / `phone.agent({ skills: [...] })` (TS). A
+  `Skill` carries `name`, `description`, on-demand `instructions`, and optional
+  scoped `tools`. At call start Patter injects a built-in `use_skill` tool whose
+  `skill_name` is an *enum* of the skill names — only each skill's name +
+  description (~30-50 tokens) is loaded eagerly (the Anthropic Agent Skills
+  *discovery* layer), NOT the full instructions. When the model calls
+  `use_skill(skill_name=…)` Patter layers that skill's `instructions` into the
+  system prompt and unlocks its `tools` ADDITIVELY — in the SAME agent loop (one
+  iteration, no extra round-trip, so no added latency vs. a real sub-agent). The
+  skill stays active for the rest of the call; re-activation is idempotent, and
+  a `handoff_to` resets the active set to the target agent's skills. Skill tool
+  names are guarded against the reserved built-ins (`transfer_call`, `end_call`,
+  `handoff_to`, `use_skill`), top-level agent tools, and other skills at
+  `agent()` build time. Works in both Realtime (`session.update`) and Pipeline
+  (`update_agent`) modes. Opt-in; default empty — zero behaviour change for
+  existing agents. `Skill` is exported from the package root.
+  `libraries/python/getpatter/models.py` (`Skill`, `Agent.skills`),
+  `tools/skills.py` (new), `stream_handler.py`, `client.py`, `__init__.py`.
+  TypeScript mirror: `libraries/typescript/src/types.ts` (`Skill`,
+  `AgentOptions.skills`), `skills.ts` (new), `stream-handler.ts`, `server.ts`,
+  `client.ts`, `index.ts`.
+
 - **OpenAI Realtime: `transcriptionLanguage` option on both engine markers.**
   `OpenAIRealtime` / `OpenAIRealtime2` (TS) and `engines.openai_realtime` /
   `engines.openai_realtime_2` (Python) now accept an optional ISO-639-1
@@ -19,6 +43,15 @@
   `models.py`, `stream_handler.py`.
 
 ### Fixed
+
+- **Pipeline LLM loop (TypeScript): malformed tool-argument JSON no longer
+  fires the tool with empty arguments.** When the model streamed truncated /
+  invalid JSON for a tool call, the TS loop parsed it as `{}` and executed the
+  handler anyway — a side-effecting tool (transfer, SMS, booking) could fire on
+  an empty payload. It now matches the Python loop: the malformed call is logged
+  and answered with a `role=tool` error envelope (preserving the
+  `tool_call_id`), the handler is skipped, and the model retries with
+  well-formed arguments. `libraries/typescript/src/llm-loop.ts`.
 
 - **OpenAI Realtime 2: raspy / crackly agent voice on telephony.** The GA
   adapter decimated `gpt-realtime-2`'s 24 kHz output down to mulaw 8 kHz through

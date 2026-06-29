@@ -27,6 +27,7 @@ import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
 import { RemoteMessageHandler } from './remote-message';
 import { StreamHandler, sanitizeLogValue, buildHandoffTool } from './stream-handler';
+import { buildUseSkillTool } from './skills';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
 import type {
@@ -586,6 +587,13 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   const handoffNames = agent.handoffs ? Object.keys(agent.handoffs) : [];
   if (handoffNames.length > 0) {
     tools.push(buildHandoffTool(handoffNames));
+  }
+  // Progressive-disclosure SKILLS: advertise the built-in ``use_skill`` tool
+  // (discovery layer — only skill names + descriptions) when the agent
+  // declares skills. Dispatched by the stream handler (see
+  // ``handleUseSkillFunctionCall``). Mirrors the Python Realtime ``start()``.
+  if (agent.skills && agent.skills.length > 0) {
+    tools.push(buildUseSkillTool(agent.skills));
   }
   const isOpenAIEngine = engine && (engine.kind === 'openai_realtime' || engine.kind === 'openai_realtime_2');
   const openaiKey = isOpenAIEngine ? engine.apiKey : (config.openaiKey ?? '');
