@@ -1061,21 +1061,22 @@ export class StreamHandler {
     this.tailGraceActive = false;
     this.speakingStartedAt = Date.now();
     this.suppressedSpeechPending = false;
-    // Stamp ``firstAudioSentAt`` synchronously for EVERY turn so the
-    // ``canBargeIn()`` gate (250ms anti-flicker for PSTN no-AEC) runs in
-    // PARALLEL with LLM TTFT + TTS TTFB rather than starting only after
-    // the first audio chunk reaches the wire. Without this, a turn with
-    // a slow LLM (gpt-4o cold cache ~2 s) is effectively un-interruptible
-    // for the entire LLM window: ``firstAudioSentAt`` stays null, so
-    // ``canBargeIn`` returns false and every VAD ``speech_start`` is
-    // suppressed silently. Previously this fix was firstMessage-only;
-    // promoted to default on 2026-05-11 after the user reported
-    // "barge-in non funziona più" with gpt-4o.
+    // Do NOT stamp ``firstAudioSentAt`` here. The barge-in gate must arm only
+    // once REAL audio has reached the carrier (``markFirstAudioSent`` after a
+    // successful ``bridge.sendAudio``), never at LLM-dispatch time. A turn
+    // whose first token is slower than the no-AEC gate (~500 ms — gpt-4o cold
+    // cache, a pre-first-token Hermes/OpenClaw turn, any slow provider) has
+    // emitted NO audio yet, so there is nothing for the caller to interrupt:
+    // ``firstAudioSentAt`` stays null and ``canBargeIn()`` returns false until
+    // audio flows. Stamping it at dispatch (the 2026-05-11 regression) armed
+    // barge-in over silence — a lagging STT final or a phantom VAD event then
+    // aborted the still-producing LLM turn (``llmAbort.abort()``) before its
+    // first token, and the agent went mute. The protected window now begins at
+    // first real audio, exactly as ``firstAudioSentAt`` documents.
     //
-    // Note: the ``isFirstMessage`` parameter is kept for backward
-    // compatibility with the call site, but no longer changes behaviour.
+    // ``isFirstMessage`` is retained for call-site compatibility but no longer
+    // changes behaviour (the gate is anchored on real audio for every turn).
     void isFirstMessage;
-    this.firstAudioSentAt = Date.now();
     // Fresh turn — drop any stale pre-barge-in buffer from a previous turn
     // so we never replay yesterday's audio to STT.
     this.inboundAudioRing = [];
@@ -3973,6 +3974,16 @@ export class StreamHandler {
       this.endTailGraceForNewTurn();
       return false;
     }
+    // Duplicate/hallucination guard BEFORE the cancel decision: a final that
+    // commitTranscript would drop (the lagging Deepgram speech_final twin of an
+    // already-committed is_final) is not new speech and must not abort the
+    // still-producing turn. Parity with the synchronous handleBargeIn.
+    if (this.bargeInFinalIsDuplicate(transcript)) {
+      getLogger().debug(
+        `Barge-in suppressed: duplicate/hallucinated final (len=${(transcript.text ?? '').length})`,
+      );
+      return false;
+    }
     // Echo guard: when audio is forwarded to STT during TTS (no effective AEC),
     // the agent's own voice can be transcribed and would barge in on itself.
     // Drop transcripts that look like a fragment of what the agent is saying.
@@ -4074,6 +4085,16 @@ export class StreamHandler {
       // Tail-grace transcript = next turn, not a barge-in. End the grace and
       // let the transcript dispatch normally (parity with the async path).
       this.endTailGraceForNewTurn();
+      return false;
+    }
+    // Duplicate/hallucination guard BEFORE the cancel decision: a final that
+    // commitTranscript would drop (the lagging Deepgram speech_final twin of an
+    // already-committed is_final) is not new speech and must not abort the
+    // still-producing turn. Parity with handleBargeInAsync.
+    if (this.bargeInFinalIsDuplicate(transcript)) {
+      getLogger().debug(
+        `Barge-in suppressed: duplicate/hallucinated final (len=${(transcript.text ?? '').length})`,
+      );
       return false;
     }
     // Pause-and-resume final-only gate (parity with handleBargeInAsync).
@@ -4597,6 +4618,40 @@ export class StreamHandler {
     this.lastCommitText = normalised;
     this.lastCommitAt = now;
     return true;
+  }
+
+  /**
+   * Read-only mirror of the ``commitTranscript`` duplicate / hallucination
+   * filters for a FINAL transcript, evaluated WITHOUT consuming the dedup
+   * state. Barge-in is decided before ``commitTranscript`` runs, so a final
+   * that commit would DROP — an STT hallucination, a duplicate of the
+   * just-committed utterance, or the back-to-back near-duplicate Deepgram
+   * re-emits as ``is_final`` then ``speech_final`` for the SAME word — is not
+   * genuinely new speech and must NOT abort the in-flight turn. Returns
+   * ``true`` when the transcript is such a droppable final.
+   *
+   * Interims are never droppable here: they cannot reach ``commitTranscript``
+   * (so they have no dedup twin) and a genuine interim over agent audio is a
+   * real barge-in. Echo is handled by the dedicated ``looksLikeEcho`` guard
+   * already at the top of the barge-in paths, so it is intentionally omitted.
+   */
+  private bargeInFinalIsDuplicate(transcript: {
+    text?: string;
+    isFinal?: boolean;
+    speechFinal?: boolean;
+  }): boolean {
+    if (transcript.isFinal !== true && transcript.speechFinal !== true) {
+      return false;
+    }
+    const normalised = (transcript.text ?? '').trim().toLowerCase();
+    const stripped = normalised.replace(/[.,!?;: ]+$/, '').trim();
+    if (HALLUCINATIONS.has(stripped) || stripped === '') return true;
+    const sinceLastMs = Date.now() - this.lastCommitAt;
+    if (sinceLastMs < 2000 && normalised === this.lastCommitText) return true;
+    if (sinceLastMs < 500 && isNearDuplicate(normalised, this.lastCommitText)) {
+      return true;
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------
