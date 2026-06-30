@@ -127,6 +127,7 @@ from getpatter.llm.openai import LLM as OpenAILLM
 from getpatter.llm.anthropic import LLM as AnthropicLLM
 from getpatter.llm.groq import LLM as GroqLLM
 from getpatter.llm.cerebras import LLM as CerebrasLLM
+from getpatter.llm.inworld import LLM as InworldLLM
 from getpatter.llm.google import LLM as GoogleLLM
 from getpatter.llm.litellm import LLM as LiteLLMLLM
 from getpatter.llm.openai_compatible import (
@@ -504,6 +505,7 @@ __all__ = [
     "AnthropicLLM",
     "GroqLLM",
     "CerebrasLLM",
+    "InworldLLM",
     "GoogleLLM",
     "LiteLLMLLM",
     "OpenAICompatibleLLM",

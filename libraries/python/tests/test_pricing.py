@@ -375,8 +375,19 @@ class TestModelAwareTtsPricing:
 
     def test_inworld_tts_2_default(self):
         pricing = merge_pricing(None)
+        # On-Demand list rate: TTS-2 $25/1M = $0.025/1k chars.
         cost = calculate_tts_cost("inworld", 1000, pricing, model="inworld-tts-2")
-        assert cost == pytest.approx(0.020)
+        assert cost == pytest.approx(0.025)
+
+    def test_inworld_tts_1_5_mini_and_max_rates(self):
+        pricing = merge_pricing(None)
+        # TTS 1.5 Mini $15/1M = $0.015/1k; TTS 1.5 Max $35/1M = $0.035/1k.
+        mini = calculate_tts_cost(
+            "inworld", 1000, pricing, model="inworld-tts-1.5-mini"
+        )
+        mx = calculate_tts_cost("inworld", 1000, pricing, model="inworld-tts-1.5-max")
+        assert mini == pytest.approx(0.015)
+        assert mx == pytest.approx(0.035)
 
 
 class TestPerModelOverrideMerge:

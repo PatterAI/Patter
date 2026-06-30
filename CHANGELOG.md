@@ -2,6 +2,25 @@
 
 ### Added
 
+- **Inworld integration completed: full TTS pricing, a config helper, and an
+  Inworld Realtime Router LLM (OpenAI-compatible) preset.** The Inworld TTS
+  adapter shipped already; this fills in the rest:
+  - **Pricing corrected & completed** (both SDKs) to the On-Demand list rates
+    from https://inworld.ai/pricing (per 1k chars): `inworld-tts-2` $0.025,
+    `inworld-tts-1.5-max` $0.035, and the previously-missing
+    `inworld-tts-1.5-mini` $0.015 (replacing the placeholder rates).
+  - **`providers.inworld()` TTS config helper** in both SDKs; Python's
+    `TTSConfig(provider="inworld")` path now builds the adapter
+    (`_create_tts_from_config`), closing the gap vs the other TTS providers.
+  - **`InworldLLM`** — a thin preset over the OpenAI-compatible LLM provider
+    targeting the Inworld Realtime Router (`https://api.inworld.ai/v1`,
+    `INWORLD_API_KEY`), unlocking 220+ models (OpenAI, Anthropic, Google,
+    Mistral, DeepSeek, Meta, …) behind one key. Uses the distinct
+    `inworld_router` provider key so token-based LLM cost is never confused with
+    the char-based TTS pricing. `getpatter/llm/inworld.py`, `src/llm/inworld.ts`.
+  Note: a standalone Inworld STT provider and the Realtime speech-to-speech
+  engine (WebSocket/WebRTC + JWT) are tracked as separate follow-ups.
+
 - **Inbound audio front-end: opt-in high-pass / DC-block and speech-selective
   AGC, plus inbound sample-rate validation.** The pipeline inbound chain
   (caller → STT) gained the two canonical audio-processing stages it was

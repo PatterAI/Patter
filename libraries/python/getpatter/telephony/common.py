@@ -226,7 +226,25 @@ def _create_tts_from_config(config):
         kwargs = {k: v for k, v in opts.items() if k in allowed}
         return LMNTTTS(api_key=config.api_key, voice=config.voice, **kwargs)
 
+    if provider == "inworld":
+        from getpatter.providers.inworld_tts import InworldTTS  # type: ignore[import]
+
+        allowed = {
+            "model",
+            "language",
+            "audio_encoding",
+            "sample_rate",
+            "bitrate",
+            "temperature",
+            "speaking_rate",
+            "delivery_mode",
+            "base_url",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        # ``api_key`` carries the Base64 ``Authorization: Basic`` token.
+        return InworldTTS(auth_token=config.api_key, voice=config.voice, **kwargs)
+
     raise ValueError(
         f"Unknown TTS provider '{provider}'. "
-        "Supported: elevenlabs, openai, cartesia, rime, lmnt."
+        "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld."
     )
