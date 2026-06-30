@@ -214,12 +214,19 @@ function buildWebhookHandler(
     try {
       const resp = await fetch(url, {
         method: 'POST',
+        // Fail closed on 3xx so a redirect can't bypass the SSRF guard.
+        redirect: 'error',
         headers,
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (!resp.ok) {
         getLogger().warn(`consult tool: orchestrator returned HTTP ${resp.status}`);
+        return GRACEFUL_FALLBACK;
+      }
+      const declaredLen = resp.headers?.get('content-length');
+      if (declaredLen && /^\d+$/.test(declaredLen) && Number(declaredLen) > MAX_RESPONSE_CHARS) {
+        getLogger().warn('consult tool: orchestrator response too large');
         return GRACEFUL_FALLBACK;
       }
       body = (await resp.text()).slice(0, MAX_RESPONSE_CHARS);
@@ -296,6 +303,8 @@ function buildOpenAIHandler(
     try {
       const resp = await fetch(endpoint, {
         method: 'POST',
+        // Fail closed on 3xx so a redirect can't bypass the SSRF guard.
+        redirect: 'error',
         headers: reqHeaders,
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(timeoutMs),
@@ -309,6 +318,11 @@ function buildOpenAIHandler(
       }
       if (!resp.ok) {
         getLogger().warn(`consult tool: openai-compatible returned HTTP ${resp.status}`);
+        return GRACEFUL_FALLBACK;
+      }
+      const declaredLen = resp.headers?.get('content-length');
+      if (declaredLen && /^\d+$/.test(declaredLen) && Number(declaredLen) > MAX_RESPONSE_CHARS) {
+        getLogger().warn('consult tool: openai-compatible response too large');
         return GRACEFUL_FALLBACK;
       }
       const data = (await resp.json()) as {
@@ -424,6 +438,8 @@ export function openclawPostCallNotifier(
     try {
       const resp = await fetch(endpoint, {
         method: 'POST',
+        // Fail closed on 3xx so a redirect can't bypass the SSRF guard.
+        redirect: 'error',
         headers,
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(timeoutMs),

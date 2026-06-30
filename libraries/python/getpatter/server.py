@@ -26,7 +26,11 @@ from getpatter.services.call_log import (
     resolve_log_root,
 )
 from getpatter.ssrf import is_internal_ip, resolve_literal_ip
-from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
+from getpatter.utils.log_sanitize import (
+    mask_phone_number,
+    safe_path_segment,
+    sanitize_log_value,
+)
 
 logger = logging.getLogger("getpatter")
 
@@ -552,9 +556,7 @@ class EmbeddedServer:
 
             from getpatter.audio.call_recorder import LocalCallRecorder
 
-            safe_id = (
-                sanitize_log_value(call_id, max_len=64).replace("/", "_") or "unknown"
-            )
+            safe_id = safe_path_segment(call_id, max_len=64)
             if isinstance(self.local_recording, str):
                 path = Path(self.local_recording).expanduser() / f"{safe_id}.wav"
             else:

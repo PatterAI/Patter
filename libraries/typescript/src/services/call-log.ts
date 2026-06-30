@@ -38,7 +38,7 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getLogger } from '../logger';
-import { sanitizeLogValue, maskPhoneNumber } from '../stream-handler';
+import { sanitizeLogValue, maskPhoneNumber, safePathSegment } from '../stream-handler';
 
 /** Schema version embedded in every metadata/turn/event record. */
 export const SCHEMA_VERSION = '1.0';
@@ -232,7 +232,7 @@ export class CallLogger {
     const year = String(dt.getUTCFullYear()).padStart(4, '0');
     const month = String(dt.getUTCMonth() + 1).padStart(2, '0');
     const day = String(dt.getUTCDate()).padStart(2, '0');
-    const safeId = sanitizeLogValue(callId, 64).replace(/\//g, '_') || 'unknown';
+    const safeId = safePathSegment(callId, 64);
     return path.join(this.root, 'calls', year, month, day, safeId);
   }
 

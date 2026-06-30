@@ -179,6 +179,40 @@
   DNS-rebinding by design (hostnames resolve at request time) — webhook URLs are
   trusted SDK-user config, not caller-supplied.
 
+- **Hardening sweep from a follow-up audit — six parity-drift fixes (a guard
+  present in one SDK but missing/weaker in the other).**
+  - *(TypeScript) Outbound fetches now fail closed on redirects (`redirect: 'error'`).*
+    Every guarded `fetch()` (tool webhook, `on_message`, `consult`, MCP) followed
+    3xx by default, so an attacker-influenced `302 Location: 169.254.169.254`
+    bypassed the SSRF guard (which validated only the first hop) — reaching
+    cloud-metadata / internal services. Python was never affected (httpx
+    `follow_redirects=False`). `llm-loop.ts`, `handler-utils.ts`, `consult.ts`,
+    `remote-message.ts`.
+  - *(TypeScript) Caller DTMF is no longer logged.* Two Telnyx paths logged the
+    raw keypad digit at INFO (`server.ts`); callers enter PINs / card numbers /
+    SSNs via DTMF precisely so they are not transcribed. Now dropped to DEBUG with
+    no value, matching Python.
+  - *Call-id path traversal closed (both SDKs).* The on-disk call-id path segment
+    (recording / call-log dir) stripped only POSIX `/`, letting a forged carrier
+    call id with `\` or `..` escape the directory on Windows. New shared
+    `safe_path_segment` / `safePathSegment` folds every separator and neutralises
+    `..`. `utils/log_sanitize.py`, `stream-handler.ts`, `services/call_log.py`,
+    `services/call-log.ts`, `server.py`, `server.ts`.
+  - *Tool/consult response size cap now enforced during the read.* The 1 MB cap
+    was applied after the whole body was buffered (illusory OOM guard). Python
+    streams + bounds the read (`tool_executor.py`, `consult.py`); TS rejects an
+    oversized `Content-Length` up front, with the existing per-request timeout as
+    the chunked-body backstop.
+  - *(TypeScript) Transfer-destination phone numbers are masked in logs* (last-4
+    only, parity with Python). `server.ts`, `telephony/plivo.ts`.
+  - *Variable sanitiser now strips Unicode line separators* (U+0085, U+2028,
+    U+2029), not just ASCII `\n`/`\r`, closing a line-break prompt-injection gap
+    in interpolated carrier custom params (both SDKs). `telephony/common.py`,
+    `server.ts`.
+  - Plus a consistency fix: the Python `on_message` WebSocket guard now routes
+    through the shared `getpatter/ssrf.py` so it folds non-canonical IP spellings
+    like its HTTP sibling.
+
 ## 0.6.9 (2026-06-23)
 
 ### Added

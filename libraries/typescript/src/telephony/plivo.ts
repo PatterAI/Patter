@@ -18,6 +18,7 @@ import crypto from 'node:crypto';
 import { WebSocket as WSWebSocket } from 'ws';
 
 import type { TelephonyBridge } from '../stream-handler';
+import { maskPhoneNumber } from '../stream-handler';
 import type { LocalConfig } from '../server';
 import type { AgentOptions, MachineDetectionResult, TransferCallOptions, TransferCallResult } from '../types';
 import type { STTAdapter } from '../provider-factory';
@@ -227,7 +228,7 @@ export class PlivoBridge implements TelephonyBridge {
       headers: { 'Content-Type': 'application/json', Authorization: this.authHeader },
       body: JSON.stringify({ legs: 'aleg', aleg_url: alegUrl, aleg_method: 'GET' }),
     });
-    getLogger().info(`Call transferred to ${toNumber}`);
+    getLogger().info(`Call transferred to ${maskPhoneNumber(toNumber)}`);
   }
 
   async sendDtmf(ws: WSWebSocket, _callId: string, digits: string, _delayMs: number): Promise<void> {

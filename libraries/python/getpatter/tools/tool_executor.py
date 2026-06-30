@@ -381,7 +381,13 @@ class ToolExecutor:
             post_kwargs["timeout"] = timeout_s
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                response = await self._client.post(
+                # Stream the body so the size cap is enforced DURING the read.
+                # Buffering the whole response first (response.content) made the
+                # "prevent OOM" cap illusory: a chunked / no-Content-Length body
+                # from a hostile or compromised webhook backend could exhaust
+                # memory before the check ran.
+                async with self._client.stream(
+                    "POST",
                     webhook_url,
                     json={
                         "tool": tool_name,
@@ -392,19 +398,31 @@ class ToolExecutor:
                         "attempt": attempt + 1,
                     },
                     **post_kwargs,
-                )
-                response.raise_for_status()
-                content_length = len(response.content)
-                if content_length > _MAX_RESPONSE_BYTES:
-                    self._breaker.record_failure(tool_name)
-                    return json.dumps(
-                        {
-                            "error": f"Webhook response too large: {content_length} bytes (max {_MAX_RESPONSE_BYTES})",
-                            "fallback": True,
-                        }
-                    )
+                ) as response:
+                    response.raise_for_status()
+                    # Reject an honestly-declared oversized body up front.
+                    declared = response.headers.get("content-length")
+                    if declared and declared.isdigit() and int(declared) > _MAX_RESPONSE_BYTES:
+                        self._breaker.record_failure(tool_name)
+                        return json.dumps(
+                            {
+                                "error": f"Webhook response too large: {declared} bytes (max {_MAX_RESPONSE_BYTES})",
+                                "fallback": True,
+                            }
+                        )
+                    buf = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) > _MAX_RESPONSE_BYTES:
+                            self._breaker.record_failure(tool_name)
+                            return json.dumps(
+                                {
+                                    "error": f"Webhook response too large (max {_MAX_RESPONSE_BYTES} bytes)",
+                                    "fallback": True,
+                                }
+                            )
                 self._breaker.record_success(tool_name)
-                return json.dumps(response.json())
+                return json.dumps(json.loads(bytes(buf)))
             except httpx.TimeoutException as e:
                 # Terminal like the handler path: retrying a timed-out
                 # webhook multiplies the wait by the attempt count — with a

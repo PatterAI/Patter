@@ -210,6 +210,25 @@ export function sanitizeLogValue(v: string, maxLen = 200): string {
 }
 
 /**
+ * Return a filesystem-safe SINGLE path segment from an untrusted *value* (e.g.
+ * a carrier-supplied call id from an unauthenticated media-WebSocket ``start``
+ * frame used as a directory/file name). Folds every path separator — POSIX
+ * ``/`` AND Windows ``\`` — and any other unusual char to ``_`` so the result
+ * can never contain a separator and thus can never traverse, neutralises a bare
+ * ``..`` by stripping leading/trailing dots, and caps the length. Never returns
+ * ``''``, ``'.'`` or ``'..'``. Mirrors Python ``log_sanitize.safe_path_segment``.
+ */
+export function safePathSegment(value: unknown, maxLen = 64): string {
+  const cleaned = String(value ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f]/g, '')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(0, maxLen)
+    .replace(/^\.+|\.+$/g, '');
+  return cleaned || 'unknown';
+}
+
+/**
  * Mask an E.164 phone number for logging. Keeps only the last 4 characters
  * to preserve enough context for correlation while avoiding PII leakage.
  * Mirrors ``getpatter.utils.log_sanitize.mask_phone_number``.

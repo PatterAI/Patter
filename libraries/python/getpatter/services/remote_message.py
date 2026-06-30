@@ -137,9 +137,9 @@ class RemoteMessageHandler:
                 "and phone numbers will be sent in plaintext. "
                 "Use wss:// in production."
             )
-        import ipaddress
         from urllib.parse import urlparse
 
+        from getpatter.ssrf import is_internal_ip, resolve_literal_ip
         from getpatter.tools.tool_executor import _BLOCKED_HOSTNAMES
 
         parsed = urlparse(url)
@@ -157,21 +157,16 @@ class RemoteMessageHandler:
                 "on_message WebSocket URL rejected: blocked hostname %r", hostname
             )
             return
-        try:
-            addr = ipaddress.ip_address(hostname)
-            if (
-                addr.is_private
-                or addr.is_loopback
-                or addr.is_link_local
-                or addr.is_reserved
-            ):
-                logger.warning(
-                    "on_message WebSocket URL rejected: points to private/reserved address %r",
-                    hostname,
-                )
-                return
-        except ValueError:
-            pass
+        # Reuse the shared guard so non-canonical IP spellings (decimal/octal/
+        # hex/short IPv4, IPv4-mapped IPv6) are folded here too — the ws/wss
+        # sibling of the HTTP path, kept in lockstep with getpatter/ssrf.py.
+        addr = resolve_literal_ip(hostname)
+        if addr is not None and is_internal_ip(addr):
+            logger.warning(
+                "on_message WebSocket URL rejected: points to private/reserved address %r",
+                hostname,
+            )
+            return
         try:
             import websockets
         except ImportError:

@@ -336,6 +336,11 @@ export class DefaultToolExecutor implements ToolExecutor {
             try {
               const resp = await fetch(toolDef.webhookUrl!, {
                 method: 'POST',
+                // Fail closed on 3xx: the SSRF guard validated the original URL
+                // only. Following a redirect would let an attacker-controlled
+                // ``Location`` (e.g. 169.254.169.254 metadata) bypass it.
+                // Matches Python httpx (follow_redirects=False default).
+                redirect: 'error',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   tool: toolDef.name,
