@@ -192,6 +192,8 @@ export { LLM as GroqLLM } from "./llm/groq";
 export type { GroqLLMOptions } from "./llm/groq";
 export { LLM as CerebrasLLM } from "./llm/cerebras";
 export type { CerebrasLLMOptions } from "./llm/cerebras";
+export { LLM as InworldLLM } from "./llm/inworld";
+export type { InworldLLMOptions } from "./llm/inworld";
 export { LLM as GoogleLLM } from "./llm/google";
 export type { GoogleLLMOptions } from "./llm/google";
 export { LLM as LiteLLMLLM } from "./llm/litellm";

@@ -138,6 +138,15 @@ export function lmnt(opts: { apiKey: string; voice?: string }): TTSConfig {
   return new TTSConfigImpl("lmnt", opts.apiKey, opts.voice ?? "leah");
 }
 
+/**
+ * Inworld TTS config helper (parity with Python ``getpatter.providers.inworld``).
+ * For pipeline use the documented path is the direct adapter
+ * ``new InworldTTS({...})`` from ``getpatter``.
+ */
+export function inworld(opts: { apiKey: string; voice?: string }): TTSConfig {
+  return new TTSConfigImpl("inworld", opts.apiKey, opts.voice ?? "Ashley");
+}
+
 // ---------------------------------------------------------------------------
 // Realtime / ConvAI helpers
 // ---------------------------------------------------------------------------

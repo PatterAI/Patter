@@ -75,6 +75,21 @@ def lmnt(api_key: str, voice: str = "leah") -> TTSConfig:
     return TTSConfig(provider="lmnt", api_key=api_key, voice=voice)
 
 
+def inworld(
+    api_key: str, voice: str = "Ashley", *, model: str = "inworld-tts-2"
+) -> TTSConfig:
+    """Config helper for Inworld TTS (requires the ``inworld`` optional extra).
+
+    ``api_key`` is the Base64 ``Authorization: Basic`` token from the Inworld
+    dashboard. ``model`` defaults to ``inworld-tts-2`` (100+ languages,
+    steering); pass ``inworld-tts-1.5-mini`` for the lowest-latency model or
+    ``inworld-tts-1.5-max`` for the prior flagship.
+    """
+    return TTSConfig(
+        provider="inworld", api_key=api_key, voice=voice, options={"model": model}
+    )
+
+
 def _load_anthropic_llm():
     from getpatter.providers.anthropic_llm import AnthropicLLMProvider
 

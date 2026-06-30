@@ -219,12 +219,16 @@ DEFAULT_PRICING: dict[str, dict] = {
     },
     "inworld": {
         "unit": PricingUnit.THOUSAND_CHARS,
-        # Default = inworld-tts-2 (placeholder rate — verify against tier).
-        "price": 0.020,
+        # On-Demand (pay-as-you-go) list rates per https://inworld.ai/pricing
+        # ($/1M chars → $/1k chars): TTS-2 $25, TTS 1.5 Max $35, TTS 1.5 Mini
+        # $15. Paid tiers discount these (as low as ~$5/1M on Enterprise); the
+        # On-Demand rate is the safe default for unconfigured usage. Default =
+        # inworld-tts-2.
+        "price": 0.025,
         "models": {
-            "inworld-tts-2": {"price": 0.020},
-            "inworld-tts-1.5-max": {"price": 0.025},
-            "inworld-tts-1.5": {"price": 0.025},
+            "inworld-tts-2": {"price": 0.025},
+            "inworld-tts-1.5-max": {"price": 0.035},
+            "inworld-tts-1.5-mini": {"price": 0.015},
         },
     },
     # OpenAI Realtime — per token (actual tokens from response.done usage).
