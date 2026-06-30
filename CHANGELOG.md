@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.7.0 (2026-06-30)
+
 ### Added
 
 - **Inworld integration completed: full TTS pricing, a config helper, and an
