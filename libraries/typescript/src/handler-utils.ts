@@ -71,6 +71,9 @@ export async function executeToolWebhook(
     try {
       const resp = await fetch(webhookUrl, {
         method: 'POST',
+        // Fail closed on 3xx so a redirect can't bypass the SSRF guard (which
+        // validated webhookUrl only). Matches Python httpx default.
+        redirect: 'error',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           tool: toolName,
@@ -82,9 +85,18 @@ export async function executeToolWebhook(
         signal: AbortSignal.timeout(10_000),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      result = JSON.stringify(await resp.json() as unknown);
-      // Cap response body at 1 MB to prevent oversized payloads (aligned with Python SDK)
+      // Cap response body at 1 MB (aligned with Python SDK).
       const MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
+      // Reject an honestly-declared oversized body BEFORE buffering it. A
+      // chunked / no-Content-Length body stays bounded by the AbortSignal
+      // timeout above (Python streams + bounds the read directly instead).
+      const declaredLen = resp.headers?.get('content-length');
+      if (declaredLen && /^\d+$/.test(declaredLen) && Number(declaredLen) > MAX_RESPONSE_BYTES) {
+        const tag = label ? ` (${label})` : '';
+        getLogger().warn(`Tool webhook response too large: ${declaredLen} bytes (max ${MAX_RESPONSE_BYTES})${tag}`);
+        return JSON.stringify({ error: `Webhook response too large: ${declaredLen} bytes (max ${MAX_RESPONSE_BYTES})`, fallback: true });
+      }
+      result = JSON.stringify(await resp.json() as unknown);
       if (result.length > MAX_RESPONSE_BYTES) {
         const tag = label ? ` (${label})` : '';
         getLogger().warn(`Tool webhook response too large: ${result.length} bytes (max ${MAX_RESPONSE_BYTES})${tag}`);

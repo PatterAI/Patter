@@ -90,6 +90,9 @@ export class RemoteMessageHandler {
     }
     const response = await fetch(url, {
       method: 'POST',
+      // Fail closed on 3xx so a redirect can't bypass the SSRF guard that
+      // validated ``url``. Matches Python httpx (follow_redirects=False).
+      redirect: 'error',
       headers,
       body,
       signal: AbortSignal.timeout(30_000),
@@ -99,6 +102,12 @@ export class RemoteMessageHandler {
       throw new Error(`Webhook returned HTTP ${response.status}`);
     }
 
+    // Reject an honestly-declared oversized body before buffering it; chunked
+    // bodies stay bounded by the AbortSignal.timeout above.
+    const declaredLen = response.headers?.get('content-length');
+    if (declaredLen && /^\d+$/.test(declaredLen) && Number(declaredLen) > MAX_RESPONSE_BYTES) {
+      throw new Error(`Webhook response too large: ${declaredLen} bytes (max ${MAX_RESPONSE_BYTES})`);
+    }
     const text = await response.text();
     if (text.length > MAX_RESPONSE_BYTES) {
       throw new Error(`Webhook response too large: ${text.length} bytes (max ${MAX_RESPONSE_BYTES})`);

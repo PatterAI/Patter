@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
+from getpatter.utils.log_sanitize import mask_phone_number, safe_path_segment
 
 logger = logging.getLogger("getpatter")
 
@@ -204,7 +204,7 @@ class CallLogger:
         if self._root is None:
             return None
         dt = datetime.fromtimestamp(started_at or time.time(), tz=timezone.utc)
-        safe_id = sanitize_log_value(call_id, max_len=64).replace("/", "_") or "unknown"
+        safe_id = safe_path_segment(call_id, max_len=64)
         return (
             self._root
             / "calls"

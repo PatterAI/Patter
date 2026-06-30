@@ -127,9 +127,18 @@ def _build_webhook_handler(
         }
         try:
             async with httpx.AsyncClient(timeout=timeout_s) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                body = resp.content[:_MAX_RESPONSE_BYTES]
+                # Stream + bound the read so a hostile orchestrator can't make
+                # us buffer an unbounded body before the cap applies.
+                async with client.stream(
+                    "POST", url, json=payload, headers=headers
+                ) as resp:
+                    resp.raise_for_status()
+                    buf = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) >= _MAX_RESPONSE_BYTES:
+                            break
+                    body = bytes(buf[:_MAX_RESPONSE_BYTES])
         except Exception as exc:
             # Never log the URL or headers (may carry a secret); type only.
             logger.warning(

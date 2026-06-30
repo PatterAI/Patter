@@ -405,6 +405,33 @@ def test_serve_passes_voicemail_message_to_server():
 # ---------------------------------------------------------------------------
 
 
+class _FakeStream:
+    """Async-CM stand-in for ``httpx.AsyncClient.stream(...)``.
+
+    The executor now streams the response body (so the size cap is enforced
+    during the read), so tests mock ``.stream`` rather than ``.post``. Yields
+    *payload* JSON as a single body chunk with a matching Content-Length.
+    """
+
+    def __init__(self, payload: dict) -> None:
+        self._body = json.dumps(payload).encode()
+
+    async def __aenter__(self):
+        body = self._body
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.headers = {"content-length": str(len(body))}
+
+        async def _aiter():
+            yield body
+
+        resp.aiter_bytes = _aiter
+        return resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 @pytest.mark.asyncio
 async def test_tool_executor_retries_on_failure():
     """ToolExecutor retries on failure up to MAX_RETRIES times."""
@@ -414,17 +441,14 @@ async def test_tool_executor_retries_on_failure():
 
     mock_client = AsyncMock()
 
-    async def fail_twice_then_succeed(*args, **kwargs):
+    def fail_twice_then_succeed(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         if call_count < 3:
             raise Exception("transient error")
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json = MagicMock(return_value={"ok": True})
-        return mock_resp
+        return _FakeStream({"ok": True})
 
-    mock_client.post = fail_twice_then_succeed
+    mock_client.stream = fail_twice_then_succeed
 
     executor = ToolExecutor(client=mock_client)
 
@@ -447,7 +471,7 @@ async def test_tool_executor_returns_error_after_max_retries():
     from getpatter.tools.tool_executor import ToolExecutor
 
     mock_client = AsyncMock()
-    mock_client.post = AsyncMock(side_effect=Exception("persistent error"))
+    mock_client.stream = MagicMock(side_effect=Exception("persistent error"))
 
     executor = ToolExecutor(client=mock_client)
 
@@ -474,14 +498,11 @@ async def test_tool_executor_includes_attempt_number():
 
     mock_client = AsyncMock()
 
-    async def capture_payload(*args, **kwargs):
+    def capture_payload(*args, **kwargs):
         payloads.append(kwargs.get("json", {}))
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json = MagicMock(return_value={"result": "ok"})
-        return mock_resp
+        return _FakeStream({"result": "ok"})
 
-    mock_client.post = capture_payload
+    mock_client.stream = capture_payload
 
     executor = ToolExecutor(client=mock_client)
 

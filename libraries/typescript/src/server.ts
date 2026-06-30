@@ -26,7 +26,13 @@ import { mergePricing } from './pricing';
 import { MetricsStore } from './dashboard/store';
 import { mountDashboard, mountApi } from './dashboard/routes';
 import { RemoteMessageHandler } from './remote-message';
-import { StreamHandler, sanitizeLogValue, buildHandoffTool } from './stream-handler';
+import {
+  StreamHandler,
+  sanitizeLogValue,
+  safePathSegment,
+  maskPhoneNumber,
+  buildHandoffTool,
+} from './stream-handler';
 import { buildUseSkillTool } from './skills';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
@@ -540,11 +546,13 @@ export function sanitizeVariables(raw: Record<string, unknown>): Record<string, 
     const val = raw[key];
     // Strip control characters and cap length — caller-supplied values
     // (carrier custom params) are interpolated into the system prompt, so a
-    // newline-bearing value could append adversarial prompt lines. Mirrors
-    // Python ``_sanitize_variable_value`` (same regex, same 500-char cap).
+    // newline-bearing value could append adversarial prompt lines. Strip C0
+    // controls + DEL AND the C1 controls / Unicode line separators (U+0085,
+    // U+2028, U+2029) a plain \n/\r filter misses. Mirrors Python
+    // ``_sanitize_variable_value`` (same regex, same 500-char cap).
     safe[key] = (typeof val === 'string' ? val : String(val ?? ''))
       // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x1f\x7f]/g, '')
+      .replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, '')
       .slice(0, 500);
   }
   return safe;
@@ -767,7 +775,7 @@ export class TwilioBridge implements TelephonyBridge {
         },
         body: new URLSearchParams({ Twiml: `<Response><Dial>${xmlEscape(toNumber)}</Dial></Response>` }).toString(),
       });
-      getLogger().info(`Call transferred to ${toNumber}`);
+      getLogger().info(`Call transferred to ${maskPhoneNumber(toNumber)}`);
     }
   }
 
@@ -898,7 +906,7 @@ export class TwilioBridge implements TelephonyBridge {
       return { error: 'warm transfer failed: could not dial the transfer target' };
     }
 
-    getLogger().info(`Warm transfer started: caller parked in ${conference}, dialing ${toNumber}`);
+    getLogger().info(`Warm transfer started: caller parked in ${conference}, dialing ${maskPhoneNumber(toNumber)}`);
     return { status: 'transferring', mode: 'warm', to: toNumber, conference };
   }
 
@@ -1043,7 +1051,7 @@ export class TelnyxBridge implements TelephonyBridge {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${telnyxKey}` },
       body: JSON.stringify(body),
     });
-    getLogger().info(`Telnyx call transferred to ${toNumber}`);
+    getLogger().info(`Telnyx call transferred to ${maskPhoneNumber(toNumber)}`);
   }
 
   async sendDtmf(_ws: WSWebSocket, callId: string, digits: string, delayMs: number): Promise<void> {
@@ -2048,7 +2056,8 @@ export class EmbeddedServer {
       if (eventType === 'call.dtmf.received') {
         const digit = String(payload.digit ?? '').trim();
         if (digit) {
-          getLogger().info(`Telnyx DTMF received (webhook): ${sanitizeLogValue(digit)}`);
+          // Never log the digit itself (PIN/card/SSN entered via keypad).
+          getLogger().debug('Telnyx DTMF received (webhook)');
         }
         return res.status(200).send();
       }
@@ -2547,7 +2556,7 @@ export class EmbeddedServer {
         this.server!.off('error', reject);
         getLogger().info(`Server on port ${port}`);
         getLogger().info(`Webhook: https://${this.config.webhookUrl}`);
-        getLogger().info(`Phone:   ${this.config.phoneNumber}`);
+        getLogger().info(`Phone:   ${maskPhoneNumber(this.config.phoneNumber)}`);
         // Warn if the agent runs a non-default Realtime model — DEFAULT_PRICING
         // is calibrated for the default Realtime models (gpt-realtime-mini /
         // gpt-4o-mini-realtime-preview, which share the same rates). Other
@@ -2670,7 +2679,7 @@ export class EmbeddedServer {
   makeLocalRecorder(callId: string): LocalCallRecorder | null {
     if (!this.localRecording) return null;
     try {
-      const safeId = sanitizeLogValue(callId, 64).replace(/\//g, '_') || 'unknown';
+      const safeId = safePathSegment(callId, 64);
       let target: string;
       if (typeof this.localRecording === 'string') {
         target = nodePath.join(this.localRecording, `${safeId}.wav`);
@@ -3125,7 +3134,10 @@ export class EmbeddedServer {
         } else if (event === 'dtmf') {
           const digit = String(data.dtmf?.digit ?? '').trim();
           if (digit) {
-            getLogger().info(`Telnyx DTMF received: ${digit}`);
+            // NEVER log the digit: callers enter PINs / card numbers / SSNs via
+            // DTMF precisely so they are not spoken/transcribed. DEBUG + no value,
+            // matching Python (telnyx.py) and stream-handler.ts.
+            getLogger().debug('Telnyx DTMF received');
             await handler.handleDtmf(digit);
           }
         } else if (event === 'error') {

@@ -16,8 +16,14 @@ def _validate_e164(number: str) -> bool:
 
 
 def _sanitize_variable_value(value: str) -> str:
-    """Strip control characters and limit length to prevent prompt injection."""
-    return re.sub(r'[\x00-\x1f\x7f]', '', str(value))[:500]
+    """Strip control characters and limit length to prevent prompt injection.
+
+    Removes C0 controls + DEL **and** the C1 controls / Unicode line separators
+    (U+0085 NEL is within ``\\x7f-\\x9f``; plus U+2028, U+2029) that a plain
+    ``\\n``/``\\r`` filter misses — any of these can open a new line in the
+    system prompt the value is interpolated into. Mirrors TS ``sanitizeVariables``.
+    """
+    return re.sub(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]', '', str(value))[:500]
 
 
 def _resolve_variables(template: str, variables: dict) -> str:
