@@ -158,6 +158,27 @@
   `libraries/python/getpatter/audio/transcoding.py` (`StatefulFirLowpass`),
   `providers/openai_realtime_2.py`.
 
+### Security
+
+- **SSRF guard now folds non-canonical IP encodings.** The outbound-URL guards
+  (tool webhooks, `on_message`, `consult`, MCP) recognised only canonical IP
+  literals, so alternate spellings of an internal address that `getaddrinfo` /
+  the WHATWG URL parser accept slipped past the private-range checks and
+  connected to the blocked host — including `169.254.169.254` cloud-metadata
+  (IAM-credential theft). Now every spelling is normalised before the range
+  check: decimal / octal / hex / short IPv4 (`http://2130706433/`,
+  `0x7f.0.0.1`, `0177.0.0.1`, `127.1`) and IPv4-mapped IPv6
+  (`[::ffff:169.254.169.254]`, incl. Node's canonical `::ffff:a9fe:a9fe` hex
+  form). A mapped *public* address (`::ffff:8.8.8.8`) stays allowed. Python adds
+  a shared `getpatter/ssrf.py` (`resolve_literal_ip` via `socket.inet_aton` +
+  `is_internal_ip` unwrapping `ipv4_mapped`) used by both
+  `tools/tool_executor.py::_validate_webhook_url` and the
+  `server.py::validate_webhook_url` mirror, closing the drift between them; TS
+  unwraps IPv4-mapped IPv6 in `src/server.ts::validateWebhookUrl`. Reported via
+  responsible disclosure (#195). The guard remains best-effort against
+  DNS-rebinding by design (hostnames resolve at request time) — webhook URLs are
+  trusted SDK-user config, not caller-supplied.
+
 ## 0.6.9 (2026-06-23)
 
 ### Added

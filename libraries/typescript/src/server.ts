@@ -220,6 +220,50 @@ export function telnyxHangupOutcome(cause: string): CallOutcome | null {
 }
 
 /**
+ * True when an IPv4, given as four octets, falls in a private / loopback /
+ * link-local / reserved range that an outbound webhook must never reach.
+ */
+function isPrivateIPv4(oct: readonly number[]): boolean {
+  const [a, b] = oct;
+  return (
+    a === 0 || // 0.0.0.0/8 (any 0.x — unspecified / "this network")
+    a === 10 || // 10.0.0.0/8
+    a === 127 || // 127.0.0.0/8 loopback
+    (a === 169 && b === 254) || // 169.254.0.0/16 link-local (cloud metadata)
+    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+    (a === 192 && b === 168) // 192.168.0.0/16
+  );
+}
+
+/**
+ * Unwrap an IPv4-mapped IPv6 literal to its four embedded IPv4 octets, or
+ * return ``null`` for any other IPv6 literal.
+ *
+ * Node's WHATWG ``URL`` canonicalizes ``::ffff:127.0.0.1`` to the hex form
+ * ``::ffff:7f00:1`` — which matched none of the IPv6 range checks below, so a
+ * mapped internal address (incl. ``::ffff:169.254.169.254`` metadata) slipped
+ * through. Both the dotted and hex spellings are folded here so the embedded
+ * address is range-checked exactly like its bare IPv4 form. ``host`` is already
+ * lowercased and bracket-stripped by the caller.
+ */
+function mappedIPv4Octets(host: string): number[] | null {
+  // Dotted embedded form: ::ffff:127.0.0.1
+  const dotted = /^::ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (dotted) {
+    const oct = dotted.slice(1, 5).map((s) => parseInt(s, 10));
+    return oct.every((n) => n >= 0 && n <= 255) ? oct : null;
+  }
+  // Hex embedded form (Node's canonical output): ::ffff:7f00:1
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (hex) {
+    const g1 = parseInt(hex[1], 16);
+    const g2 = parseInt(hex[2], 16);
+    return [(g1 >> 8) & 0xff, g1 & 0xff, (g2 >> 8) & 0xff, g2 & 0xff];
+  }
+  return null;
+}
+
+/**
  * Validate that a webhook URL is safe to fetch (SSRF protection).
  *
  * Blocks:
@@ -287,15 +331,7 @@ export function validateWebhookUrl(url: string, allowLoopback = false): void {
     if (oct.some((n) => n < 0 || n > 255)) {
       throw new Error(`Webhook URL blocked: ${rawHost} is not a valid IPv4 address`);
     }
-    const [a, b] = oct;
-    if (
-      a === 0 ||                              // 0.0.0.0/8 (any 0.x)
-      a === 10 ||                             // 10.0.0.0/8
-      a === 127 ||                            // 127.0.0.0/8 loopback
-      (a === 169 && b === 254) ||             // 169.254.0.0/16 link-local
-      (a === 172 && b >= 16 && b <= 31) ||    // 172.16.0.0/12
-      (a === 192 && b === 168)                // 192.168.0.0/16
-    ) {
+    if (isPrivateIPv4(oct)) {
       throw new Error(`Webhook URL blocked: ${rawHost} is a private/internal address`);
     }
     return;
@@ -304,6 +340,13 @@ export function validateWebhookUrl(url: string, allowLoopback = false): void {
   // --- IPv6 literal checks (after bracket strip) --------------------------
   // Heuristic detection: IPv6 literals contain ':'.
   if (host.includes(':')) {
+    // IPv4-mapped IPv6 (``::ffff:<v4>``) — range-check the embedded IPv4 the
+    // same as its bare form, before the IPv6 range checks. A mapped *public*
+    // address (``::ffff:8.8.8.8``) returns its octets and is allowed through.
+    const mapped = mappedIPv4Octets(host);
+    if (mapped && isPrivateIPv4(mapped)) {
+      throw new Error(`Webhook URL blocked: ${rawHost} is a private/internal address`);
+    }
     // Loopback / unspecified
     if (host === '::1' || host === '::') {
       throw new Error(`Webhook URL blocked: ${rawHost} is a private/internal address`);

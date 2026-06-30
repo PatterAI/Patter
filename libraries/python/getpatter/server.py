@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import ipaddress
 import logging
 import os
 import re
@@ -26,6 +25,7 @@ from getpatter.services.call_log import (
     alog_turn,
     resolve_log_root,
 )
+from getpatter.ssrf import is_internal_ip, resolve_literal_ip
 from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
 
 logger = logging.getLogger("getpatter")
@@ -130,22 +130,15 @@ def validate_webhook_url(url: str) -> bool:
     host = raw_host.strip("[]").lower()
     if host in _BLOCKED_WEBHOOK_HOSTNAMES:
         return False
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        # Hostname (not a literal IP) — DNS resolution at fetch time can
-        # still hit private space, but we avoid blocking the event loop
-        # with a sync resolver here.  This matches the TS counterpart.
+    # Fold every numeric spelling a resolver accepts (decimal / octal / hex /
+    # short IPv4, IPv4-mapped IPv6) to the concrete address before range-
+    # checking it. A genuine hostname returns None — DNS resolution at fetch
+    # time can still hit private space, but we avoid blocking the event loop
+    # with a sync resolver here. Matches the TS counterpart.
+    addr = resolve_literal_ip(host)
+    if addr is None:
         return True
-    if (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_reserved
-        or addr.is_unspecified
-    ):
-        return False
-    return True
+    return not is_internal_ip(addr)
 
 
 def _client_ip_for_ws(websocket: WebSocket) -> str:
