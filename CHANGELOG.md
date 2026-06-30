@@ -138,6 +138,22 @@
 
 ### Fixed
 
+- **(TypeScript) Pipeline self-interrupted the user-turn LLM (false barge-in →
+  agent went mute after its opening line).** Two structural defects combined:
+  (1) `beginSpeaking()` armed barge-in at LLM *dispatch* time
+  (`firstAudioSentAt` stamped before any audio existed), so a slow-first-token
+  turn became "interruptible" ~500 ms later while the caller had heard nothing;
+  (2) `handleBargeIn` ran before the STT duplicate/hallucination filter, so a
+  lagging Deepgram `speech_final` twin of an already-committed `is_final`
+  aborted the still-producing turn. Now `firstAudioSentAt` is set only by the
+  real outbound-audio path (`markFirstAudioSent`, after `bridge.sendAudio`), so
+  `canBargeIn()` stays false until the agent truly emits audio; and a read-only
+  duplicate check (mirroring `commitTranscript`'s filters without consuming
+  dedup state) gates both barge-in paths. Genuine barge-in (agent audibly
+  speaking + new caller speech) still aborts + re-dispatches; the AEC 1000 ms
+  window and `bargeInThresholdMs`/autoVad branches are unchanged.
+  `libraries/typescript/src/stream-handler.ts`.
+
 - **Chipmunk / aliasing on pipeline TTS at non-16 kHz rates.** The outbound
   sender assumed every TTS source was PCM16 @ 16 kHz and ran a hardcoded
   16 kHz → 8 kHz decimator before μ-law encoding. A provider configured for any
