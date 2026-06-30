@@ -65,6 +65,9 @@ export {
   cartesia,
   rime,
   lmnt,
+  inworld,
+  sonioxTts,
+  sarvam,
   ultravox,
   geminiLive,
 } from "./providers";
@@ -195,6 +198,10 @@ export { TTS as InworldTTS } from "./tts/inworld";
 export type { InworldTTSOptions } from "./tts/inworld";
 export { TTS as GeminiTTS } from "./tts/gemini";
 export type { GeminiTTSOptions } from "./tts/gemini";
+export { TTS as SonioxTTS } from "./tts/soniox";
+export type { SonioxTTSOptions, SonioxCarrierOptions } from "./tts/soniox";
+export { TTS as SarvamTTS } from "./tts/sarvam";
+export type { SarvamTTSOptions, SarvamCarrierOptions } from "./tts/sarvam";
 
 // New namespaced LLM classes (Phase 2 of the v0.5.x API refactor).
 export { LLM as OpenAILLM } from "./llm/openai";

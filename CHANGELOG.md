@@ -4,6 +4,36 @@
 
 ### Added
 
+- **Soniox v5 real-time STT adopted (both SDKs).** `SonioxModel` gains
+  `STT_RT_V5 = "stt-rt-v5"` and the default model flips `stt-rt-v4` →
+  `stt-rt-v5` (the GA v5 model, released 2026-06-16); `v4`/`v3`/`v2` stay
+  reachable for back-compat. v5 is fully API-compatible (same WS endpoint,
+  in-band `api_key`, request/token-stream shape), so this is a model-id swap
+  plus two new opt-in v5 endpoint controls (`endpoint_sensitivity` /
+  `endpointSensitivity` in `[-1.0, 1.0]`; `endpoint_latency_adjustment_level` /
+  `endpointLatencyAdjustmentLevel` in `0|1|2|3`), omitted from the wire when
+  unset so existing behavior is byte-identical. Real-time rate unchanged at
+  $0.12/hr ≈ $0.002/min (https://soniox.com/pricing).
+- **Soniox TTS provider (both SDKs).** `SonioxTTS` over the REST one-shot
+  `https://tts-rt.soniox.com/tts` bytes endpoint (`tts-rt-v1`, default voice
+  `Adrian`, shares the `SONIOX_API_KEY` credential with Soniox STT).
+  `forTwilio` / `forTelnyx` emit `pcm_mulaw` @ 8 kHz natively for carrier-wire
+  passthrough (no resampling). Wired end-to-end: package-root export
+  (`SonioxTTS`), `providers.soniox_tts()` / `sonioxTts()` config helper,
+  `_create_tts_from_config` `"soniox_tts"` branch, and a pricing entry modeled
+  per-1k-chars from the $0.70/hr headline (~$0.013/1k chars; native billing is
+  token-based — https://soniox.com/pricing). Reuses the existing `[soniox]`
+  extra (aiohttp).
+- **Sarvam AI TTS provider for Indian languages (both SDKs).** `SarvamTTS` over
+  the REST `https://api.sarvam.ai/text-to-speech` endpoint — Bulbul v3 (default)
+  / v2 across 11 Indian languages (Hindi, Bengali, Tamil, Telugu, Kannada,
+  Malayalam, Marathi, Gujarati, Punjabi, Odia, Indian English) plus code-mixed
+  text. `forTwilio` / `forTelnyx` emit `mulaw` @ 8 kHz natively (carrier-wire
+  passthrough). Wired end-to-end: package-root export (`SarvamTTS`),
+  `providers.sarvam()` config helper, `_create_tts_from_config` `"sarvam"`
+  branch, a new `[sarvam]` pyproject extra (aiohttp), and a per-1k-chars pricing
+  entry — Bulbul v3 ≈ $0.036/1k (Rs 30/10k), v2 ≈ $0.018/1k (Rs 15/10k); INR is
+  authoritative, USD indicative (https://www.sarvam.ai/api-pricing).
 - **Engine markers shipped: `GeminiLive`, `GeminiCascade`, and a native
   `InworldRealtime`.** 0.7.0 exported the Gemini pipeline factory + adapter but
   not the `GeminiLive` engine marker, so `new GeminiLive({...})` / the engine

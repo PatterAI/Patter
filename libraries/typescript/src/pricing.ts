@@ -270,6 +270,26 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
       'gemini-3.1-flash-tts-preview': { price: 0.034 },
     },
   },
+  // Soniox real-time TTS. Soniox publishes a $0.70/hr headline for generated
+  // speech (native billing is token-based: input text $4/1M + output audio
+  // $21.50/1M). Patter's TTS cost model is per-character, so we express the rate
+  // per 1k chars: at a typical ~900 chars/min spoken (~150 wpm) ≈ 54,000
+  // chars/hr, $0.70/hr ÷ 54 ≈ $0.013 / 1k chars. Source:
+  // https://soniox.com/pricing (also https://soniox.com/text-to-speech).
+  soniox_tts: { unit: PricingUnit.THOUSAND_CHARS, price: 0.013 },
+  // Sarvam AI Bulbul TTS — per 1,000 characters. INR is authoritative; USD is an
+  // indicative FX conversion (~Rs 83-84/USD). Bulbul v3 (default): Rs 30 / 10k
+  // chars ≈ $0.036/1k; Bulbul v2: Rs 15 / 10k ≈ $0.018/1k. Billed per character,
+  // rounded up per request. Source: https://www.sarvam.ai/api-pricing
+  sarvam: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = bulbul:v3.
+    price: 0.036,
+    models: {
+      'bulbul:v3': { price: 0.036 },
+      'bulbul:v2': { price: 0.018 },
+    },
+  },
   // OpenAI Realtime — per token. Provider defaults match
   // gpt-realtime-mini / gpt-4o-mini-realtime-preview (Patter's default).
   // Per-model overrides under ``models`` are auto-resolved when the

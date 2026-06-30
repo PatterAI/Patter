@@ -250,7 +250,43 @@ def _create_tts_from_config(config):
         # ``api_key`` carries the Base64 ``Authorization: Basic`` token.
         return InworldTTS(auth_token=config.api_key, voice=config.voice, **kwargs)
 
+    if provider == "soniox_tts":
+        from getpatter.providers.soniox_tts import SonioxTTS  # type: ignore[import]
+
+        allowed = {
+            "model",
+            "language",
+            "audio_format",
+            "sample_rate",
+            "bitrate",
+            "speed",
+            "base_url",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        return SonioxTTS(api_key=config.api_key, voice=config.voice, **kwargs)
+
+    if provider == "sarvam":
+        from getpatter.providers.sarvam_tts import SarvamTTS  # type: ignore[import]
+
+        allowed = {
+            "model",
+            "language",
+            "codec",
+            "sample_rate",
+            "pace",
+            "pitch",
+            "loudness",
+            "temperature",
+            "enable_preprocessing",
+            "dict_id",
+            "base_url",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        # The Sarvam adapter calls the user-facing ``voice`` a ``speaker``.
+        return SarvamTTS(api_key=config.api_key, speaker=config.voice, **kwargs)
+
     raise ValueError(
         f"Unknown TTS provider '{provider}'. "
-        "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld."
+        "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld, "
+        "soniox_tts, sarvam."
     )

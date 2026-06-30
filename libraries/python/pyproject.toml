@@ -139,6 +139,10 @@ background-audio = [
 rime = ["aiohttp>=3.10"]
 lmnt = ["aiohttp>=3.10"]
 inworld = ["aiohttp>=3.10"]
+# Sarvam AI Bulbul TTS provider (Indian languages; pure-aiohttp REST, no vendor SDK).
+sarvam = ["aiohttp>=3.10"]
+# Soniox TTS reuses the existing ``[soniox]`` extra above (only needs aiohttp,
+# the same dep already pinned there for Soniox STT) — no separate extra needed.
 gemini-live = [
     "google-genai>=1.55",
 ]

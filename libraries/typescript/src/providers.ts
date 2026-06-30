@@ -147,6 +147,26 @@ export function inworld(opts: { apiKey: string; voice?: string }): TTSConfig {
   return new TTSConfigImpl("inworld", opts.apiKey, opts.voice ?? "Ashley");
 }
 
+/**
+ * Soniox TTS config helper (parity with Python ``getpatter.providers.soniox_tts``).
+ * Shares the ``SONIOX_API_KEY`` credential family with Soniox STT. For pipeline
+ * use the documented path is the direct adapter ``new SonioxTTS({...})`` from
+ * ``getpatter``.
+ */
+export function sonioxTts(opts: { apiKey: string; voice?: string }): TTSConfig {
+  return new TTSConfigImpl("soniox_tts", opts.apiKey, opts.voice ?? "Adrian");
+}
+
+/**
+ * Sarvam AI TTS config helper for Indian languages (parity with Python
+ * ``getpatter.providers.sarvam``). ``voice`` is the Sarvam speaker id (default
+ * ``shubh``). For pipeline use the documented path is the direct adapter
+ * ``new SarvamTTS({...})`` from ``getpatter``.
+ */
+export function sarvam(opts: { apiKey: string; voice?: string }): TTSConfig {
+  return new TTSConfigImpl("sarvam", opts.apiKey, opts.voice ?? "shubh");
+}
+
 // ---------------------------------------------------------------------------
 // Realtime / ConvAI helpers
 // ---------------------------------------------------------------------------
