@@ -109,10 +109,19 @@ export {
 export { TestSession } from "./test-mode";
 export { ElevenLabsConvAIAdapter } from "./providers/elevenlabs-convai";
 export { OpenAIRealtimeAdapter } from "./providers/openai-realtime";
-export { GeminiLiveAdapter, GEMINI_DEFAULT_INPUT_SR, GEMINI_DEFAULT_OUTPUT_SR } from "./providers/gemini-live";
+export { GeminiLiveAdapter, GEMINI_DEFAULT_INPUT_SR, GEMINI_DEFAULT_OUTPUT_SR, GEMINI_LIVE_3_1_FLASH_PREVIEW } from "./providers/gemini-live";
 export type { GeminiLiveEventHandler } from "./providers/gemini-live";
+export { GeminiCascadeAdapter } from "./providers/gemini-cascade";
+export type { GeminiCascadeEventHandler, GeminiCascadeAdapterOptions } from "./providers/gemini-cascade";
 export { UltravoxRealtimeAdapter, ULTRAVOX_DEFAULT_API_BASE, ULTRAVOX_DEFAULT_SR } from "./providers/ultravox-realtime";
 export type { UltravoxEventHandler } from "./providers/ultravox-realtime";
+export {
+  InworldRealtimeAdapter,
+  INWORLD_REALTIME_WS_URL,
+  INWORLD_REALTIME_DEFAULT_MODEL,
+  INWORLD_REALTIME_DEFAULT_VOICE,
+} from "./providers/inworld-realtime";
+export type { InworldRealtimeAdapterOptions } from "./providers/inworld-realtime";
 export { scheduleCron, scheduleOnce, scheduleInterval } from "./scheduler";
 export type { ScheduleHandle, JobCallback } from "./scheduler";
 // Provider adapter types (re-exported for advanced users who build custom
@@ -155,6 +164,8 @@ export { STT as AssemblyAISTT } from "./stt/assemblyai";
 export type { AssemblyAISTTOptions } from "./stt/assemblyai";
 export { STT as SpeechmaticsSTT } from "./stt/speechmatics";
 export type { SpeechmaticsSTTOptions } from "./stt/speechmatics";
+export { STT as GeminiSTT } from "./stt/gemini";
+export type { GeminiSTTOptions } from "./stt/gemini";
 export {
   TurnDetectionMode as SpeechmaticsTurnDetectionMode,
   SpeechmaticsSampleRate,
@@ -182,6 +193,8 @@ export { TTS as LMNTTTS } from "./tts/lmnt";
 export type { LMNTTTSOptions } from "./tts/lmnt";
 export { TTS as InworldTTS } from "./tts/inworld";
 export type { InworldTTSOptions } from "./tts/inworld";
+export { TTS as GeminiTTS } from "./tts/gemini";
+export type { GeminiTTSOptions } from "./tts/gemini";
 
 // New namespaced LLM classes (Phase 2 of the v0.5.x API refactor).
 export { LLM as OpenAILLM } from "./llm/openai";
@@ -267,6 +280,12 @@ export type { Realtime2Options as OpenAIRealtime2Options } from "./engines/opena
 export { OpenAIRealtime2Adapter } from "./providers/openai-realtime-2";
 export { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 export type { ConvAIOptions as ElevenLabsConvAIOptions } from "./engines/elevenlabs";
+export { GeminiLive } from "./engines/gemini";
+export type { GeminiLiveOptions } from "./engines/gemini";
+export { GeminiCascade } from "./engines/gemini-cascade";
+export type { GeminiCascadeOptions } from "./engines/gemini-cascade";
+export { InworldRealtime } from "./engines/inworld";
+export type { InworldRealtimeOptions } from "./engines/inworld";
 
 // Tunnel markers.
 export { CloudflareTunnel, Ngrok, Static as StaticTunnel } from "./tunnels";

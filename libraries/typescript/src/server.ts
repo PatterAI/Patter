@@ -13,6 +13,9 @@ import type { TelemetryClient } from './telemetry/client';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
+import { GeminiLiveAdapter } from './providers/gemini-live';
+import { GeminiCascadeAdapter } from './providers/gemini-cascade';
+import { InworldRealtimeAdapter } from './providers/inworld-realtime';
 import { PlivoAdapter, dropPlivoVoicemail, plivoInboundCustomParams } from './providers/plivo-adapter';
 import { TwilioAdapter } from './providers/twilio-adapter';
 import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
@@ -90,7 +93,7 @@ export interface LocalConfig {
   persistRoot?: string | null;
 }
 
-type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
+type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter | GeminiCascadeAdapter;
 
 export const TRANSFER_CALL_TOOL = {
   name: 'transfer_call',
@@ -645,6 +648,82 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   // ``handleUseSkillFunctionCall``). Mirrors the Python Realtime ``start()``.
   if (agent.skills && agent.skills.length > 0) {
     tools.push(buildUseSkillTool(agent.skills));
+  }
+  // Gemini Live mode: construct GeminiLiveAdapter from the engine marker's
+  // own credentials/voice/model. Mirrors the ElevenLabs branch above — a
+  // distinct (non-OpenAI) adapter built from the engine's own apiKey — but
+  // placed here because Gemini advertises the same tool list (agent tools +
+  // transfer_call/end_call/handoff) as the OpenAI path.
+  if (agent.provider === 'gemini_live') {
+    if (!engine || engine.kind !== 'gemini_live') {
+      throw new Error(
+        "Gemini Live mode requires `agent.engine = new GeminiLive({...})`.",
+      );
+    }
+    return new GeminiLiveAdapter(engine.apiKey, {
+      ...(agent.model ?? engine.model ? { model: agent.model ?? engine.model } : {}),
+      ...(agent.voice ?? engine.voice ? { voice: agent.voice ?? engine.voice } : {}),
+      ...(agent.language ? { language: agent.language } : {}),
+      ...(engine.temperature !== undefined ? { temperature: engine.temperature } : {}),
+      ...(engine.affectiveDialog !== undefined ? { affectiveDialog: engine.affectiveDialog } : {}),
+      ...(engine.proactiveAudio !== undefined ? { proactiveAudio: engine.proactiveAudio } : {}),
+      ...(engine.vad !== undefined ? { vad: engine.vad } : {}),
+      // Thinking is OFF by default for voice (adapter applies thinkingBudget:0)
+      // — only forward the opt-in overrides when the marker set them.
+      ...(engine.thinking !== undefined ? { thinking: engine.thinking } : {}),
+      ...(engine.thinkingBudget !== undefined ? { thinkingBudget: engine.thinkingBudget } : {}),
+      ...(engine.apiVersion !== undefined ? { apiVersion: engine.apiVersion } : {}),
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
+  }
+  if (agent.provider === 'gemini_cascade') {
+    if (!engine || engine.kind !== 'gemini_cascade') {
+      throw new Error(
+        "Gemini Cascade mode requires `agent.engine = new GeminiCascade({...})`.",
+      );
+    }
+    return new GeminiCascadeAdapter(engine.apiKey, {
+      model: agent.model ?? engine.liveModel,
+      ttsModel: engine.ttsModel,
+      voice: agent.voice ?? engine.voice,
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
+  }
+  // Inworld Realtime mode: construct InworldRealtimeAdapter from the engine
+  // marker. Inworld's Realtime API is OpenAI-Realtime-compatible, so the
+  // adapter subclasses OpenAIRealtimeAdapter and advertises the SAME tool list
+  // (agent tools + transfer_call/end_call/handoff/use_skill) built above.
+  if (agent.provider === 'inworld_realtime') {
+    if (!engine || engine.kind !== 'inworld_realtime') {
+      throw new Error(
+        "Inworld Realtime mode requires `agent.engine = new InworldRealtime({...})`.",
+      );
+    }
+    const agentOpts = agent as {
+      realtimeTurnDetection?: import('./types').RealtimeTurnDetection;
+      openaiRealtimeGateResponseOnTranscript?: boolean;
+    };
+    return new InworldRealtimeAdapter(engine.apiKey, {
+      ...(agent.model ?? engine.model ? { model: agent.model ?? engine.model } : {}),
+      ...(agent.voice ?? engine.voice ? { voice: agent.voice ?? engine.voice } : {}),
+      ...(engine.baseUrl ? { baseUrl: engine.baseUrl } : {}),
+      ...(engine.transcriptionLanguage !== undefined
+        ? { transcriptionLanguage: engine.transcriptionLanguage }
+        : {}),
+      ...((agentOpts.realtimeTurnDetection ?? engine.turnDetection) !== undefined
+        ? { turnDetection: agentOpts.realtimeTurnDetection ?? engine.turnDetection }
+        : {}),
+      ...((agentOpts.openaiRealtimeGateResponseOnTranscript ?? engine.gateResponseOnTranscript) !== undefined
+        ? {
+            gateResponseOnTranscript:
+              agentOpts.openaiRealtimeGateResponseOnTranscript ?? engine.gateResponseOnTranscript,
+          }
+        : {}),
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
   }
   const isOpenAIEngine = engine && (engine.kind === 'openai_realtime' || engine.kind === 'openai_realtime_2');
   const openaiKey = isOpenAIEngine ? engine.apiKey : (config.openaiKey ?? '');

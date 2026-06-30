@@ -44,6 +44,9 @@ import { Carrier as PlivoCarrier } from "./telephony/plivo";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
 import { Realtime2 as OpenAIRealtime2 } from "./engines/openai-2";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
+import { GeminiLive } from "./engines/gemini";
+import { GeminiCascade } from "./engines/gemini-cascade";
+import { InworldRealtime } from "./engines/inworld";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import { resolveLogRoot } from "./services/call-log";
 import { validateAllToolSchemas } from "./tools/schema-validation";
@@ -746,10 +749,39 @@ export class Patter {
           provider: 'elevenlabs_convai',
           voice: working.voice ?? engine.voice,
         };
+      } else if (engine instanceof GeminiLive) {
+        working = {
+          ...working,
+          provider: 'gemini_live',
+          // Explicit agent() kwargs win over the engine marker value.
+          model: working.model ?? engine.model,
+          voice: working.voice ?? engine.voice,
+        };
+      } else if (engine instanceof GeminiCascade) {
+        working = {
+          ...working,
+          provider: 'gemini_cascade',
+          // Explicit agent() kwargs win over the engine marker value.
+          model: working.model ?? engine.liveModel,
+          voice: working.voice ?? engine.voice,
+        };
+      } else if (engine instanceof InworldRealtime) {
+        working = {
+          ...working,
+          provider: 'inworld_realtime',
+          // Explicit agent() kwargs win over the engine marker value.
+          model: working.model ?? engine.model,
+          voice: working.voice ?? engine.voice,
+          realtimeTurnDetection:
+            working.realtimeTurnDetection ?? engine.turnDetection,
+          openaiRealtimeGateResponseOnTranscript:
+            working.openaiRealtimeGateResponseOnTranscript ??
+            engine.gateResponseOnTranscript,
+        };
       } else {
         this.recordConfigIncomplete('engine_config');
         throw new Error(
-          "Unknown engine. Expected OpenAIRealtime, OpenAIRealtime2, or ElevenLabsConvAI instance.",
+          "Unknown engine. Expected OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI, GeminiLive, GeminiCascade, or InworldRealtime instance.",
         );
       }
     } else if (
@@ -765,7 +797,7 @@ export class Patter {
 
     // Validate provider
     if (working.provider) {
-      const valid = ['openai_realtime', 'elevenlabs_convai', 'pipeline'];
+      const valid = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'gemini_cascade', 'inworld_realtime', 'pipeline'];
       if (!valid.includes(working.provider)) {
         this.recordConfigIncomplete('engine_config');
         throw new Error(`provider must be one of: ${valid.join(', ')}. Got: '${working.provider}'`);
@@ -993,8 +1025,8 @@ export class Patter {
     }
 
     // Validate provider
-    const validProviders = ['openai_realtime', 'elevenlabs_convai', 'pipeline'] as const;
-    if (opts.agent.provider && !validProviders.includes(opts.agent.provider)) {
+    const validProviders = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'gemini_cascade', 'inworld_realtime', 'pipeline'] as const;
+    if (opts.agent.provider && !validProviders.includes(opts.agent.provider as typeof validProviders[number])) {
       throw new Error(`agent.provider must be one of: ${validProviders.join(', ')}`);
     }
 
