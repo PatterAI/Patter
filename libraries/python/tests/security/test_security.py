@@ -14,6 +14,8 @@ from getpatter.telephony.common import _sanitize_variable_value, _validate_e164
 from getpatter.telephony.twilio import _xml_escape, _validate_twilio_sid
 from getpatter.local_config import LocalConfig
 from getpatter.models import Agent
+from getpatter.server import validate_webhook_url
+from getpatter.tools.tool_executor import _validate_webhook_url
 
 
 # ── SEC-1: SSRF on user-supplied webhook URLs ─────────────────────────────
@@ -43,6 +45,61 @@ class TestSSRFProtection:
     def test_rejects_wrong_prefix(self) -> None:
         sid = "XX" + "a" * 32
         assert _validate_twilio_sid(sid, "CA") is False
+
+
+# ── SEC-1b: SSRF via non-canonical IP encodings ───────────────────────────
+# Regression for the SSRF-guard bypass: the dotted-quad-only checks let
+# decimal / octal / hex / short IPv4 spellings, and IPv4-mapped IPv6, slip
+# past the private-range rejection even though getaddrinfo resolves them to
+# the very internal host the guard meant to block (incl. 169.254.169.254).
+
+# Each entry resolves to an internal address the guard must reject, across
+# every spelling a resolver accepts.
+_SSRF_ENCODED_INTERNAL = [
+    ("decimal 127.0.0.1", "http://2130706433/x"),
+    ("hex 127.0.0.1", "http://0x7f.0.0.1/x"),
+    ("octal 127.0.0.1", "http://0177.0.0.1/x"),
+    ("short 127.0.0.1", "http://127.1/x"),
+    ("decimal 169.254.169.254 metadata", "http://2852039166/latest/meta-data/"),
+    ("ipv4-mapped loopback", "http://[::ffff:127.0.0.1]/x"),
+    ("ipv4-mapped metadata", "http://[::ffff:169.254.169.254]/latest/meta-data/"),
+]
+
+
+@pytest.mark.security
+class TestSSRFAlternateEncodings:
+    """SEC-1b — every encoding of an internal IP is rejected like its
+    dotted-quad form; a mapped public address stays allowed."""
+
+    @pytest.mark.parametrize(
+        "label,url", _SSRF_ENCODED_INTERNAL, ids=[c[0] for c in _SSRF_ENCODED_INTERNAL]
+    )
+    def test_tool_executor_rejects_encoded_internal(self, label: str, url: str) -> None:
+        with pytest.raises(ValueError, match="private|reserved"):
+            _validate_webhook_url(url)
+
+    @pytest.mark.parametrize(
+        "label,url", _SSRF_ENCODED_INTERNAL, ids=[c[0] for c in _SSRF_ENCODED_INTERNAL]
+    )
+    def test_server_mirror_rejects_encoded_internal(self, label: str, url: str) -> None:
+        assert validate_webhook_url(url) is False
+
+    def test_mapped_public_address_allowed(self) -> None:
+        """An IPv4-mapped *public* address must remain reachable."""
+        _validate_webhook_url("http://[::ffff:8.8.8.8]/x")  # no raise
+        assert validate_webhook_url("http://[::ffff:8.8.8.8]/x") is True
+
+    def test_public_hostname_and_ip_still_allowed(self) -> None:
+        _validate_webhook_url("https://example.com/webhook")  # no raise
+        assert validate_webhook_url("https://example.com/webhook") is True
+        assert validate_webhook_url("http://8.8.8.8/x") is True
+
+    def test_decimal_loopback_blocked_for_consult_only_when_strict(self) -> None:
+        """allow_loopback bypasses the IP check (consult escape hatch), so an
+        encoded loopback is permitted there — but stays blocked by default."""
+        _validate_webhook_url("http://2130706433/x", allow_loopback=True)  # no raise
+        with pytest.raises(ValueError, match="private|reserved"):
+            _validate_webhook_url("http://2130706433/x")
 
 
 # ── SEC-2: XSS injection in dashboard fields ──────────────────────────────

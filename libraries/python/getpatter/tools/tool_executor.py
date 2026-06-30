@@ -12,7 +12,6 @@ per call to avoid the connection-setup tax on tool-heavy turns.
 """
 
 import asyncio
-import ipaddress
 import json
 import logging
 import random
@@ -22,6 +21,7 @@ from urllib.parse import urlparse
 import httpx
 
 from getpatter.observability.tracing import SPAN_TOOL, start_span
+from getpatter.ssrf import is_internal_ip, resolve_literal_ip
 from getpatter.tools.circuit_breaker import (
     CircuitBreakerOptions,
     CircuitBreakerRegistry,
@@ -165,25 +165,17 @@ def _validate_webhook_url(url: str, *, allow_loopback: bool = False) -> None:
         # even when they do not resolve to a literal IP in the URL string.
         if hostname.lower() in _BLOCKED_HOSTNAMES:
             raise ValueError(f"Webhook URL points to a blocked hostname: {hostname!r}")
-        # Block literal private/loopback IP addresses in the URL itself.
-        # We intentionally avoid blocking based on DNS resolution here because
-        # synchronous socket.gethostbyname() would block the async event loop.
-        try:
-            addr = ipaddress.ip_address(hostname)
-            if (
-                addr.is_private
-                or addr.is_loopback
-                or addr.is_link_local
-                or addr.is_reserved
-            ):
-                raise ValueError(
-                    f"Webhook URL points to a private/reserved address: {hostname!r}"
-                )
-        except ValueError as exc:
-            # Re-raise only our own ValueError (private IP rejection), not the
-            # ip_address() parsing error which just means it's a hostname.
-            if "private" in str(exc) or "reserved" in str(exc):
-                raise
+        # Block literal private/loopback IP addresses in the URL itself,
+        # across every spelling a resolver accepts (decimal / octal / hex /
+        # short IPv4, IPv4-mapped IPv6) — not just the canonical dotted-quad
+        # form. We intentionally avoid blocking based on DNS resolution here
+        # because a synchronous lookup would stall the async event loop; a
+        # genuine hostname returns None and is checked at request time.
+        addr = resolve_literal_ip(hostname)
+        if addr is not None and is_internal_ip(addr):
+            raise ValueError(
+                f"Webhook URL points to a private/reserved address: {hostname!r}"
+            )
 
 
 class ToolExecutor:

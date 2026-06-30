@@ -78,6 +78,31 @@ describe("SEC-1: SSRF protection on webhook URLs", () => {
   });
 });
 
+// ── SEC-1b: SSRF via non-canonical IP encodings ───────────────────────────
+// Regression: WHATWG folds decimal/octal/hex/short IPv4 (so those are caught
+// by the dotted-quad check) but canonicalizes IPv4-mapped IPv6 to its hex
+// form (``::ffff:7f00:1``), which slipped past every IPv6 range check and
+// connected to the internal host — including 169.254.169.254 metadata.
+
+describe("SEC-1b: SSRF via non-canonical IP encodings", () => {
+  it.each([
+    ["decimal 127.0.0.1", "http://2130706433/x"],
+    ["hex 127.0.0.1", "http://0x7f.0.0.1/x"],
+    ["octal 127.0.0.1", "http://0177.0.0.1/x"],
+    ["short 127.0.0.1", "http://127.1/x"],
+    ["ipv4-mapped loopback (dotted)", "http://[::ffff:127.0.0.1]/x"],
+    ["ipv4-mapped loopback (hex)", "http://[::ffff:7f00:1]/x"],
+    ["ipv4-mapped metadata", "http://[::ffff:169.254.169.254]/latest/meta-data/"],
+    ["ipv4-mapped 10.x private", "http://[::ffff:10.0.0.1]/x"],
+  ])("rejects %s", (_label, url) => {
+    expect(() => validateWebhookUrl(url)).toThrow(/blocked|private|internal/i);
+  });
+
+  it("allows an IPv4-mapped public address", () => {
+    expect(() => validateWebhookUrl("http://[::ffff:8.8.8.8]/x")).not.toThrow();
+  });
+});
+
 // ── SEC-2: XSS injection in dashboard fields ──────────────────────────────
 
 describe("SEC-2: XSS sanitisation", () => {
