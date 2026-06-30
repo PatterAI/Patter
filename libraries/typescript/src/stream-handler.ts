@@ -1555,6 +1555,26 @@ export class StreamHandler {
   private sttClosed = false;
   private currentAgentText = '';
   private responseAudioStarted = false;
+
+  // --- Realtime-engine outbound keepalive (Telnyx bidirectional RTP) ----
+  // Realtime engines (GeminiLive / OpenAIRealtime2) put NO bytes on the
+  // carrier between the ``start`` event and the model's first audio delta
+  // — cold ``adapter.connect()`` + model TTFT + resampler warmup is often
+  // >1.5 s. Twilio tolerates that gap; Telnyx's bidirectional RTP leg
+  // clears the call (~1.6 s, "1 turn", normal_clearing). The pipeline path
+  // never hits this because ``playFirstMessage`` puts TTS bytes on the wire
+  // within ~200 ms. Pump paced μ-law-8k silence (the exact format already
+  // proven on Telnyx) from stream-start until the first real model frame,
+  // so the outbound leg stays primed. Twilio/Plivo are unaffected — they
+  // also accept μ-law-8k silence frames and have no such timeout. The pump
+  // self-cancels the instant ``onAdapterAudio`` fires.
+  private comfortNoiseTimer: ReturnType<typeof setInterval> | null = null;
+  /** One 20 ms μ-law-8k silence frame (160 bytes). 0xFF == μ-law digital
+   *  zero. Allocated once; never mutated. */
+  private static readonly MULAW_SILENCE_FRAME: string =
+    Buffer.alloc(160, 0xff).toString('base64');
+  /** Pump cadence: one 20 ms frame every 20 ms (real-time μ-law-8k rate). */
+  private static readonly COMFORT_NOISE_INTERVAL_MS = 20;
   /**
    * Realtime turn ordering buffer. OpenAI Realtime emits
    * `input_audio_transcription.completed` (user transcript) AFTER
@@ -2774,6 +2794,9 @@ export class StreamHandler {
   }
 
   async handleStop(): Promise<void> {
+    // Kill the realtime comfort-noise pump if the call ends before the model
+    // ever produced audio (otherwise the interval leaks past call teardown).
+    this.stopComfortNoise();
     // Abort any in-flight LLM stream and close any in-flight TTS WS so
     // the runPipelineLlm / synthesizeStream awaits unblock immediately
     // instead of waiting up to 30 s for their own watchdog timers.
@@ -2835,6 +2858,9 @@ export class StreamHandler {
   /** Handle WebSocket close event. */
   /** Tear down adapter, STT/TTS, and per-call state when the carrier WebSocket closes. */
   async handleWsClose(): Promise<void> {
+    // Kill the realtime comfort-noise pump if the WS drops before the model
+    // ever produced audio (otherwise the interval leaks past call teardown).
+    this.stopComfortNoise();
     // Mirror handleStop's in-flight cleanup so a carrier WebSocket drop
     // unblocks LLM / TTS awaits immediately — see comment there.
     if (this.llmAbort !== null) {
@@ -5675,6 +5701,50 @@ export class StreamHandler {
         getLogger().error(`Adapter event handler error (${label}):`, err);
       }
     });
+
+    // Keep the outbound carrier leg primed during the connect→first-delta
+    // window (see ``comfortNoiseTimer`` doc). Realtime engines only — the
+    // pipeline path has ``playFirstMessage`` for this. Self-cancels on the
+    // first real model frame in ``onAdapterAudio``.
+    this.startComfortNoise();
+  }
+
+  /**
+   * Begin pumping paced μ-law-8k silence frames to the carrier so a
+   * realtime engine's pre-first-audio gap does not leave the outbound leg
+   * idle (Telnyx clears an idle bidirectional RTP leg ~1.6 s in). Idempotent
+   * — a second call is a no-op while a pump is already running. Stopped by
+   * ``stopComfortNoise`` from ``onAdapterAudio`` (first real frame) and from
+   * the teardown path.
+   */
+  private startComfortNoise(): void {
+    if (this.comfortNoiseTimer !== null) return;
+    this.comfortNoiseTimer = setInterval(() => {
+      // First real frame already on the wire — pump is obsolete.
+      if (this.responseAudioStarted) {
+        this.stopComfortNoise();
+        return;
+      }
+      try {
+        this.deps.bridge.sendAudio(
+          this.ws,
+          StreamHandler.MULAW_SILENCE_FRAME,
+          this.streamSid,
+        );
+      } catch (err) {
+        // Carrier WS gone — stop pumping rather than spin on a dead socket.
+        getLogger().debug(`comfort-noise send failed: ${String(err)}`);
+        this.stopComfortNoise();
+      }
+    }, StreamHandler.COMFORT_NOISE_INTERVAL_MS);
+  }
+
+  /** Stop the comfort-noise pump if running. Idempotent. */
+  private stopComfortNoise(): void {
+    if (this.comfortNoiseTimer !== null) {
+      clearInterval(this.comfortNoiseTimer);
+      this.comfortNoiseTimer = null;
+    }
   }
 
   private async handleAdapterEvent(type: string, eventData: unknown): Promise<void> {
@@ -5809,6 +5879,10 @@ export class StreamHandler {
   }
 
   private async onAdapterAudio(eventData: Buffer): Promise<void> {
+    // Real model audio is ready — tear down the pre-first-audio comfort-noise
+    // pump (no-op if it already stopped or never armed) before the first real
+    // frame goes out, so silence and speech never interleave on the wire.
+    this.stopComfortNoise();
     // Record time-to-first-audio-byte as latency (Realtime mode). If no
     // startTurn() was called yet (e.g. agent responding again without user
     // input), start a new turn now so latency is still measured.

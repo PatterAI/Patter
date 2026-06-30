@@ -984,6 +984,19 @@ class StreamHandler(ABC):
         # speaking on the wire, for `fire_agent_speech_ended.speech_duration_ms`.
         self._agent_turn_start_ms: float | None = None
         self._background_task: asyncio.Task | None = None
+        # Realtime-engine outbound keepalive (Telnyx bidirectional RTP).
+        # Realtime engines (GeminiLive / OpenAIRealtime2 / ConvAI) put NO
+        # bytes on the carrier between the carrier ``start`` and the model's
+        # first audio delta — cold ``adapter.connect()`` + model TTFT +
+        # resampler warmup is often >1.5 s. Twilio tolerates that gap;
+        # Telnyx's bidirectional RTP leg clears the call (~1.6 s, "1 turn",
+        # normal_clearing). The pipeline path never hits this because it puts
+        # TTS bytes on the wire within ~200 ms. ``_start_comfort_noise`` pumps
+        # paced μ-law-8k silence (the exact format already proven on Telnyx)
+        # from stream-start until the first real model frame, so the outbound
+        # leg stays primed. Twilio/Plivo are unaffected. Self-cancels the
+        # instant the first real audio frame is forwarded.
+        self._comfort_noise_task: asyncio.Task | None = None
         # MCP server connection manager — populated lazily in
         # ``_init_mcp_tools`` when the agent declares ``mcp_servers``.
         # Closed in ``cleanup``/``fire_call_end`` to free open MCP
@@ -1273,6 +1286,46 @@ class StreamHandler(ABC):
             task.cancel()
         self._max_call_watchdog = None
 
+    # One 20 ms μ-law-8k silence frame (160 bytes). 0xFF == μ-law digital
+    # zero. On the realtime path the audio sender is in ``_input_is_mulaw_8k``
+    # pass-through mode, so these bytes reach the carrier unchanged — the exact
+    # format already proven on Telnyx. 20 ms × 8 bytes/ms = 160 bytes.
+    _MULAW_SILENCE_FRAME: bytes = b"\xff" * 160
+    # Pump cadence: one 20 ms frame every 20 ms (real-time μ-law-8k rate).
+    _COMFORT_NOISE_INTERVAL_S: float = 0.02
+
+    def _start_comfort_noise(self) -> None:
+        """Pump paced μ-law-8k silence to the carrier until the first real
+        model frame, keeping the outbound leg primed during the
+        connect→first-delta window (see ``_comfort_noise_task`` doc).
+        Realtime engines only. Idempotent — a second call is a no-op while a
+        pump is already running. Cancelled by ``_stop_comfort_noise`` from the
+        first-frame guard and from teardown.
+        """
+        existing = self._comfort_noise_task
+        if existing is not None and not existing.done():
+            return
+
+        async def _pump() -> None:
+            try:
+                while True:
+                    await self.audio_sender.send_audio(self._MULAW_SILENCE_FRAME)
+                    await asyncio.sleep(self._COMFORT_NOISE_INTERVAL_S)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - carrier WS gone
+                # Carrier WS gone — stop pumping rather than spin on a dead
+                # socket. The first-frame guard / teardown clears the handle.
+                logger.debug("comfort-noise send failed: %s", exc)
+
+        self._comfort_noise_task = asyncio.create_task(_pump())
+
+    def _stop_comfort_noise(self) -> None:
+        """Cancel the comfort-noise pump if running. Idempotent."""
+        task = self._comfort_noise_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._comfort_noise_task = None
 
     async def _safe_on_transcript(self, payload: dict) -> None:
         """Invoke the user's ``on_transcript`` with exception containment.
@@ -1888,6 +1941,10 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             await sender(self.agent.first_message)
 
         self._background_task = asyncio.create_task(self._forward_events())
+        # Keep the outbound carrier leg primed during the connect→first-delta
+        # window (see ``_comfort_noise_task`` doc). Self-cancels on the first
+        # real model frame in ``_forward_events``.
+        self._start_comfort_noise()
 
     async def _forward_events(self) -> None:
         from getpatter.tools.tool_executor import ToolExecutor  # type: ignore[import]
@@ -1901,6 +1958,11 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         try:
             async for ev_type, ev_data in self._adapter.receive_events():
                 if ev_type == "audio":
+                    # Real model audio is ready — tear down the pre-first-audio
+                    # comfort-noise pump (no-op if already stopped or never
+                    # armed) before the first real frame goes out, so silence
+                    # and speech never interleave on the wire.
+                    self._stop_comfort_noise()
                     # Fallback: if audio arrives before speech_stopped (which
                     # can happen when JS/async event loop reorders WS frames
                     # under load, or with server VAD disabled) start the turn
@@ -2590,6 +2652,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def cleanup(self) -> None:
         """Cancel the event-forward task and close the OpenAI Realtime adapter."""
+        # Kill the realtime comfort-noise pump if the call ends before the
+        # model ever produced audio (otherwise the task leaks past teardown).
+        self._stop_comfort_noise()
         self._cancel_max_call_watchdog()
         if self._pending_assistant_timer is not None:
             self._pending_assistant_timer.cancel()
@@ -2747,6 +2812,10 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         logger.debug("ElevenLabs ConvAI connected")
 
         self._background_task = asyncio.create_task(self._forward_events())
+        # Keep the outbound carrier leg primed during the connect→first-delta
+        # window (see ``_comfort_noise_task`` doc). Self-cancels on the first
+        # real model frame in ``_forward_events``.
+        self._start_comfort_noise()
 
     async def _forward_events(self) -> None:
         # Arm first-byte capture so that the firstMessage turn (started in
@@ -2757,6 +2826,11 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
         try:
             async for ev_type, ev_data in self._adapter.receive_events():
                 if ev_type == "audio":
+                    # Real model audio is ready — tear down the pre-first-audio
+                    # comfort-noise pump (no-op if already stopped or never
+                    # armed) before the first real frame goes out, so silence
+                    # and speech never interleave on the wire.
+                    self._stop_comfort_noise()
                     # Fallback: audio before speech_stopped. Parity with TS.
                     if self.metrics is not None and not self.metrics.turn_active:
                         self.metrics.start_turn()
@@ -3036,6 +3110,9 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
 
     async def cleanup(self) -> None:
         """Cancel the event-forward task and close the ConvAI adapter."""
+        # Kill the realtime comfort-noise pump if the call ends before the
+        # model ever produced audio (otherwise the task leaks past teardown).
+        self._stop_comfort_noise()
         self._cancel_max_call_watchdog()
         if self._background_task:
             self._background_task.cancel()
