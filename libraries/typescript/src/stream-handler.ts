@@ -11,6 +11,7 @@ import { WebSocket as WSWebSocket } from 'ws';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { GeminiLiveAdapter } from './providers/gemini-live';
+import { GeminiCascadeAdapter } from './providers/gemini-cascade';
 import { DeepgramSTT } from './providers/deepgram-stt';
 import { createTTS } from './provider-factory';
 import type { STTAdapter, TTSAdapter, STTTranscript } from './provider-factory';
@@ -39,7 +40,7 @@ import {
   startSpan,
 } from './observability/tracing';
 
-type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter;
+type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter | GeminiCascadeAdapter;
 
 // ---------------------------------------------------------------------------
 // Tool-call preambles (OpenAI Realtime)
@@ -5659,6 +5660,10 @@ export class StreamHandler {
         // Gemini has no dedicated sendFirstMessage; sendText(role=user)
         // primes the opening turn so the model speaks first.
         await this.adapter.sendText(this.deps.agent.firstMessage);
+      } else if (this.adapter instanceof GeminiCascadeAdapter) {
+        // Cascade plays a pre-synthesised intro clip instantly (no Live→TTS
+        // round-trip) and primes Live history so the model doesn't re-greet.
+        await this.adapter.sendFirstMessage(this.deps.agent.firstMessage);
       }
       // ElevenLabs ConvAI sends firstMessage via connection config (handled in adapter.connect())
     }
@@ -5690,14 +5695,15 @@ export class StreamHandler {
     function_call: async (eventData) => {
       if (
         this.adapter instanceof OpenAIRealtimeAdapter ||
-        this.adapter instanceof GeminiLiveAdapter
+        this.adapter instanceof GeminiLiveAdapter ||
+        this.adapter instanceof GeminiCascadeAdapter
       ) {
-        // GeminiLiveAdapter shares the same function_call event shape
-        // ({call_id, name, arguments}) and exposes sendFunctionResult with
-        // the identical signature, so the OpenAI tool round-trip applies
+        // GeminiLiveAdapter and GeminiCascadeAdapter share the same function_call
+        // event shape ({call_id, name, arguments}) and expose sendFunctionResult
+        // with the identical signature, so the OpenAI tool round-trip applies
         // unchanged. The OpenAI-only niceties inside handleFunctionCall
         // (reassurance / progress sendText) are themselves instanceof-gated
-        // and silently skipped for Gemini.
+        // and silently skipped for Gemini adapters.
         await this.handleFunctionCall(eventData as { call_id: string; name: string; arguments: string });
       } else if (this.adapter instanceof ElevenLabsConvAIAdapter) {
         await this.handleConvAIClientTool(

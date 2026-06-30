@@ -77,6 +77,17 @@ interface GeminiLiveOptions {
   /** Gemini API version. Auto-detected from model name when omitted:
    *  'native-audio' models → 'v1alpha'; all others → SDK default (v1beta). */
   apiVersion?: string;
+  /** Native-audio affective dialog: model adapts tone to caller emotion. */
+  affectiveDialog?: boolean;
+  /** Native-audio proactive audio: model decides when to respond. */
+  proactiveAudio?: boolean;
+  /** Server-side VAD tuning (noise rejection + reply latency). */
+  vad?: {
+    startSensitivity?: 'HIGH' | 'LOW';
+    endSensitivity?: 'HIGH' | 'LOW';
+    silenceDurationMs?: number;
+    prefixPaddingMs?: number;
+  };
 }
 
 /** Realtime adapter for Google's Gemini Live native-audio API. */
@@ -91,6 +102,9 @@ export class GeminiLiveAdapter {
   /** Output sample rate — exposed so callers can configure downstream transcoding. */
   readonly outputSampleRate: number;
   private readonly temperature: number;
+  private readonly affectiveDialog: boolean;
+  private readonly proactiveAudio: boolean;
+  private readonly vad: GeminiLiveOptions['vad'];
 
   private client: unknown = null;
   private session: unknown = null;
@@ -154,6 +168,9 @@ export class GeminiLiveAdapter {
     this.inputSampleRate = options.inputSampleRate ?? GEMINI_DEFAULT_INPUT_SR;
     this.outputSampleRate = options.outputSampleRate ?? GEMINI_DEFAULT_OUTPUT_SR;
     this.temperature = options.temperature ?? 0.8;
+    this.affectiveDialog = options.affectiveDialog ?? false;
+    this.proactiveAudio = options.proactiveAudio ?? false;
+    this.vad = options.vad;
     this._ready = new Promise<void>((resolve) => {
       this._readyResolve = resolve;
     });
@@ -201,6 +218,26 @@ export class GeminiLiveAdapter {
       inputAudioTranscription: {},
       outputAudioTranscription: {},
     };
+    // Native-audio humanization knobs (opt-in). enableAffectiveDialog makes the
+    // model adapt prosody to the caller's emotion; proactivity lets it choose
+    // when to speak. Both are v1alpha native-audio features.
+    if (this.affectiveDialog) {
+      config.enableAffectiveDialog = true;
+    }
+    if (this.proactiveAudio) {
+      config.proactivity = { proactiveAudio: true };
+    }
+    // Tune turn-taking: LOW start sensitivity ignores background noise/breathing
+    // (a known demo-line issue), HIGH end sensitivity + a shorter silence window
+    // cut the wait before the model replies.
+    if (this.vad) {
+      const ad: Record<string, unknown> = {};
+      if (this.vad.startSensitivity) ad.startOfSpeechSensitivity = `START_SENSITIVITY_${this.vad.startSensitivity}`;
+      if (this.vad.endSensitivity) ad.endOfSpeechSensitivity = `END_SENSITIVITY_${this.vad.endSensitivity}`;
+      if (this.vad.silenceDurationMs !== undefined) ad.silenceDurationMs = this.vad.silenceDurationMs;
+      if (this.vad.prefixPaddingMs !== undefined) ad.prefixPaddingMs = this.vad.prefixPaddingMs;
+      config.realtimeInputConfig = { automaticActivityDetection: ad };
+    }
     if (this.instructions) {
       config.systemInstruction = { parts: [{ text: this.instructions }] };
     }

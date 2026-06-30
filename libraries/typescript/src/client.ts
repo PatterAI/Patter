@@ -45,6 +45,7 @@ import { Realtime as OpenAIRealtime } from "./engines/openai";
 import { Realtime2 as OpenAIRealtime2 } from "./engines/openai-2";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
 import { GeminiLive } from "./engines/gemini";
+import { GeminiCascade } from "./engines/gemini-cascade";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import { resolveLogRoot } from "./services/call-log";
 import { validateAllToolSchemas } from "./tools/schema-validation";
@@ -716,9 +717,17 @@ export class Patter {
           model: working.model ?? engine.model,
           voice: working.voice ?? engine.voice,
         };
+      } else if (engine instanceof GeminiCascade) {
+        working = {
+          ...working,
+          provider: 'gemini_cascade',
+          // Explicit agent() kwargs win over the engine marker value.
+          model: working.model ?? engine.liveModel,
+          voice: working.voice ?? engine.voice,
+        };
       } else {
         throw new Error(
-          "Unknown engine. Expected OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI, or GeminiLive instance.",
+          "Unknown engine. Expected OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI, GeminiLive, or GeminiCascade instance.",
         );
       }
     } else if (
@@ -734,7 +743,7 @@ export class Patter {
 
     // Validate provider
     if (working.provider) {
-      const valid = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'pipeline'];
+      const valid = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'gemini_cascade', 'pipeline'];
       if (!valid.includes(working.provider)) {
         throw new Error(`provider must be one of: ${valid.join(', ')}. Got: '${working.provider}'`);
       }
@@ -920,8 +929,8 @@ export class Patter {
     }
 
     // Validate provider
-    const validProviders = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'pipeline'] as const;
-    if (opts.agent.provider && !validProviders.includes(opts.agent.provider)) {
+    const validProviders = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'gemini_cascade', 'pipeline'] as const;
+    if (opts.agent.provider && !validProviders.includes(opts.agent.provider as typeof validProviders[number])) {
       throw new Error(`agent.provider must be one of: ${validProviders.join(', ')}`);
     }
 

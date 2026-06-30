@@ -14,6 +14,7 @@ import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { GeminiLiveAdapter } from './providers/gemini-live';
+import { GeminiCascadeAdapter } from './providers/gemini-cascade';
 import { PlivoAdapter, dropPlivoVoicemail } from './providers/plivo-adapter';
 import { TwilioAdapter } from './providers/twilio-adapter';
 import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
@@ -84,7 +85,7 @@ export interface LocalConfig {
   persistRoot?: string | null;
 }
 
-type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter;
+type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter | GeminiCascadeAdapter;
 
 export const TRANSFER_CALL_TOOL = {
   name: 'transfer_call',
@@ -604,6 +605,23 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
       ...(agent.voice ?? engine.voice ? { voice: agent.voice ?? engine.voice } : {}),
       ...(agent.language ? { language: agent.language } : {}),
       ...(engine.temperature !== undefined ? { temperature: engine.temperature } : {}),
+      ...(engine.affectiveDialog !== undefined ? { affectiveDialog: engine.affectiveDialog } : {}),
+      ...(engine.proactiveAudio !== undefined ? { proactiveAudio: engine.proactiveAudio } : {}),
+      ...(engine.vad !== undefined ? { vad: engine.vad } : {}),
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
+  }
+  if (agent.provider === 'gemini_cascade') {
+    if (!engine || engine.kind !== 'gemini_cascade') {
+      throw new Error(
+        "Gemini Cascade mode requires `agent.engine = new GeminiCascade({...})`.",
+      );
+    }
+    return new GeminiCascadeAdapter(engine.apiKey, {
+      model: agent.model ?? engine.liveModel,
+      ttsModel: engine.ttsModel,
+      voice: agent.voice ?? engine.voice,
       instructions: resolvedPrompt ?? agent.systemPrompt,
       tools,
     });

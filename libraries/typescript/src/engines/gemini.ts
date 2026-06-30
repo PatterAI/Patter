@@ -35,6 +35,34 @@ export interface GeminiLiveOptions {
   language?: string;
   /** Sampling temperature. Defaults to `0.8`. */
   temperature?: number;
+  /**
+   * Enable native-audio affective dialog — the model adapts its tone/prosody to
+   * the caller's emotion. Opt-in (default off) for backward compatibility.
+   */
+  affectiveDialog?: boolean;
+  /**
+   * Enable native-audio proactive audio — the model decides when to respond and
+   * can stay silent to non-directed speech. Opt-in (default off).
+   */
+  proactiveAudio?: boolean;
+  /**
+   * Tune the server-side voice-activity detector. `startSensitivity: 'LOW'`
+   * rejects background noise/breathing; `endSensitivity: 'HIGH'` + a lower
+   * `silenceDurationMs` cut the wait before the model replies. Opt-in.
+   */
+  vad?: GeminiVadOptions;
+}
+
+/** Server-side VAD tuning for the Gemini Live native-audio engine. */
+export interface GeminiVadOptions {
+  /** 'LOW' = less sensitive (ignores noise); 'HIGH' = triggers on quieter sound. */
+  startSensitivity?: 'HIGH' | 'LOW';
+  /** 'HIGH' = detects end-of-turn faster (lower latency); 'LOW' = waits longer. */
+  endSensitivity?: 'HIGH' | 'LOW';
+  /** Silence (ms) before the turn is considered over. Lower = snappier replies. */
+  silenceDurationMs?: number;
+  /** Audio (ms) retained before detected speech start. */
+  prefixPaddingMs?: number;
 }
 
 /**
@@ -47,6 +75,9 @@ export class GeminiLive {
   readonly voice?: string;
   readonly language?: string;
   readonly temperature?: number;
+  readonly affectiveDialog?: boolean;
+  readonly proactiveAudio?: boolean;
+  readonly vad?: GeminiVadOptions;
 
   constructor(opts: GeminiLiveOptions = {}) {
     const key =
@@ -62,5 +93,8 @@ export class GeminiLive {
     this.voice = opts.voice;
     this.language = opts.language;
     this.temperature = opts.temperature;
+    this.affectiveDialog = opts.affectiveDialog;
+    this.proactiveAudio = opts.proactiveAudio;
+    this.vad = opts.vad;
   }
 }
