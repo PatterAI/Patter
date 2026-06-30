@@ -2,6 +2,56 @@
 
 ## Log
 
+### [2026-06-30] — Telnyx native-audio realtime keepalive (comfort-noise pump)
+
+**Type:** fix
+**Branch:** fix/telnyx-native-audio-bridge
+**PR:** (unreleased)
+
+**What it does:**
+Native-audio realtime engines (GeminiLive / OpenAIRealtime2 / ConvAI) answered
+over Telnyx but produced no caller audio and the call dropped ~1.6 s in
+(`normal_clearing`, "1 turn"); Twilio worked. Root cause: the realtime path puts
+ZERO bytes on the carrier between the carrier `start` event and the model's first
+audio delta (cold `adapter.connect()` + model TTFT + resampler warmup, often
+>1.5 s). Twilio tolerates that gap; Telnyx clears the idle bidirectional RTP leg.
+The fix pumps paced μ-law-8k silence (the exact frame format already proven on
+Telnyx, 160 bytes / 20 ms, `0xFF` digital zero) from stream-start until the first
+real model frame, keeping the outbound leg primed. Self-cancels the instant real
+model audio arrives. Pipeline mode never arms the pump (it already plays
+firstMessage TTS within ~200 ms); Twilio/Plivo are unaffected (they accept the
+same silence frame and have no such timeout).
+
+**Implementation details:**
+- TS: added `comfortNoiseTimer` state + `MULAW_SILENCE_FRAME`/`COMFORT_NOISE_INTERVAL_MS`
+  constants and `startComfortNoise`/`stopComfortNoise` to `StreamHandler`. Armed at
+  the end of `initRealtimeAdapter` (realtime-only, post-connect); cancelled as the
+  first statement of `onAdapterAudio` and in `handleStop`/`handleWsClose`.
+- Python: added `_comfort_noise_task` + `_MULAW_SILENCE_FRAME`/`_COMFORT_NOISE_INTERVAL_S`
+  and `_start_comfort_noise`/`_stop_comfort_noise` to the base `StreamHandler`. Armed
+  after the `_forward_events` task is spawned in both realtime subclasses'
+  `start()` (`OpenAIRealtimeStreamHandler`, `ElevenLabsConvAIStreamHandler`);
+  cancelled in each `_forward_events` first-audio guard and in each subclass
+  `cleanup()` (the single carrier teardown funnel for stop + ws-close).
+- No change to the transcode chain, `sendAudio` envelopes, streaming negotiation,
+  or `bytesPerMs` bookkeeping — those were already correct.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `libraries/typescript/src/stream-handler.ts` | Comfort-noise pump (constants, state, start/stop, arm/cancel/teardown) |
+| `libraries/python/getpatter/stream_handler.py` | Python parity comfort-noise pump (base helpers + realtime subclass wiring) |
+
+**Tests added:**
+- `libraries/typescript/tests/telnyx-comfort-noise.mocked.test.ts` — 5 cases (silence-frame decode, pump-then-stop, pipeline never arms, stop/ws-close no leak)
+- `libraries/python/tests/test_telnyx_comfort_noise.py` — 5 cases (silence-frame decode, pump-then-stop, idempotent start, stop no leak, cleanup stops pump)
+
+**Breaking changes:** None
+
+**Docs to update:**
+- [ ] None (internal bug fix; no public surface change)
+
 ### [2026-06-18] — Gemini Live Python parity: audio codec transcode + `GeminiLive` marker
 
 **Type:** feat + fix
