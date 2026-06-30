@@ -1,5 +1,46 @@
 ## Unreleased
 
+## 0.7.1 (2026-06-30)
+
+### Added
+
+- **Engine markers shipped: `GeminiLive`, `GeminiCascade`, and a native
+  `InworldRealtime`.** 0.7.0 exported the Gemini pipeline factory + adapter but
+  not the `GeminiLive` engine marker, so `new GeminiLive({...})` / the engine
+  import failed at runtime; and there was no native Inworld realtime engine.
+  Now `import { GeminiLive, GeminiCascade, InworldRealtime } from "getpatter"`
+  resolves at runtime. The richer `GeminiLiveAdapter` (mulaw8↔PCM telephony
+  transcode, apiVersion auto-detect, `GEMINI_LIVE_3_1_FLASH_PREVIEW`) plus
+  `GeminiSTT`/`GeminiTTS` are integrated; `InworldRealtimeAdapter` subclasses the
+  OpenAI Realtime adapter and overrides only the transport
+  (`wss://api.inworld.ai/v1/realtime`, Bearer/JWT) via Inworld's OpenAI-Realtime
+  migration path. Backward compatible — OpenAIRealtime / OpenAIRealtime2 /
+  Ultravox / ConvAI unchanged.
+
+### Fixed
+
+- **Gemini Live spoke the model's "thinking" before the reply** (native-audio,
+  every turn). The Live setup now always sends `thinkingConfig` with a voice
+  default of `thinkingBudget: 0` (OFF), opt-in via `thinking`/`thinkingBudget`
+  on `GeminiLiveOptions`; and the adapter defensively drops any `thought===true`
+  part from BOTH the audio stream and the text transcript (never logged).
+- **`gemini-3.1-flash-live-preview` dropped the call with a silent "session
+  ready timeout".** It is a native-audio model served only on `v1alpha`, but its
+  id lacks the `native-audio` token so the heuristic chose `v1beta`. New
+  `geminiRequiresV1Alpha()` selects `v1alpha` for native-audio AND
+  `flash-live-preview` (explicit `apiVersion` overrides); connect failures now
+  throw a clear, actionable error (model id + resolved apiVersion + root causes)
+  instead of dead air.
+
+### Changed
+
+- **`@google/genai` peerDependency bumped `^0.3.0` → `>=2.0.0`** (kept optional)
+  for the 2.x unified SDK, so `npm install getpatter` alongside
+  `@google/genai@^2.x` no longer needs `--legacy-peer-deps`.
+- **`create-getpatter` launcher realigned to the SDK version (lockstep).** The
+  launcher pins the `getpatter` version it bootstraps to its own version, so it
+  now tracks the SDK again (`npm create getpatter` provisions the current SDK).
+
 ## 0.7.0 (2026-06-30)
 
 ### Added

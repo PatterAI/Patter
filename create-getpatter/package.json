@@ -1,6 +1,6 @@
 {
   "name": "create-getpatter",
-  "version": "0.6.9",
+  "version": "0.7.1",
   "description": "npm create shim for Patter — runs `getpatter init`, the greenfield voice-agent setup wizard",
   "license": "MIT",
   "author": {
