@@ -245,6 +245,27 @@ function isValidE164(number: string): boolean {
 }
 
 /**
+ * Opt-in transfer DESTINATION POLICY. `transfer_call`'s destination is
+ * chosen by the LLM (caller-steerable via prompt injection), so the E.164
+ * format gate alone cannot stop attacker-directed toll-fraud transfers.
+ * When either allowlist is configured the destination must be an exact
+ * member of `allowedNumbers` OR start with one of `allowedPrefixes`
+ * (union). Both unset (default) keeps destinations unrestricted; a
+ * configured-but-empty policy denies every destination (explicit lockdown).
+ * Mirrors Python `_transfer_destination_allowed`.
+ */
+export function isTransferDestinationAllowed(
+  number: string,
+  allowedNumbers?: readonly string[],
+  allowedPrefixes?: readonly string[],
+): boolean {
+  if (allowedNumbers == null && allowedPrefixes == null) return true;
+  if (allowedNumbers && allowedNumbers.includes(number)) return true;
+  if (allowedPrefixes && allowedPrefixes.some((p) => number.startsWith(p))) return true;
+  return false;
+}
+
+/**
  * Augment a tool list with the built-in `transfer_call` / `end_call` tools,
  * wired to the telephony-level transfer / hangup callbacks. Used by pipeline
  * mode to match the Realtime path's tool surface (Realtime injects the same
@@ -264,6 +285,10 @@ export function augmentWithBuiltinHandoffTools(
     transferCall?: (number: string, options?: TransferCallOptions) => Promise<TransferCallResult | void>;
     endCall?: (reason: string) => Promise<void>;
   },
+  transferPolicy?: {
+    readonly transferAllowedNumbers?: readonly string[];
+    readonly transferAllowedPrefixes?: readonly string[];
+  },
 ): ToolDefinition[] {
   const out: ToolDefinition[] = [...(userTools ?? [])];
   if (callbacks.transferCall) {
@@ -282,6 +307,25 @@ export function augmentWithBuiltinHandoffTools(
         }
         if (!isValidE164(number)) {
           return JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' });
+        }
+        // Destination policy AFTER the format gate: the number is LLM-chosen
+        // (caller-steerable via prompt injection), so a well-formed
+        // premium-rate number must still be refused here — before either
+        // mode's carrier REST call.
+        if (
+          !isTransferDestinationAllowed(
+            number,
+            transferPolicy?.transferAllowedNumbers,
+            transferPolicy?.transferAllowedPrefixes,
+          )
+        ) {
+          getLogger().warn(
+            `transfer_call rejected: destination not allowed by policy ${maskPhoneNumber(number)}`,
+          );
+          return JSON.stringify({
+            error: 'Transfer destination not allowed by policy',
+            status: 'rejected',
+          });
         }
         if (mode === 'warm') {
           const outcome = await transferCall(number, { mode: 'warm', summary });
@@ -6525,6 +6569,25 @@ export class StreamHandler {
         respond(JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' }), true);
         return;
       }
+      // Destination policy AFTER the format gate: the number is LLM-chosen
+      // (caller-steerable via prompt injection), so a well-formed
+      // premium-rate number must still be refused before the carrier call.
+      if (
+        !isTransferDestinationAllowed(
+          number,
+          this.currentAgent.transferAllowedNumbers,
+          this.currentAgent.transferAllowedPrefixes,
+        )
+      ) {
+        getLogger().warn(
+          `transfer_call rejected (${this.deps.bridge.label}): destination not allowed by policy ${maskPhoneNumber(number)}`,
+        );
+        respond(
+          JSON.stringify({ error: 'Transfer destination not allowed by policy', status: 'rejected' }),
+          true,
+        );
+        return;
+      }
       try {
         await this.deps.bridge.transferCall(this.callId, number);
         respond(`Transferring to ${number}`);
@@ -6591,6 +6654,27 @@ export class StreamHandler {
       if (!isValidE164(transferTo)) {
         getLogger().warn(`transfer_call rejected (${this.deps.bridge.label}): invalid number ${JSON.stringify(transferTo)}`);
         const rejection = JSON.stringify({ error: 'Invalid phone number format', status: 'rejected' });
+        await adapter.sendFunctionResult(fc.call_id, rejection);
+        await this.emitToolEvent('transfer_call', transferArgs, rejection);
+        return;
+      }
+      // Destination policy AFTER the format gate: the number is LLM-chosen
+      // (caller-steerable via prompt injection), so a well-formed
+      // premium-rate number must still be refused before the carrier call.
+      if (
+        !isTransferDestinationAllowed(
+          transferTo,
+          this.currentAgent.transferAllowedNumbers,
+          this.currentAgent.transferAllowedPrefixes,
+        )
+      ) {
+        getLogger().warn(
+          `transfer_call rejected (${this.deps.bridge.label}): destination not allowed by policy ${maskPhoneNumber(transferTo)}`,
+        );
+        const rejection = JSON.stringify({
+          error: 'Transfer destination not allowed by policy',
+          status: 'rejected',
+        });
         await adapter.sendFunctionResult(fc.call_id, rejection);
         await this.emitToolEvent('transfer_call', transferArgs, rejection);
         return;
@@ -7035,6 +7119,10 @@ export class StreamHandler {
       {
         transferCall: (number, options) => this.deps.bridge.transferCall(this.callId, number, options),
         endCall: () => this.deps.bridge.endCall(this.callId, this.ws),
+      },
+      {
+        transferAllowedNumbers: this.currentAgent.transferAllowedNumbers,
+        transferAllowedPrefixes: this.currentAgent.transferAllowedPrefixes,
       },
     );
     const handoffs = this.currentAgent.handoffs;

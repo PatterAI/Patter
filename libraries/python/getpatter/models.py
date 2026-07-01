@@ -637,6 +637,22 @@ class Agent:
     # instances built with :meth:`Patter.agent`; chained handoffs follow the
     # TARGET's own ``handoffs`` map.
     handoffs: "dict[str, Agent] | None" = None
+    # Opt-in DESTINATION POLICY for the built-in ``transfer_call`` tool —
+    # defense-in-depth against prompt-injected toll fraud. The transfer
+    # destination is chosen by the LLM (caller-steerable), so the E.164
+    # format gate alone cannot stop an attacker directing calls to a
+    # premium-rate number billed to the operator. When either field is set,
+    # the destination must be an exact member of ``transfer_allowed_numbers``
+    # OR start with one of ``transfer_allowed_prefixes`` (union); anything
+    # else is rejected with the standard tool error envelope BEFORE any
+    # carrier REST call. Enforced in every mode (OpenAI Realtime
+    # ``function_call``, Pipeline built-in handler, ElevenLabs ConvAI client
+    # tool). ``None`` for both (default) keeps today's format-only gate; an
+    # empty tuple denies ALL transfers (explicit lockdown).
+    transfer_allowed_numbers: tuple[str, ...] | None = None
+    # Allowed E.164 prefixes, e.g. ``("+1", "+44")`` — see
+    # ``transfer_allowed_numbers`` above for semantics.
+    transfer_allowed_prefixes: tuple[str, ...] | None = None
     # On-demand SKILLS the PRIMARY agent can activate mid-call (progressive
     # disclosure — the Anthropic Agent Skills pattern). When set, Patter
     # auto-injects a built-in ``use_skill`` tool (Realtime + Pipeline modes)

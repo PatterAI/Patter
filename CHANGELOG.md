@@ -1,5 +1,25 @@
 ## Unreleased
 
+### Added
+
+- **Opt-in destination policy for the built-in `transfer_call` tool**
+  (hardening for GH issue #205 — prompt-injected toll fraud). The transfer
+  destination is chosen by the LLM, which is steerable by caller speech, and
+  the only gate was E.164 *format* — a successful prompt injection could
+  direct a billable outbound leg to any attacker-chosen (premium-rate)
+  number. New `Patter.agent()` options `transfer_allowed_numbers` /
+  `transfer_allowed_prefixes` (Py) — `transferAllowedNumbers` /
+  `transferAllowedPrefixes` (TS) — restrict destinations to an exact-number
+  allowlist and/or E.164 prefix allowlist (union). Enforced at every guard
+  site BEFORE the carrier REST call (OpenAI Realtime `function_call`,
+  Pipeline built-in handler, ElevenLabs ConvAI client tool), rejecting with
+  the standard `{"error": ..., "status": "rejected"}` envelope so the agent
+  keeps the call. Unset (default) preserves today's behaviour byte-identical;
+  an empty list denies all transfers. Allowlist entries are validated at
+  `agent()` construction (fail fast on typos).
+  `libraries/python/getpatter/{client,models,stream_handler}.py`,
+  `telephony/common.py`; `libraries/typescript/src/{client,types,stream-handler}.ts`.
+
 ## 0.7.0 (2026-06-30)
 
 ### Added

@@ -1745,6 +1745,8 @@ class Patter:
         mcp_servers: list | None = None,
         consult: ConsultConfig | None = None,
         handoffs: dict[str, Agent] | None = None,
+        transfer_allowed_numbers: list[str] | tuple[str, ...] | None = None,
+        transfer_allowed_prefixes: list[str] | tuple[str, ...] | None = None,
         skills: list[Skill] | tuple[Skill, ...] | None = None,
         prewarm_first_message: bool | None = None,
         openai_realtime_noise_reduction: Literal["near_field", "far_field"]
@@ -1829,6 +1831,21 @@ class Patter:
                 voice on engines that cannot switch voice mid-session) is
                 retained. Chained handoffs follow the target's own
                 ``handoffs`` map.
+            transfer_allowed_numbers: Opt-in destination allowlist for the
+                built-in ``transfer_call`` tool — exact E.164 numbers the
+                agent may transfer to. Defense-in-depth against
+                prompt-injected toll fraud: the destination is chosen by the
+                LLM (caller-steerable), so without a policy any well-formed
+                E.164 number is dialed on the operator's account. When this
+                and/or ``transfer_allowed_prefixes`` is set, a destination
+                matching NEITHER is rejected with the standard tool error
+                envelope before any carrier REST call (all modes). ``None``
+                (default) keeps destinations unrestricted; ``[]`` denies all
+                transfers.
+            transfer_allowed_prefixes: Opt-in allowlist of E.164 prefixes
+                (e.g. ``["+1", "+4420"]``) for ``transfer_call`` — union with
+                ``transfer_allowed_numbers``. Each entry is ``'+'`` followed
+                by 1-14 digits.
             skills: On-demand capabilities the PRIMARY agent can activate
                 mid-call — a list of ``Skill`` instances (progressive
                 disclosure / the Anthropic Agent Skills pattern). When set,
@@ -2160,6 +2177,29 @@ class Patter:
                     "modes and will be ignored for this agent."
                 )
 
+        # --- Validate the opt-in transfer destination policy ---
+        # Allowlist entries must be well-formed HERE (fail fast at agent
+        # construction): a typo'd entry would otherwise silently deny — or
+        # worse, allow — transfers only at call time, mid-conversation.
+        if transfer_allowed_numbers is not None:
+            from getpatter.telephony.common import _validate_e164
+
+            for entry in transfer_allowed_numbers:
+                if not isinstance(entry, str) or not _validate_e164(entry):
+                    raise ValueError(
+                        "transfer_allowed_numbers entries must be E.164 "
+                        f"(+<country><number>), got {entry!r}."
+                    )
+            transfer_allowed_numbers = tuple(transfer_allowed_numbers)
+        if transfer_allowed_prefixes is not None:
+            for entry in transfer_allowed_prefixes:
+                if not isinstance(entry, str) or not re.match(r"^\+\d{1,14}$", entry):
+                    raise ValueError(
+                        "transfer_allowed_prefixes entries must be '+' followed "
+                        f"by 1-14 digits (e.g. '+1', '+4420'), got {entry!r}."
+                    )
+            transfer_allowed_prefixes = tuple(transfer_allowed_prefixes)
+
         # --- Normalise + validate skills (progressive-disclosure use_skill) ---
         skills_out: tuple[Skill, ...] = ()
         if skills:
@@ -2246,6 +2286,8 @@ class Patter:
             mcp_servers=tuple(mcp_servers) if mcp_servers is not None else None,
             consult=consult,
             handoffs=dict(handoffs) if handoffs is not None else None,
+            transfer_allowed_numbers=transfer_allowed_numbers,
+            transfer_allowed_prefixes=transfer_allowed_prefixes,
             skills=skills_out,
             prewarm_first_message=prewarm_first_message,
             openai_realtime_reasoning_effort=openai_realtime_reasoning_effort,

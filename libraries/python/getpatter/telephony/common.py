@@ -12,7 +12,31 @@ from getpatter.providers.base import STTProvider, TTSProvider
 
 def _validate_e164(number: str) -> bool:
     """Return True if *number* is a valid E.164 phone number."""
-    return bool(re.match(r'^\+[1-9]\d{6,14}$', number))
+    return bool(re.match(r"^\+[1-9]\d{6,14}$", number))
+
+
+def _transfer_destination_allowed(
+    number: str,
+    allowed_numbers: "tuple[str, ...] | list[str] | None",
+    allowed_prefixes: "tuple[str, ...] | list[str] | None",
+) -> bool:
+    """Return True if *number* passes the opt-in transfer destination policy.
+
+    ``transfer_call``'s destination is chosen by the LLM (caller-steerable via
+    prompt injection), so the E.164 format gate alone cannot stop
+    attacker-directed toll-fraud transfers. When either allowlist is
+    configured the destination must be an exact member of *allowed_numbers*
+    OR start with one of *allowed_prefixes* (union). ``None`` for both
+    (default) keeps destinations unrestricted; a configured-but-empty policy
+    denies every destination (explicit lockdown).
+    """
+    if allowed_numbers is None and allowed_prefixes is None:
+        return True
+    if allowed_numbers and number in allowed_numbers:
+        return True
+    if allowed_prefixes and any(number.startswith(p) for p in allowed_prefixes):
+        return True
+    return False
 
 
 def _sanitize_variable_value(value: str) -> str:
@@ -23,7 +47,7 @@ def _sanitize_variable_value(value: str) -> str:
     ``\\n``/``\\r`` filter misses — any of these can open a new line in the
     system prompt the value is interpolated into. Mirrors TS ``sanitizeVariables``.
     """
-    return re.sub(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]', '', str(value))[:500]
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", "", str(value))[:500]
 
 
 def _resolve_variables(template: str, variables: dict) -> str:
@@ -147,7 +171,9 @@ def _create_stt_from_config(config, for_twilio: bool = False):
             "domain",
         }
         kwargs = {k: v for k, v in opts.items() if k in allowed}
-        return SpeechmaticsSTT(api_key=config.api_key, language=config.language, **kwargs)
+        return SpeechmaticsSTT(
+            api_key=config.api_key, language=config.language, **kwargs
+        )
 
     if provider == "assemblyai":
         from getpatter.providers.assemblyai_stt import AssemblyAISTT  # type: ignore[import]
