@@ -3621,6 +3621,11 @@ class PipelineStreamHandler(StreamHandler):
         # permanently broken model. Mirrors TS ``turnDetectorFailed`` and
         # the existing ``vadDisabled`` fail-once pattern.
         self._semantic_detector_failed: bool = False
+        # Latest in-flight caller transcript (interim or final) seen this
+        # turn — the trailing line of the rolling text a TEXT turn detector
+        # (NamoTurnDetector) scores. Only tracked when a detector is
+        # configured; reset on turn commit. Audio detectors ignore it.
+        self._semantic_last_transcript: str = ""
         # EOU trigger for the NEXT committed turn (``EouTrigger.VAD_SILENCE``
         # | ``EouTrigger.SEMANTIC_TURN_DETECTOR``). Stamped by the semantic
         # finalize paths, consumed (and reset) by ``_dispatch_turn``.
@@ -5647,6 +5652,12 @@ class PipelineStreamHandler(StreamHandler):
                 # stt_ms measures from speech-start not final-transcript delivery.
                 if transcript.text and self.metrics is not None:
                     self.metrics.start_turn_if_idle()
+                # Track the latest in-flight caller text (interim or final) so a
+                # TEXT turn detector can score the rolling transcript on the VAD
+                # speech_end edge. Only when a detector is configured (zero cost
+                # otherwise); audio detectors never read it.
+                if transcript.text and self._turn_detector is not None:
+                    self._semantic_last_transcript = transcript.text
                 # Emit fine-grained transcript events (additive — existing
                 # ``on_transcript`` callback path is unchanged).
                 if transcript.text and self._event_bus is not None:
@@ -7140,6 +7151,10 @@ class PipelineStreamHandler(StreamHandler):
     # While a hold is active, re-score after each additional silence window
     # of this many milliseconds of inbound audio (~10 frames at 20 ms/frame).
     _SEMANTIC_POLL_MS: int = 200
+    # How many recent conversation turns (user + assistant) to include ahead
+    # of the caller's current in-flight utterance in the rolling transcript a
+    # TEXT turn detector scores. Bounded so the tokenizer prompt stays small.
+    _SEMANTIC_TRANSCRIPT_TURNS: int = 4
 
     def _semantic_buffer_append(self, pcm: bytes) -> None:
         """Append a post-decode PCM16-16k frame to the rolling 8 s window."""
@@ -7164,6 +7179,34 @@ class PipelineStreamHandler(StreamHandler):
         smart-turn integrations, which score per-turn audio)."""
         self._semantic_audio_ring.clear()
         self._semantic_audio_ring_bytes = 0
+        # The committed utterance now lives in ``conversation_history``; drop
+        # the in-flight transcript so the next turn's text starts clean.
+        self._semantic_last_transcript = ""
+
+    def _semantic_transcript_text(self) -> str:
+        """Assemble the rolling transcript for a TEXT turn detector.
+
+        The last few conversation turns (user + assistant, oldest first)
+        followed by the caller's current in-flight utterance — the text a
+        detector like ``NamoTurnDetector`` tokenizes to decide whether the
+        caller has finished their turn. Audio detectors ignore this.
+        Returns an empty string when there is nothing to score yet.
+        """
+        parts: list[str] = []
+        history = getattr(self, "conversation_history", None)
+        if history:
+            recent = [
+                str(entry.get("text") or "").strip()
+                for entry in history
+                if entry.get("role") in ("user", "assistant")
+            ]
+            recent = [text for text in recent if text]
+            if recent:
+                parts.extend(recent[-self._SEMANTIC_TRANSCRIPT_TURNS :])
+        in_flight = (getattr(self, "_semantic_last_transcript", "") or "").strip()
+        if in_flight:
+            parts.append(in_flight)
+        return "\n".join(parts)
 
     async def _semantic_eou_check(self) -> None:
         """Score the rolling window; finalize, or hold for more silence.
@@ -7179,7 +7222,12 @@ class PipelineStreamHandler(StreamHandler):
         if detector is None:
             return
         try:
-            probability = float(await detector.predict(self._semantic_window_bytes()))
+            probability = float(
+                await detector.predict(
+                    self._semantic_window_bytes(),
+                    transcript=self._semantic_transcript_text(),
+                )
+            )
         except Exception as exc:
             self._semantic_detector_failed = True
             logger.warning(

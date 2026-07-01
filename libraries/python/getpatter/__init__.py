@@ -189,6 +189,13 @@ def __getattr__(name):
         from getpatter.providers import smart_turn as _smart_turn
 
         return getattr(_smart_turn, name)
+    # NAMO Turn Detector v1 — text-based end-of-utterance (needs the
+    # ``namo-turn-detector`` extra: numpy + onnxruntime + transformers, plus a
+    # downloaded NAMO v1 ONNX model + tokenizer).
+    if name in {"NamoTurnDetector", "NamoProviderTag"}:
+        from getpatter.providers import namo_turn_detector as _namo
+
+        return getattr(_namo, name)
     raise AttributeError(f"module 'getpatter' has no attribute {name!r}")
 
 
@@ -520,6 +527,7 @@ __all__ = [
     "TelnyxTTS",
     "SileroVAD",
     "SmartTurnDetector",
+    "NamoTurnDetector",
     "KrispVivaFilter",
     "DeepFilterNetFilter",
     "init_tracing",

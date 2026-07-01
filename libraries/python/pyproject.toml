@@ -84,6 +84,16 @@ turn-detector = [
     "onnxruntime>=1.18",
     "numpy>=1.26",
 ]
+# NAMO Turn Detector v1 — text-based end-of-utterance model (VideoSDK,
+# Apache-2.0). Needs a Hugging Face tokenizer on top of the ONNX runtime; the
+# per-language ONNX weights + tokenizer are NOT bundled — download a NAMO v1
+# model and set PATTER_NAMO_MODEL (or pass model_path= to
+# NamoTurnDetector.load).
+namo-turn-detector = [
+    "onnxruntime>=1.18",
+    "numpy>=1.26",
+    "transformers>=4.40",
+]
 # Krisp VIVA is a proprietary SDK (krisp-audio). Users must install it
 # separately and provide KRISP_VIVA_SDK_LICENSE_KEY + KRISP_VIVA_FILTER_MODEL_PATH.
 krisp = [
