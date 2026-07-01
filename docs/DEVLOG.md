@@ -2,6 +2,56 @@
 
 ## Log
 
+### [2026-06-30] — Telnyx native-audio realtime: guard premature model end_call
+
+**Type:** fix
+**Branch:** fix/telnyx-native-audio-bridge
+**PR:** (unreleased)
+
+**What it does:**
+On inbound Telnyx calls with a native-audio realtime engine (GeminiLive /
+OpenAIRealtime2) the model would greet and immediately emit `end_call`
+("no_response") ~1.5 s in, dropping a live caller before their first turn
+registered. Twilio inbound and pipeline mode were unaffected. The realtime
+`end_call` handler executed the hang-up unconditionally, and the `end_call` tool
+description literally listed `'no_response'` as a sample reason — teaching the
+model to bail on perceived silence. On Telnyx the cold realtime connect→
+first-audio window eats the whole opening budget, so the model bails before the
+caller's speech arrives. The fix (a) drops `'no_response'` from the tool
+description, and (b) refuses a model-initiated `end_call` that fires before ANY
+caller speech AND within a 6 s opening grace window, returning a `rejected`
+function result that tells the model to keep listening (session stays open, so
+the caller's audio — which does reach the model — drives the next turn). After
+the caller speaks, or after the grace window, `end_call` behaves normally.
+
+**Implementation details:**
+- `callStartedAtMs` / `_call_started_at_ms` stamped at the per-call start
+  (`handleCallStart` in TS; realtime `start()` in Python — kept out of the base
+  `__init__` so it does not consume a `time.time()` value that timing-brittle
+  pipeline tests script).
+- `userHasSpoken` / `_user_has_spoken` set only AFTER the real Whisper
+  hallucination filter, so echo/silence transcripts never satisfy the guard.
+- Guard is carrier-agnostic and only reachable on the realtime path; Twilio,
+  Plivo, pipeline, and ConvAI paths are untouched.
+- The prior comfort-noise pump on this branch is orthogonal and left in place.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `libraries/typescript/src/server.ts` | Drop `'no_response'` from `END_CALL_TOOL` description |
+| `libraries/typescript/src/stream-handler.ts` | `callStartedAtMs`/`userHasSpoken` fields, grace const, stamp in `handleCallStart`, flag in `onAdapterTranscriptInput`, guard in realtime `handleFunctionCall` end_call |
+| `libraries/python/getpatter/stream_handler.py` | Python parity: drop `'no_response'`, base fields + `_REALTIME_END_CALL_MIN_AGE_MS`, stamp in realtime `start()`, flag in realtime `transcript_input` branch, guard in realtime `end_call` handler |
+
+**Tests added:**
+- `libraries/typescript/tests/telnyx-premature-endcall.mocked.test.ts` — 4 cases (real StreamHandler + real OpenAIRealtime2Adapter, mock only the OpenAI WS + carrier bridge)
+- `libraries/python/tests/test_telnyx_premature_endcall.py` — 4 cases (real `OpenAIRealtimeStreamHandler._forward_events`, scripted adapter boundary)
+
+**Breaking changes:** None
+
+**Docs to update:**
+- [ ] None (bug fix, no new public surface)
+
 ### [2026-06-30] — Telnyx native-audio realtime keepalive (comfort-noise pump)
 
 **Type:** fix

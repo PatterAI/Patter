@@ -126,7 +126,7 @@ export const END_CALL_TOOL = {
     properties: {
       reason: {
         type: 'string',
-        description: "Reason for ending the call (e.g., 'conversation_complete', 'user_requested', 'no_response')",
+        description: "Reason for ending the call (e.g., 'conversation_complete', 'user_requested')",
       },
     },
   },

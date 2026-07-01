@@ -458,7 +458,7 @@ END_CALL_TOOL: dict = {
         "properties": {
             "reason": {
                 "type": "string",
-                "description": "Reason for ending the call (e.g., 'conversation_complete', 'user_requested', 'no_response')",
+                "description": "Reason for ending the call (e.g., 'conversation_complete', 'user_requested')",
             }
         },
     },
@@ -940,6 +940,12 @@ class StreamHandler(ABC):
         self.agent = agent
         self.audio_sender = audio_sender
         self.call_id = call_id
+        # Wall-clock ms of call start — stamped in ``start()`` (the per-call
+        # entry, parity with TS ``handleCallStart``); used to grace-guard a
+        # premature model-initiated end_call. 0.0 until the call actually starts.
+        self._call_started_at_ms = 0.0
+        # True once a genuine (hallucination-filtered) caller transcript is committed.
+        self._user_has_spoken = False
         self.caller = caller
         self.callee = callee
         self.resolved_prompt = resolved_prompt
@@ -1293,6 +1299,13 @@ class StreamHandler(ABC):
     _MULAW_SILENCE_FRAME: bytes = b"\xff" * 160
     # Pump cadence: one 20 ms frame every 20 ms (real-time μ-law-8k rate).
     _COMFORT_NOISE_INTERVAL_S: float = 0.02
+    # A realtime model can emit ``end_call`` the instant its greeting finishes —
+    # before the caller has spoken. On carriers where the realtime connect→
+    # first-audio window eats the opening call budget (Telnyx native-audio), this
+    # hangs up a live caller at ~1.5 s. Refuse a model-initiated hang-up that
+    # fires before ANY caller speech AND within this opening grace window
+    # (connect ~1.5-2 s + greeting ~1 s + human turn-around). Tunable.
+    _REALTIME_END_CALL_MIN_AGE_MS: float = 6000.0
 
     def _start_comfort_noise(self) -> None:
         """Pump paced μ-law-8k silence to the carrier until the first real
@@ -1746,6 +1759,9 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
     async def start(self) -> None:
         """Connect to OpenAI Realtime, register tools, and begin event forwarding."""
+        # Stamp the per-call start time for the premature-end_call grace guard
+        # (parity with TS ``handleCallStart``).
+        self._call_started_at_ms = time.time() * 1000
         self._arm_max_call_watchdog()
         # Both ``openai_realtime`` and ``openai_realtime_2`` engines now
         # route through the GA-compatible ``OpenAIRealtime2Adapter`` —
@@ -2083,6 +2099,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                         trigger="vad_silence", transcript_so_far=ev_data
                     )
 
+                    self._user_has_spoken = True
                     self.conversation_history.append(
                         {"role": "user", "text": ev_data, "timestamp": time.time()}
                     )
@@ -2465,6 +2482,41 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                             )
                             continue
                         reason = args.get("reason", "conversation_complete")
+                        # Premature-hangup guard: a realtime engine can emit
+                        # end_call the moment its greeting finishes, before the
+                        # caller has spoken. On carriers whose realtime connect→
+                        # first-audio window eats the opening budget (Telnyx
+                        # native-audio) this kills a live caller at ~1.5 s. If the
+                        # caller has not spoken yet AND we are inside the opening
+                        # grace window, refuse and tell the model to keep
+                        # listening rather than tearing the call down.
+                        call_age_ms = time.time() * 1000 - self._call_started_at_ms
+                        if (
+                            not self._user_has_spoken
+                            and call_age_ms < self._REALTIME_END_CALL_MIN_AGE_MS
+                        ):
+                            logger.debug(
+                                "Ignoring premature end_call: reason=%s "
+                                "age_ms=%.0f — caller has not spoken yet",
+                                reason,
+                                call_age_ms,
+                            )
+                            keep_alive = json.dumps(
+                                {
+                                    "status": "rejected",
+                                    "reason": "caller_still_connecting",
+                                    "message": (
+                                        "The caller may still be connecting. "
+                                        "Keep the line open and wait for them "
+                                        "to speak."
+                                    ),
+                                }
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], keep_alive
+                            )
+                            await self._emit_tool_event("end_call", args, keep_alive)
+                            continue
                         logger.debug("Ending call: %s", reason)
                         result = json.dumps({"status": "ending", "reason": reason})
                         await self._adapter.send_function_result(

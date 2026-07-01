@@ -1555,6 +1555,10 @@ export class StreamHandler {
   private sttClosed = false;
   private currentAgentText = '';
   private responseAudioStarted = false;
+  /** Wall-clock ms of carrier ``start`` — used to grace-guard premature end_call. */
+  private callStartedAtMs = 0;
+  /** True once a genuine (hallucination-filtered) caller transcript is committed. */
+  private userHasSpoken = false;
 
   // --- Realtime-engine outbound keepalive (Telnyx bidirectional RTP) ----
   // Realtime engines (GeminiLive / OpenAIRealtime2) put NO bytes on the
@@ -1575,6 +1579,15 @@ export class StreamHandler {
     Buffer.alloc(160, 0xff).toString('base64');
   /** Pump cadence: one 20 ms frame every 20 ms (real-time μ-law-8k rate). */
   private static readonly COMFORT_NOISE_INTERVAL_MS = 20;
+  /**
+   * A realtime model can emit ``end_call`` the instant its greeting finishes —
+   * before the caller has spoken. On carriers where the realtime connect→
+   * first-audio window eats the opening call budget (Telnyx native-audio), this
+   * hangs up a live caller at ~1.5 s. Refuse a model-initiated hang-up that
+   * fires before ANY caller speech AND within this opening grace window
+   * (connect ~1.5-2 s + greeting ~1 s + human turn-around). Tunable.
+   */
+  private static readonly REALTIME_END_CALL_MIN_AGE_MS = 6000;
   /**
    * Realtime turn ordering buffer. OpenAI Realtime emits
    * `input_audio_transcription.completed` (user transcript) AFTER
@@ -1983,6 +1996,7 @@ export class StreamHandler {
   /** Initialize per-call state, build the AI adapter, and dispatch the `onCallStart` callback. */
   async handleCallStart(callId: string, customParams: Record<string, string> = {}): Promise<void> {
     this.callId = callId;
+    this.callStartedAtMs = Date.now();
     // metricsAcc.callId is readonly at the public type level but is INTERNAL
     // per-call state — the accumulator is always owned by this handler
     // instance and callId is not known at construction time (it arrives with
@@ -5994,6 +6008,7 @@ export class StreamHandler {
       return;
     }
     getLogger().debug(`User (${this.deps.bridge.label}): ${sanitizeLogValue(inputText)}`);
+    this.userHasSpoken = true;
     this.history.push({ role: 'user', text: inputText, timestamp: Date.now() });
     // FIX-5 (issue #154): emit the live user transcript line the moment it is
     // known and accepted by the filter, keyed by the reserved turn index. The
@@ -6520,6 +6535,26 @@ export class StreamHandler {
         endArgs = {};
       }
       const reason = endArgs.reason ?? 'conversation_complete';
+      // Premature-hangup guard: a realtime engine can emit end_call the moment
+      // its greeting finishes, before the caller has spoken. On carriers whose
+      // realtime connect→first-audio window eats the opening budget (Telnyx
+      // native-audio) this kills a live caller at ~1.5 s. If the caller has not
+      // spoken yet AND we are inside the opening grace window, refuse and tell
+      // the model to keep listening rather than tearing the call down.
+      const callAgeMs = Date.now() - this.callStartedAtMs;
+      if (!this.userHasSpoken && callAgeMs < StreamHandler.REALTIME_END_CALL_MIN_AGE_MS) {
+        getLogger().debug(
+          `Ignoring premature end_call (${this.deps.bridge.label}): reason=${reason} ageMs=${callAgeMs} — caller has not spoken yet`,
+        );
+        const keepAlive = JSON.stringify({
+          status: 'rejected',
+          reason: 'caller_still_connecting',
+          message: 'The caller may still be connecting. Keep the line open and wait for them to speak.',
+        });
+        await adapter.sendFunctionResult(fc.call_id, keepAlive);
+        await this.emitToolEvent('end_call', endArgs, keepAlive);
+        return;
+      }
       getLogger().debug(`Ending call (${this.deps.bridge.label}): ${reason}`);
       const result = JSON.stringify({ status: 'ending', reason });
       await adapter.sendFunctionResult(fc.call_id, result);
