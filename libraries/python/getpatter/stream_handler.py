@@ -3508,6 +3508,12 @@ class PipelineStreamHandler(StreamHandler):
         # path stays a pure pass-through for handset/headset deployments
         # that don't need it.
         self._aec = None
+        # Bring-your-own-license noise denoiser resolved from
+        # ``agent.denoiser`` (string model id) at ``start()`` when no explicit
+        # ``agent.audio_filter`` instance is provided. ``None`` otherwise —
+        # SDK-owned, so it is closed in ``cleanup()`` (unlike a user-supplied
+        # ``audio_filter``, whose lifecycle the caller owns).
+        self._resolved_denoiser = None
         # Task reference for the in-flight LLM-consumption loop.  Set by
         # ``_process_streaming_response`` and cancelled on barge-in so the
         # provider stops streaming tokens we will never speak — saves API
@@ -3783,6 +3789,18 @@ class PipelineStreamHandler(StreamHandler):
                     "echo_cancellation=True but numpy is not installed; "
                     "install with `pip install getpatter[silero]` (numpy is part of that extra)."
                 )
+
+        # Bring-your-own-license denoiser: resolve the string model id ONCE at
+        # call start so a missing SDK / license / model surfaces here (fail
+        # fast) instead of silently no-op'ing per frame. Skipped when an
+        # explicit ``agent.audio_filter`` instance is provided (that takes
+        # precedence) or when ``agent.denoiser`` is unset (default no-op).
+        denoiser_id = getattr(self.agent, "denoiser", None)
+        if denoiser_id and getattr(self.agent, "audio_filter", None) is None:
+            from getpatter.providers.denoiser import resolve_denoiser
+
+            self._resolved_denoiser = resolve_denoiser(denoiser_id)
+            logger.info("denoiser '%s' resolved for pipeline inbound chain", denoiser_id)
 
         # Prewarm-handoff: try to adopt pre-opened provider WebSockets
         # that the prewarm pipeline (see
@@ -6816,7 +6834,13 @@ class PipelineStreamHandler(StreamHandler):
             chain = InputProcessingChain(
                 input_is_mulaw_8k=self._input_is_mulaw_8k,
                 get_aec=lambda: getattr(self, "_aec", None),
-                get_audio_filter=lambda: getattr(self.agent, "audio_filter", None),
+                # Explicit ``audio_filter`` instance wins; otherwise fall back
+                # to the SDK-resolved ``agent.denoiser`` filter (resolved once
+                # in ``start()``). Parallel opt-ins — see ``Agent.denoiser``.
+                get_audio_filter=lambda: (
+                    getattr(self.agent, "audio_filter", None)
+                    or getattr(self, "_resolved_denoiser", None)
+                ),
                 get_vad=lambda: (
                     getattr(self.agent, "vad", None) or getattr(self, "_auto_vad", None)
                 ),
@@ -8308,6 +8332,16 @@ class PipelineStreamHandler(StreamHandler):
         if chain is not None:
             chain.flush()
             self._input_chain = None
+        # Close the SDK-resolved denoiser (an ``agent.denoiser`` filter Patter
+        # constructed). A user-supplied ``agent.audio_filter`` is NOT closed
+        # here — its lifecycle is owned by the caller.
+        _denoiser = getattr(self, "_resolved_denoiser", None)
+        if _denoiser is not None:
+            try:
+                await _denoiser.close()
+            except Exception as _exc:  # noqa: BLE001 - teardown must continue
+                logger.warning("denoiser close failed: %s", _exc)
+            self._resolved_denoiser = None
 
     @property
     def stt(self):

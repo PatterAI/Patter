@@ -897,6 +897,17 @@ export interface AgentOptions {
   readonly maxSemanticHoldMs?: number;
   /** Optional pre-STT audio filter (noise cancellation). Pipeline mode only. */
   readonly audioFilter?: AudioFilter;
+  /**
+   * Opt-in noise denoiser selected by stable model-id string (pipeline mode
+   * only). Resolved to a concrete {@link AudioFilter} via
+   * `resolveDenoiser` at call start. Known ids: `"krisp-viva-tel-v2"` (VIVA
+   * telephony NC) and `"krisp-bvc-o-pro-v3"` (Background Voice Cancellation).
+   * Krisp is bring-your-own-license — the operator supplies the SDK, license,
+   * and `.kef` model. `denoiser` and `audioFilter` are PARALLEL opt-ins: when
+   * both are set the explicit `audioFilter` instance wins. `undefined`
+   * (default) leaves the inbound audio unchanged.
+   */
+  readonly denoiser?: string;
   /** Optional background audio mixer (hold music, thinking cues). Pipeline mode only. */
   readonly backgroundAudio?: BackgroundAudioPlayer;
   /**

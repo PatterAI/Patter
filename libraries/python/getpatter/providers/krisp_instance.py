@@ -13,11 +13,26 @@ from __future__ import annotations
 
 import logging
 import os
-from enum import IntEnum
+from enum import Enum, IntEnum
 from threading import Lock
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class KrispModelKind(str, Enum):
+    """Krisp session family a model must be loaded through.
+
+    The Krisp Audio SDK exposes different session classes per model family.
+    Plain telephony noise-cancellation (VIVA/NC) models load through the
+    ``NcInt16`` session; Background-Voice-Cancellation (BVC) models require the
+    ``BvcInt16`` session. Selecting the wrong family for a given ``.kef`` model
+    fails inside the SDK, so :class:`KrispVivaFilter` uses this to pick the
+    right ``create`` entry point.
+    """
+
+    NC = "nc"  # Noise Cancellation / VIVA telephony -> krisp_audio.NcInt16
+    BVC = "bvc"  # Background Voice Cancellation -> krisp_audio.BvcInt16
 
 
 class KrispSampleRate(IntEnum):

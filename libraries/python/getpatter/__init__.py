@@ -159,10 +159,18 @@ def __getattr__(name):
     if name in {
         "KrispSampleRate",
         "KrispFrameDuration",
+        "KrispModelKind",
     }:
         from getpatter.providers import krisp_instance as _krisp_instance
 
         return getattr(_krisp_instance, name)
+    # Bring-your-own-license denoiser registry (string model-id selection for
+    # ``Agent.denoiser``). Parity with the TypeScript ``resolveDenoiser`` /
+    # ``DENOISERS`` exports. Defers the heavy krisp-audio import to resolution.
+    if name in {"resolve_denoiser", "DENOISERS", "DENOISER_IDS"}:
+        from getpatter.providers import denoiser as _denoiser
+
+        return getattr(_denoiser, name)
     # Pre-STT noise-suppression audio filters — opt-in (need the ``krisp`` /
     # ``deepfilternet`` extras). Both modules defer their heavy imports
     # (krisp-audio, torch) until instantiation, so surfacing the class here
@@ -521,7 +529,11 @@ __all__ = [
     "SileroVAD",
     "SmartTurnDetector",
     "KrispVivaFilter",
+    "KrispModelKind",
     "DeepFilterNetFilter",
+    "resolve_denoiser",
+    "DENOISERS",
+    "DENOISER_IDS",
     "init_tracing",
     "start_span",
     "SPAN_CALL",
