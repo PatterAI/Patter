@@ -6,7 +6,7 @@
 
 **Type:** fix
 **Branch:** fix/telnyx-native-audio-bridge
-**PR:** (unreleased)
+**PR:** #203
 
 **What it does:**
 On inbound Telnyx calls with a native-audio realtime engine (GeminiLive /
@@ -56,7 +56,7 @@ the caller speaks, or after the grace window, `end_call` behaves normally.
 
 **Type:** fix
 **Branch:** fix/telnyx-native-audio-bridge
-**PR:** (unreleased)
+**PR:** #203
 
 **What it does:**
 Native-audio realtime engines (GeminiLive / OpenAIRealtime2 / ConvAI) answered
