@@ -39,6 +39,7 @@ from getpatter.stream_handler import (
     resolve_agent_prompt,
 )
 from getpatter.telephony.common import (
+    STREAM_TOKEN_HEADER,
     _create_stt_from_config,  # noqa: F401 — re-exported for tests and external callers
     _create_tts_from_config,  # noqa: F401 — re-exported for tests and external callers
     _resolve_variables,  # noqa: F401 — re-exported for tests and external callers
@@ -148,6 +149,7 @@ def plivo_webhook_handler(
     caller: str,
     callee: str,
     webhook_base_url: str,
+    stream_token: str = "",
 ) -> str:
     """Generate Plivo answer XML for an incoming (or answered outbound) call.
 
@@ -161,6 +163,9 @@ def plivo_webhook_handler(
         caller: The calling number (From).
         callee: The called number (To).
         webhook_base_url: Hostname (no scheme), e.g. ``"abc.ngrok.io"``.
+        stream_token: Per-call media-stream auth token (#204). When non-empty it
+            is delivered as an ``X-Patter-Stream-Token`` extra header (echoed on
+            the start frame); the bridge validates it before the provider session.
     """
     # Lazy import — provider adapter may be created by the parallel agent.
     from getpatter.providers.plivo_adapter import PlivoAdapter  # type: ignore[import]
@@ -170,6 +175,8 @@ def plivo_webhook_handler(
     # Fallback channel: Plivo echoes these on the ``start`` frame's
     # ``extra_headers`` when the query string is unavailable.
     extra_headers = {"X-PH-caller": caller, "X-PH-callee": callee}
+    if stream_token:
+        extra_headers[STREAM_TOKEN_HEADER] = stream_token
     return PlivoAdapter.generate_stream_xml(
         stream_url,
         content_type="audio/x-mulaw;rate=8000",
@@ -362,6 +369,7 @@ async def plivo_stream_bridge(
     patter_side: str = "uut",
     pop_prewarm_audio=None,
     pop_prewarmed_connections=None,
+    validate_stream_token=None,
 ) -> None:
     """Bridge a Plivo WebSocket media stream to the configured AI provider.
 
@@ -423,6 +431,25 @@ async def plivo_stream_bridge(
                 # template variables. Plivo echoes the ``<Stream
                 # extraHeaders="...">`` payload back on the start frame.
                 hdrs = _parse_plivo_extra_headers(data.get("extra_headers", ""))
+                # SECURITY (#204): pull + strip the per-call stream-auth token
+                # from the echoed extra_headers so it never becomes a prompt
+                # template variable or reaches logs, then validate BEFORE the
+                # provider session opens. On missing/invalid/expired token, close
+                # with WS 1008 and return without connecting a provider or
+                # synthesising TTS. No PII / no token value logged.
+                _presented_token = hdrs.pop(STREAM_TOKEN_HEADER, "")
+                if validate_stream_token is not None and not validate_stream_token(
+                    _presented_token
+                ):
+                    logger.warning(
+                        "Plivo media stream rejected: stream authentication failed"
+                    )
+                    await websocket.close(code=1008, reason="Stream auth failed")
+                    # Neutralise the finally-block so a rejected peer triggers NO
+                    # on_call_end callback and NO carrier cost query.
+                    on_call_end = None
+                    _call_start_monotonic = None
+                    return
                 # Recover caller / callee: query string first (Plivo preserves
                 # it on the Stream URL), then the ``extra_headers`` fallback.
                 if not caller or not callee:

@@ -71,6 +71,30 @@
   launcher pins the `getpatter` version it bootstraps to its own version, so it
   now tracks the SDK again (`npm create getpatter` provisions the current SDK).
 
+### Security
+
+- **Media-stream WebSockets are now authenticated (both SDKs, all carriers) —
+  fixes #204.** The carrier webhook HTTP routes were signature-validated, but
+  the media-stream WS endpoints (`/ws/stream/…` Twilio, `/ws/telnyx/stream/…`,
+  `/ws/plivo/stream/…`) accepted any peer with an attacker-chosen `call_id`
+  (the only control was a DoS per-IP cap). Anyone who could reach the public
+  host could open the socket, send a `start` frame, and drive a full
+  STT→LLM→TTS session on the operator's provider keys (toll fraud) or converse
+  to extract the agent's system prompt + tool list. Now the signature-validated
+  webhook (which builds the stream URL/TwiML) mints a high-entropy per-call
+  token, delivers it on each carrier's existing custom channel (Twilio
+  `<Parameter>` → `customParameters`, Telnyx URL query, Plivo `extra_headers`),
+  and the WS handler constant-time-validates it **before** opening any provider
+  session — an unauthenticated peer is closed (WS 1008) with no provider connect
+  and no TTS. Fail-closed by default via the new `require_stream_auth` /
+  `requireStreamAuth` option (opt-out for operators serving custom TwiML, which
+  then logs a warning). The token is never logged. The webhook mints only for a
+  legitimate (signed) carrier, so the token is a shared secret an unsigned
+  attacker cannot obtain. Backward compatible for the standard `serve()`
+  inbound + outbound path (the SDK mints/embeds/validates transparently). Also
+  hardened the forgeable-`X-Forwarded-For` per-IP cap with a global concurrent-
+  WS backstop, documented as DoS-cap-only now that auth is enforced separately.
+
 ## 0.7.0 (2026-06-30)
 
 ### Added

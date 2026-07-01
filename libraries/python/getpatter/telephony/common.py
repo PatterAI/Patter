@@ -9,6 +9,19 @@ import re
 
 from getpatter.providers.base import STTProvider, TTSProvider
 
+# SECURITY (#204): names of the per-call media-stream auth token as it travels
+# on each carrier's custom-param channel. Kept in one place so the mint sites
+# (server / adapters) and the WS read sites stay in lock-step. Mirrors the
+# TypeScript SDK constants of the same value.
+#
+#   * Twilio: a ``<Parameter name="patter_stream_token" .../>`` that arrives in
+#     ``start.customParameters`` (Twilio strips query params from <Stream>).
+#   * Telnyx: a ``?...&patter_stream_token=`` query param on the stream URL
+#     (Telnyx preserves the query string), read at WS accept.
+#   * Plivo: an ``X-Patter-Stream-Token`` extra header echoed on the start frame.
+STREAM_TOKEN_PARAM = "patter_stream_token"
+STREAM_TOKEN_HEADER = "X-Patter-Stream-Token"
+
 
 def _validate_e164(number: str) -> bool:
     """Return True if *number* is a valid E.164 phone number."""

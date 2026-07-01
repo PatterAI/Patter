@@ -1181,6 +1181,27 @@ export interface ServeOptions {
    * for the rare case where unauthenticated public exposure is intentional.
    */
   readonly allowInsecureDashboard?: boolean;
+  /**
+   * SECURITY (#204): require a valid per-call stream-authentication token on
+   * every media-stream WebSocket before any provider (STT/LLM/TTS/Realtime)
+   * session is opened.
+   *
+   * Defaults to `true` (fail closed). The SDK mints the token inside the
+   * signature-validated carrier webhook (inbound) or the outbound dial,
+   * embeds it via each carrier's custom-parameter channel (Twilio
+   * `<Parameter>`, Telnyx query string, Plivo `extra_headers`), and validates
+   * it at the WS before opening the billable provider session. A missing /
+   * invalid / expired / mismatched token closes the socket with code 1008 and
+   * opens NO provider connection — this blocks the toll-fraud /
+   * prompt-extraction attack in GitHub issue #204. Standard inbound AND
+   * outbound Twilio/Telnyx/Plivo calls keep working with zero operator action.
+   *
+   * Set to `false` ONLY when serving custom TwiML/XML that cannot carry the
+   * token (the SDK then accepts unauthenticated media streams and logs a loud
+   * one-time warning). Prefer keeping this on and letting the SDK own the
+   * TwiML/XML.
+   */
+  readonly requireStreamAuth?: boolean;
   /** Path to SQLite database for dashboard persistence (not used in TS yet). */
   readonly dashboardDb?: string;
   /** When true (default), persist dashboard data. */

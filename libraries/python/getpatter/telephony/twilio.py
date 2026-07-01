@@ -26,6 +26,7 @@ from getpatter.stream_handler import (
     resolve_agent_prompt,
 )
 from getpatter.telephony.common import (
+    STREAM_TOKEN_PARAM,
     _create_stt_from_config,  # noqa: F401 — re-exported for tests and external callers
     _create_tts_from_config,  # noqa: F401 — re-exported for tests and external callers
     _resolve_variables,  # noqa: F401 — re-exported for tests and external callers
@@ -239,6 +240,7 @@ def twilio_webhook_handler(
     caller: str,
     callee: str,
     webhook_base_url: str,
+    stream_token: str = "",
 ) -> str:
     """Generate TwiML response for an incoming Twilio call.
 
@@ -249,18 +251,26 @@ def twilio_webhook_handler(
         caller: The calling number (From).
         callee: The called number (To).
         webhook_base_url: Hostname (no scheme) of this server, e.g. "abc.ngrok.io".
+        stream_token: Per-call media-stream auth token (#204). When non-empty it
+            is delivered as a ``<Parameter name="patter_stream_token">`` (Twilio
+            strips query params, so it must ride the customParameters channel);
+            the WS handler validates it before opening the provider session.
     """
     # Lazy import — provider adapter may be created by the parallel agent
     from getpatter.providers.twilio_adapter import TwilioAdapter  # type: ignore[import]
+    from getpatter.telephony.common import STREAM_TOKEN_PARAM
 
     # Twilio Media Streams strips the query string from ``<Stream url=...>``
     # before opening the WS, so caller/callee must travel as
     # ``<Parameter>`` children — the bridge then reads them from
     # ``start.customParameters`` on the WS ``start`` frame.
     stream_url = f"wss://{webhook_base_url}/ws/stream/{call_sid}"
+    parameters = {"caller": caller, "callee": callee}
+    if stream_token:
+        parameters[STREAM_TOKEN_PARAM] = stream_token
     return TwilioAdapter.generate_stream_twiml(
         stream_url,
-        parameters={"caller": caller, "callee": callee},
+        parameters=parameters,
     )
 
 
@@ -443,6 +453,7 @@ async def twilio_stream_bridge(
     pop_prewarmed_connections=None,
     webhook_host: str = "",
     agent_number: str = "",
+    validate_stream_token=None,
 ) -> None:
     """Bridge a Twilio WebSocket media stream to the configured AI provider.
 
@@ -535,6 +546,29 @@ async def twilio_stream_bridge(
                 start_data = data.get("start", {})
                 call_sid_actual = start_data.get("callSid", "")
                 custom_params: dict = start_data.get("customParameters", {})
+                # SECURITY (#204): pull the per-call stream-auth token out of
+                # customParameters and REMOVE it so it never reaches logs, the
+                # prompt template, or the on_call_start payload.
+                _presented_token = ""
+                if isinstance(custom_params, dict):
+                    _presented_token = str(custom_params.pop(STREAM_TOKEN_PARAM, ""))
+                # Validate BEFORE opening any provider session (the billable
+                # part). On missing/invalid/expired token, close the socket with
+                # WS 1008 and return without synthesising TTS or connecting a
+                # provider. No PII / no token value logged.
+                if validate_stream_token is not None and not validate_stream_token(
+                    _presented_token
+                ):
+                    logger.warning(
+                        "Twilio media stream rejected: stream authentication failed"
+                    )
+                    await websocket.close(code=1008, reason="Stream auth failed")
+                    # Neutralise the finally-block so a rejected peer triggers NO
+                    # on_call_end callback and NO carrier cost query — the call
+                    # never really started.
+                    on_call_end = None
+                    _call_start_monotonic = None
+                    return
                 # Inbound path: caller / callee travel via TwiML
                 # ``<Parameter>`` tags (Twilio strips query params from
                 # ``<Stream url=...>``), so the WS-level query-param read

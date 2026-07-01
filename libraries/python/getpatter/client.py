@@ -18,6 +18,7 @@ return in a future release.
 from __future__ import annotations
 
 import asyncio
+import secrets
 import logging
 import os
 import re
@@ -348,6 +349,7 @@ class Patter:
         pricing: dict | None = None,
         persist: bool | str | None = None,
         telemetry: bool | None = None,
+        require_stream_auth: bool = True,
         **kwargs: Any,
     ) -> None:
         # --- Reject cloud-mode kwargs explicitly ---
@@ -439,6 +441,10 @@ class Patter:
             phone_number=phone_number,
             webhook_url=webhook_url,
             persist_root=_resolve_persist_root(persist),
+            # SECURITY (#204): fail-closed media-stream auth. Default True; set
+            # False only for custom TwiML/XML that cannot carry the per-call
+            # token (allows the connection but logs a loud one-time warning).
+            require_stream_auth=require_stream_auth,
         )
 
         # The telemetry client + dedup state were constructed above (before the
@@ -908,7 +914,24 @@ class Patter:
                 account_sid=config.twilio_sid,
                 auth_token=config.twilio_token,
             )
-            stream_url = f"wss://{config.webhook_url}/ws/stream/outbound"
+            # SECURITY (#204): outbound Twilio embeds the media stream in the
+            # <Connect><Stream> TwiML at create time (the CallSid is not yet
+            # known), so the WS path can't be the real CallSid. Use a fresh
+            # per-call key (NOT the static "outbound") so two concurrent outbound
+            # dials don't overwrite each other's minted token — the earlier
+            # call's WS would otherwise fail auth. The token is minted under this
+            # same key and delivered as a <Parameter> (Twilio strips query
+            # params); the server validates it before opening the provider
+            # session. Key is unguessable, so it doubles as the auth binding.
+            outbound_stream_key = f"outbound-{secrets.token_hex(8)}"
+            stream_url = f"wss://{config.webhook_url}/ws/stream/{outbound_stream_key}"
+            from getpatter.telephony.common import STREAM_TOKEN_PARAM
+
+            twilio_stream_params: dict[str, str] = {}
+            if self._server is not None:
+                twilio_stream_params[STREAM_TOKEN_PARAM] = (
+                    self._server._mint_stream_token(outbound_stream_key)
+                )
             extra_params: dict = {}
             if wants_amd:
                 # DetectMessageEnd waits for the greeting to finish before
@@ -958,6 +981,7 @@ class Patter:
                 to,
                 stream_url,
                 extra_params=extra_params,
+                parameters=twilio_stream_params or None,
             )
             logger.info("Outbound call initiated: %s", call_id)
             # Pre-register the call so the dashboard surfaces attempts
