@@ -605,6 +605,17 @@ class Agent:
     audio_filter: "AudioFilter | None" = (
         None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
     )
+    # Opt-in noise denoiser selected by stable model-id string (pipeline mode
+    # only). Resolved to a concrete :class:`AudioFilter` via
+    # ``getpatter.providers.denoiser.resolve_denoiser`` at call start. Known
+    # ids: ``"krisp-viva-tel-v2"`` (VIVA telephony NC) and
+    # ``"krisp-bvc-o-pro-v3"`` (Background Voice Cancellation). Krisp models are
+    # bring-your-own-license: Patter ships no Krisp SDK/license/model — the
+    # operator installs ``krisp-audio``, sets ``KRISP_VIVA_SDK_LICENSE_KEY`` and
+    # ``KRISP_MODELS_DIR``. ``denoiser`` and ``audio_filter`` are PARALLEL
+    # opt-ins; when both are set the explicit ``audio_filter`` instance wins.
+    # ``None`` (default) keeps the inbound audio byte-identical.
+    denoiser: str | None = None
     background_audio: "BackgroundAudioPlayer | None" = (
         None  # Optional background audio mixer — pipeline mode only
     )

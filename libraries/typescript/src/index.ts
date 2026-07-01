@@ -248,8 +248,19 @@ export {
   KrispVivaFilter,
   KrispSampleRate,
   KrispFrameDuration,
+  KrispModelKind,
 } from "./providers/krisp-filter";
 export type { KrispVivaFilterOptions } from "./providers/krisp-filter";
+// Bring-your-own-license denoiser registry (string model-id selection for
+// ``agent.denoiser``). Parity with the Python ``resolve_denoiser`` / ``DENOISERS``.
+export {
+  DENOISERS,
+  DENOISER_IDS,
+  KRISP_MODELS_DIR_ENV,
+  resolveDenoiser,
+  resolveEffectiveAudioFilter,
+} from "./providers/denoiser";
+export type { DenoiserSpec } from "./providers/denoiser";
 
 // Telephony carriers.
 export { Carrier as Twilio } from "./telephony/twilio";

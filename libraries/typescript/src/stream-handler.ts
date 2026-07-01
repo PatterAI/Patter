@@ -27,7 +27,8 @@ import { createHistoryManager } from './handler-utils';
 import { ContextCompactor } from './compaction';
 import { DefaultToolExecutor } from './llm-loop';
 import { MCPManager } from './tools/mcp-client';
-import type { AgentOptions, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, TransferCallOptions, TransferCallResult, VADProvider, CarrierKind } from './types';
+import type { AgentOptions, AudioFilter, Guardrail, HookContext, PipelineMessageHandler, ToolDefinition, TransferCallOptions, TransferCallResult, VADProvider, CarrierKind } from './types';
+import { resolveEffectiveAudioFilter } from './providers/denoiser';
 import type { MetricsStore } from './dashboard/store';
 import { getLogger } from './logger';
 import { validateTwilioSid, TRANSFER_CALL_TOOL, END_CALL_TOOL } from './server';
@@ -1742,6 +1743,10 @@ export class StreamHandler {
   // the high-pass / AGC stages are built eagerly from ``deps.agent`` config —
   // a field initialiser would read ``this.deps`` before it is assigned.
   private readonly inputChain: InputProcessingChain;
+  // Effective inbound audio filter: explicit ``agent.audioFilter`` or the
+  // ``agent.denoiser`` id resolved once at construction. ``undefined`` when
+  // neither is set. See ``resolveEffectiveAudioFilter``.
+  private readonly effectiveAudioFilter: AudioFilter | undefined;
 
   private readonly history: ReturnType<typeof createHistoryManager>;
   private readonly metricsAcc: CallMetricsAccumulator;
@@ -1754,6 +1759,13 @@ export class StreamHandler {
     this.callee = callee;
     this.currentAgent = deps.agent;
 
+    // Bring-your-own-license denoiser: the explicit ``audioFilter`` instance
+    // wins; otherwise resolve the string ``denoiser`` id ONCE here (fail fast).
+    // For Krisp ids this throws the clear "no Node Krisp SDK" guidance rather
+    // than silently no-op'ing — parity with the Python SDK's start()-time
+    // resolution. ``undefined`` when neither is set (inbound audio unchanged).
+    this.effectiveAudioFilter = resolveEffectiveAudioFilter(this.deps.agent);
+
     // Inbound chain: HPF (opt) -> resample -> AEC (opt) -> audioFilter/NS (opt)
     // -> AGC (opt) -> VAD. AEC / filter / VAD are late-bound getters because
     // ``initPipeline`` installs ``aec`` / ``autoVad`` after construction;
@@ -1761,7 +1773,7 @@ export class StreamHandler {
     this.inputChain = new InputProcessingChain({
       resampler: this.inboundResampler,
       getAec: () => this.aec,
-      getAudioFilter: () => this.deps.agent.audioFilter,
+      getAudioFilter: () => this.effectiveAudioFilter,
       getVad: () => this.deps.agent.vad ?? this.autoVad,
       highPassHz: this.deps.agent.highPassHz,
       agc: this.deps.agent.agc,
