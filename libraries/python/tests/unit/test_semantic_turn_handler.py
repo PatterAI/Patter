@@ -47,24 +47,28 @@ pytestmark = pytest.mark.mocked
 
 
 class FakeTurnDetector(TurnDetectorProvider):
-    """Scripted end-of-turn probabilities; records every prediction window."""
+    """Scripted end-of-turn probabilities; records every window + transcript."""
 
     def __init__(self, probs, threshold: float = 0.5, raise_on_call: bool = False):
         self._probs = list(probs)
         self._threshold = threshold
         self._raise = raise_on_call
         self.windows: list[bytes] = []
+        self.transcripts: list[str | None] = []  # records the widened arg
         self.attempts: int = 0  # counted even when predict raises
 
     @property
     def threshold(self) -> float:
         return self._threshold
 
-    async def predict(self, pcm16_16k_window: bytes) -> float:
+    async def predict(
+        self, pcm16_16k_window: bytes, *, transcript: str | None = None
+    ) -> float:
         self.attempts += 1
         if self._raise:
             raise RuntimeError("model exploded")
         self.windows.append(pcm16_16k_window)
+        self.transcripts.append(transcript)
         if len(self._probs) > 1:
             return self._probs.pop(0)
         return self._probs[0]
@@ -451,6 +455,59 @@ async def test_committed_transcript_supersedes_active_hold() -> None:
     assert handler._semantic_hold_active is False
     assert handler._semantic_hold_task is None
     handler._stt.finalize.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 9. Rolling transcript is assembled + passed to predict (text detectors)
+# ---------------------------------------------------------------------------
+
+
+async def test_predict_receives_rolling_transcript() -> None:
+    """The handler assembles the last few conversation turns + the caller's
+    in-flight utterance and passes them to ``predict`` as ``transcript`` so
+    TEXT detectors (NamoTurnDetector) can score the dialogue."""
+    detector = FakeTurnDetector(probs=[0.9])
+    handler = _make_handler(vad_events=[_speech_end()], turn_detector=detector)
+    # Prior committed dialogue …
+    handler.conversation_history.append({"role": "user", "text": "Hi there"})
+    handler.conversation_history.append(
+        {"role": "assistant", "text": "Hello! How can I help?"}
+    )
+    # … plus the caller's current in-flight utterance (as the STT loop would
+    # have tracked it on the newest interim).
+    handler._semantic_last_transcript = "I want to book a table for"
+
+    await handler.on_audio_received(FRAME)  # speech_end → predict
+
+    assert detector.transcripts == [
+        "Hi there\nHello! How can I help?\nI want to book a table for"
+    ]
+
+
+async def test_rolling_transcript_bounded_to_recent_turns() -> None:
+    detector = FakeTurnDetector(probs=[0.1])  # hold so we can inspect the call
+    handler = _make_handler(
+        vad_events=[_speech_end()], turn_detector=detector, max_semantic_hold_ms=60_000
+    )
+    for i in range(8):  # more than _SEMANTIC_TRANSCRIPT_TURNS
+        role = "user" if i % 2 == 0 else "assistant"
+        handler.conversation_history.append({"role": role, "text": f"turn {i}"})
+    handler._semantic_last_transcript = "current"
+
+    await handler.on_audio_received(FRAME)
+    handler._cancel_semantic_hold()
+
+    passed = detector.transcripts[0]
+    # Only the last 4 history turns are kept, then the in-flight utterance.
+    assert passed == "turn 4\nturn 5\nturn 6\nturn 7\ncurrent"
+
+
+async def test_transcript_reset_on_turn_commit() -> None:
+    detector = FakeTurnDetector(probs=[0.9])
+    handler = _make_handler(vad_events=[_speech_end()], turn_detector=detector)
+    handler._semantic_last_transcript = "leftover"
+    handler._reset_semantic_window()
+    assert handler._semantic_last_transcript == ""
 
 
 # ---------------------------------------------------------------------------

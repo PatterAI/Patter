@@ -633,11 +633,15 @@ export class SmartTurnDetector implements TurnDetectorProvider {
    *   handler keeps a rolling 8 s buffer). Longer input is truncated to
    *   the most recent 8 s; shorter input is left-padded with silence,
    *   matching the reference preprocessing exactly.
+   * @param _transcript Ignored. Smart-turn v3 is audio-native — it scores
+   *   prosody, not text. Accepted only so the detector satisfies the
+   *   widened {@link TurnDetectorProvider.predict} contract shared with
+   *   text detectors like `NamoTurnDetector`.
    * @returns Probability in `[0, 1]` that the turn is COMPLETE (the
    *   graph applies the sigmoid internally). Returns 0 for an empty
    *   window.
    */
-  async predict(pcm16Window: Buffer): Promise<number> {
+  async predict(pcm16Window: Buffer, _transcript?: string): Promise<number> {
     if (this.closed || this.session === null) {
       throw new Error('SmartTurnDetector is closed');
     }

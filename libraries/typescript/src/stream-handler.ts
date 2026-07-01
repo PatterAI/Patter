@@ -947,9 +947,23 @@ export class StreamHandler {
   private static readonly SEMANTIC_WINDOW_MAX_BYTES = 16000 * 2 * 8;
   /** Re-score cadence while holding: one prediction per this much silence. */
   private static readonly SEMANTIC_POLL_MS = 200;
+  /**
+   * How many recent conversation turns (user + assistant) to include ahead of
+   * the caller's current in-flight utterance in the rolling transcript a TEXT
+   * turn detector scores. Bounded so the tokenizer prompt stays small.
+   */
+  private static readonly SEMANTIC_TRANSCRIPT_TURNS = 4;
   /** Rolling buffer of post-decode PCM16-16k frames (bounded to 8 s). */
   private semanticAudioRing: Buffer[] = [];
   private semanticAudioRingBytes = 0;
+  /**
+   * Latest in-flight caller transcript (interim or final) seen this turn —
+   * the trailing line of the rolling text a TEXT turn detector
+   * (NamoTurnDetector) scores. Only tracked when a detector is configured;
+   * reset on turn commit. Audio detectors ignore it. Parity with Python
+   * ``_semantic_last_transcript``.
+   */
+  private semanticLastTranscript = '';
   /** True while a sub-threshold prediction is holding the finalize open. */
   private semanticHoldActive = false;
   /** Wall-clock (ms) deadline for the hard cap, null when idle. */
@@ -2725,6 +2739,33 @@ export class StreamHandler {
   private resetSemanticWindow(): void {
     this.semanticAudioRing = [];
     this.semanticAudioRingBytes = 0;
+    // The committed utterance now lives in ``history``; drop the in-flight
+    // transcript so the next turn's text starts clean.
+    this.semanticLastTranscript = '';
+  }
+
+  /**
+   * Assemble the rolling transcript for a TEXT turn detector.
+   *
+   * The last few conversation turns (user + assistant, oldest first) followed
+   * by the caller's current in-flight utterance — the text a detector like
+   * `NamoTurnDetector` tokenizes to decide whether the caller has finished
+   * their turn. Audio detectors ignore this. Returns an empty string when
+   * there is nothing to score yet. Parity with Python
+   * ``_semantic_transcript_text``.
+   */
+  private semanticTranscriptText(): string {
+    const parts: string[] = [];
+    const recent = this.history.entries
+      .filter((entry) => entry.role === 'user' || entry.role === 'assistant')
+      .map((entry) => (entry.text ?? '').trim())
+      .filter((text) => text.length > 0);
+    if (recent.length > 0) {
+      parts.push(...recent.slice(-StreamHandler.SEMANTIC_TRANSCRIPT_TURNS));
+    }
+    const inFlight = this.semanticLastTranscript.trim();
+    if (inFlight) parts.push(inFlight);
+    return parts.join('\n');
   }
 
   /**
@@ -2742,7 +2783,10 @@ export class StreamHandler {
     if (!detector) return;
     let probability: number;
     try {
-      probability = await detector.predict(this.semanticWindowBytes());
+      probability = await detector.predict(
+        this.semanticWindowBytes(),
+        this.semanticTranscriptText(),
+      );
     } catch (err) {
       this.turnDetectorFailed = true;
       getLogger().warn(
@@ -3707,6 +3751,14 @@ export class StreamHandler {
     // the first silence audio byte. startTurnIfIdle() is a no-op if already open.
     if (transcript.text) {
       this.metricsAcc.startTurnIfIdle();
+    }
+
+    // Track the latest in-flight caller text (interim or final) so a TEXT
+    // turn detector can score the rolling transcript on the VAD speech_end
+    // edge. Only when a detector is configured (zero cost otherwise); audio
+    // detectors never read it. Parity with Python ``_semantic_last_transcript``.
+    if (transcript.text && this.deps.agent.turnDetector) {
+      this.semanticLastTranscript = transcript.text;
     }
 
     // Wave6B: record VAD stop timestamp when the STT provider signals speech end.

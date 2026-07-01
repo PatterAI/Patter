@@ -567,12 +567,20 @@ export interface TurnDetectorProvider {
   /** End-of-turn probability at/above which the turn is complete. */
   readonly threshold: number;
   /**
-   * Return the end-of-turn probability in `[0, 1]` for the window.
+   * Return the end-of-turn probability in `[0, 1]` for the turn.
+   *
    * `pcm16Window` is mono int16 little-endian PCM at 16 kHz covering the
    * most recent seconds of caller audio (the handler keeps a rolling
    * ~8 s buffer).
+   *
+   * `transcript` is the rolling conversation text the handler assembles
+   * from the last few turns plus the caller's current in-flight utterance
+   * (up to ~128 tokens' worth). It is an optional, backward-compatible
+   * extension: audio-native detectors (`SmartTurnDetector`) ignore it,
+   * while text detectors (`NamoTurnDetector`) read it and may ignore the
+   * audio window.
    */
-  predict(pcm16Window: Buffer): Promise<number>;
+  predict(pcm16Window: Buffer, transcript?: string): Promise<number>;
   close(): Promise<void>;
 }
 

@@ -238,6 +238,20 @@ export type { SileroVADOptions, SileroSampleRate } from "./providers/silero-vad"
 export { SmartTurnDetector, SMART_TURN_MODEL_ENV_VAR } from "./providers/smart-turn";
 export type { SmartTurnDetectorOptions } from "./providers/smart-turn";
 
+// NAMO Turn Detector v1 (VideoSDK, Apache-2.0) — TEXT-based end-of-utterance,
+// an open clean-weights detector. Opt-in via ``agent.turnDetector``; the model
+// file + tokenizer are NOT bundled — download a NAMO v1 model and set
+// PATTER_NAMO_MODEL (or pass ``modelPath``). Needs @huggingface/transformers.
+export {
+  NamoTurnDetector,
+  NAMO_MODEL_ENV_VAR,
+  NAMO_TOKENIZER_ENV_VAR,
+} from "./providers/namo-turn-detector";
+export type {
+  NamoTurnDetectorOptions,
+  NamoTokenizer,
+} from "./providers/namo-turn-detector";
+
 // Noise-suppression audio filters (opt-in, plug into ``agent.audioFilter``).
 // DeepFilterNet — community ONNX, no license required.
 export { DeepFilterNetFilter } from "./providers/deepfilternet-filter";
