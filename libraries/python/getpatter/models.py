@@ -855,6 +855,15 @@ class Agent:
     # The ``context_tokens`` metric is always recorded regardless. ``None``
     # (default) disables the warning. Pipeline mode only.
     context_token_budget: int | None = None
+    # Opt-in wall-clock outbound frame pacing (pipeline mode). Default
+    # ``False`` keeps the event-driven send: each TTS/pipeline chunk is
+    # written to the carrier the instant it is produced (bursty). When
+    # ``True``, outbound audio is re-framed into fixed 20 ms frames and
+    # emitted on a monotonic wall-clock grid (silence fills the gaps), which
+    # keeps the carrier jitter buffer primed and the playback cursor exact.
+    # Byte-identical to prior behaviour when ``False`` — the pacer is never
+    # engaged. See :class:`getpatter.audio.pacer.OutboundFramePacer`.
+    paced_output: bool = False
 
 
 @dataclass(frozen=True)

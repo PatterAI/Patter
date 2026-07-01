@@ -67,6 +67,19 @@ class TestReframing:
         pacer.enqueue(b"\x01" * 250)
         assert pacer.pending_bytes == 250
 
+    def test_clear_drops_buffered_audio_and_emits_silence(self) -> None:
+        silence = mulaw_silence_frame()
+        pacer = OutboundFramePacer(frame_bytes=160, silence_frame=silence)
+        pacer.enqueue(b"\x01" * 500)  # ~3 frames queued
+        assert pacer.pending_bytes == 500
+        pacer.clear()  # barge-in: drop the queued (cancelled) audio
+        assert pacer.pending_bytes == 0
+        # Next tick emits silence, never the dropped audio.
+        assert pacer.next_frame() == silence
+        # Re-usable after a clear — new audio frames normally.
+        pacer.enqueue(b"\x02" * 160)
+        assert pacer.next_frame() == b"\x02" * 160
+
 
 class _FakeClock:
     """Monotonic fake clock; `sleep` advances it by the requested delay so the

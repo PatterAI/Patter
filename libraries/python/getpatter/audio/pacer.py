@@ -109,6 +109,16 @@ class OutboundFramePacer:
         self._buf.clear()
         return frame
 
+    def clear(self) -> None:
+        """Drop all buffered audio not yet framed out.
+
+        Used on a barge-in cancel: the carrier buffer is flushed with
+        ``send_clear`` and the pacer's own backlog must be dropped in the
+        same beat so the queued (now-cancelled) audio never reaches the wire
+        and the next tick emits silence instead. The loop keeps running.
+        """
+        self._buf.clear()
+
     def stop(self) -> None:
         """Signal :meth:`run` to exit after the current tick."""
         self._running = False

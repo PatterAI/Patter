@@ -118,6 +118,17 @@ export class OutboundFramePacer {
     return frame;
   }
 
+  /**
+   * Drop all buffered audio not yet framed out. Used on a barge-in cancel:
+   * the carrier buffer is flushed with `sendClear` and the pacer's own
+   * backlog must be dropped in the same beat so the queued (now-cancelled)
+   * audio never reaches the wire and the next tick emits silence. The loop
+   * keeps running.
+   */
+  clear(): void {
+    this.buf = Buffer.alloc(0);
+  }
+
   /** Signal `run` to exit after the current tick. */
   stop(): void {
     this.running = false;

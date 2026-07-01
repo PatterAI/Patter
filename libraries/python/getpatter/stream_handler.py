@@ -25,6 +25,12 @@ if TYPE_CHECKING:
     pass
 
 from getpatter._speech_events import EouTrigger
+from getpatter.audio.pacer import (
+    FRAME_MS,
+    OutboundFramePacer,
+    mulaw_silence_frame,
+    pcm16_silence_frame,
+)
 from getpatter.models import HookContext, _invoke_transfer_fn
 from getpatter.observability.tracing import (
     SPAN_BARGEIN,
@@ -3282,6 +3288,27 @@ class PipelineStreamHandler(StreamHandler):
         self._output_is_mulaw_8k = (
             for_twilio if output_is_mulaw_8k is None else output_is_mulaw_8k
         )
+        # Opt-in wall-clock outbound frame pacing (``agent.paced_output``).
+        # Default OFF ⇒ the pacer is never created and every outbound send
+        # takes the current direct/event-driven path (byte-identical). When
+        # ON, ``_start_pacer`` (called from ``start()`` once the output codec
+        # is settled) creates one :class:`OutboundFramePacer` per call whose
+        # ``send_frame`` forwards to ``audio_sender.send_audio``; each direct
+        # send-site then enqueues through it instead.
+        self._paced_output = bool(getattr(agent, "paced_output", False))
+        self._pacer: OutboundFramePacer | None = None
+        self._pacer_task: asyncio.Task | None = None
+        # The precomputed silence frame the pacer emits on an empty queue —
+        # identity-compared in ``_paced_send_frame`` to distinguish real
+        # audio (advances the playback cursor) from gap-filling silence.
+        self._pacer_silence: bytes = b""
+        # Bytes/second of the enqueued (pre-carrier-transcode) format, used to
+        # convert chunk length → playout seconds. Settled in ``_start_pacer``.
+        self._pacer_bytes_per_s: float = 32_000.0
+        # Real (non-silence) audio actually emitted by the pacer this turn, in
+        # seconds — the ground-truth "heard" cursor under pacing. Reset with
+        # ``_turn_playback_total_s`` at ``_begin_speaking``.
+        self._paced_emitted_s: float = 0.0
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._send_dtmf_fn = send_dtmf_fn
@@ -3918,6 +3945,13 @@ class PipelineStreamHandler(StreamHandler):
 
         logger.debug("Pipeline mode: STT connect kicked off")
 
+        # Opt-in wall-clock pacing: launch the outbound frame pacer now that
+        # the output codec is settled (``set_source_format`` ran above), so it
+        # is already emitting the fixed 20 ms grid (silence until audio) before
+        # the greeting — which then flows through it too. No-op when
+        # ``paced_output`` is off. Stopped in ``cleanup``.
+        self._start_pacer()
+
         # Play first_message if configured and no on_message handler — as a
         # BACKGROUND task (see _play_first_message): the greeting must not
         # block the carrier read loop. _begin_speaking completes BEFORE
@@ -4508,9 +4542,7 @@ class PipelineStreamHandler(StreamHandler):
                             (processed, getattr(self, "_turn_playback_total_s", 0.0))
                         )
                     record_segment = False
-                await self.audio_sender.send_audio(processed_audio)
-                self._track_outbound_playback(len(processed_audio))
-                self._mark_first_audio_sent()
+                await self._send_pipeline_chunk(processed_audio)
         finally:
             await gen.aclose()
             _tts_span.__exit__(None, None, None)
@@ -5097,6 +5129,16 @@ class PipelineStreamHandler(StreamHandler):
             # pending grace task so its phase-1 wait (carrier backlog) /
             # tail-grace flag cannot fire against the cancelled turn.
             self._playback_buffered_until = 0.0
+            # Under pacing the not-yet-emitted backlog lives in the pacer's
+            # own queue, not the carrier — drop it in the same beat as the
+            # carrier ``send_clear`` so the cancelled audio never reaches the
+            # wire and cancel latency stays low. The loop keeps running and
+            # resumes emitting silence. ``getattr`` is defensive against test
+            # fixtures that build a handler shell via ``object.__new__``.
+            _pacer = getattr(self, "_pacer", None)
+            if _pacer is not None:
+                _pacer.clear()
+                self._paced_emitted_s = 0.0
             self._clear_grace_task()
             # Unblock any firstMessage paced-send loop that's sitting in
             # ``_wait_for_mark_window`` — without this the loop keeps
@@ -5322,6 +5364,16 @@ class PipelineStreamHandler(StreamHandler):
         self._pause_resume_index = idx
         self._turn_playback_total_s = heard_s
         self._playback_buffered_until = 0.0
+        # Under pacing the beyond-heard backlog sits in the pacer queue (not
+        # the carrier), so the ``send_clear`` below cannot reach it — drop it
+        # explicitly and re-anchor the emitted cursor to the frozen heard
+        # offset. Resume re-enqueues the retained tail via
+        # ``_drain_sentence_entry``. ``getattr`` is defensive against handler
+        # shells built via ``object.__new__``.
+        _pacer = getattr(self, "_pacer", None)
+        if _pacer is not None:
+            _pacer.clear()
+            self._paced_emitted_s = heard_s
         # The phase-1 grace wait (carrier backlog) is void after the clear;
         # resume re-arms it for the re-sent tail.
         self._clear_grace_task()
@@ -5573,9 +5625,7 @@ class PipelineStreamHandler(StreamHandler):
             # Local-recording tap (agent side) — decodes on the
             # carrier-native μ-law fast path instead of skipping.
             self._tap_pipeline_agent_audio(chunk)
-            await self.audio_sender.send_audio(chunk)
-            self._track_outbound_playback(len(chunk))
-            self._mark_first_audio_sent()
+            await self._send_pipeline_chunk(chunk)
 
     def _passes_paused_kill_filters(self, transcript) -> bool:
         """Whether a transcript may KILL a paused turn: it must be a
@@ -6119,9 +6169,7 @@ class PipelineStreamHandler(StreamHandler):
         # Local-recording tap (agent side) — decodes on the carrier-native
         # μ-law fast path instead of skipping.
         self._tap_pipeline_agent_audio(processed_audio)
-        await self.audio_sender.send_audio(processed_audio)
-        self._track_outbound_playback(len(processed_audio))
-        self._mark_first_audio_sent()
+        await self._send_pipeline_chunk(processed_audio)
 
     async def _spec_ensure_flushed(self, spec: _SpeculativeTurn) -> None:
         """Idempotent release flush: take the floor (``_begin_speaking``),
@@ -7007,6 +7055,14 @@ class PipelineStreamHandler(StreamHandler):
                                 # ``send_clear`` above dropped the carrier's
                                 # buffered audio — reset the playback cursor.
                                 self._playback_buffered_until = 0.0
+                                # Drop the pacer's own (not-yet-emitted) backlog
+                                # in the same beat so the cancelled tail never
+                                # reaches the wire under pacing. ``getattr`` is
+                                # defensive against ``object.__new__`` shells.
+                                _pacer = getattr(self, "_pacer", None)
+                                if _pacer is not None:
+                                    _pacer.clear()
+                                    self._paced_emitted_s = 0.0
                                 self._clear_grace_task()
                                 # Tear down the in-flight LLM stream too. The
                                 # consumption loop polls ``_llm_cancel_event``
@@ -7462,6 +7518,7 @@ class PipelineStreamHandler(StreamHandler):
         self._current_agent_spoken_text = ""
         # Fresh turn — reset the heard-prefix playback timeline.
         self._turn_playback_total_s = 0.0
+        self._paced_emitted_s = 0.0
         self._turn_spoken_segments = []
         # Fresh turn — drop any pause-and-resume state and retained audio
         # from the previous turn (a paused turn can never reach here — the
@@ -7498,6 +7555,115 @@ class PipelineStreamHandler(StreamHandler):
         """
         if self._first_audio_sent_at is None:
             self._first_audio_sent_at = time.time()
+
+    # ------------------------------------------------------------------
+    # Opt-in wall-clock outbound pacing (``agent.paced_output``)
+    # ------------------------------------------------------------------
+    def _start_pacer(self) -> None:
+        """Create + launch the outbound frame pacer for this call.
+
+        No-op unless ``paced_output`` is enabled. Called from ``start()``
+        AFTER the output codec is settled (``set_source_format`` has run), so
+        the frame size / silence codec match the bytes the send-sites enqueue:
+        native μ-law 8 kHz (160 B) when the sender passes wire bytes straight
+        through, else PCM16 16 kHz (640 B). The loop runs as a tracked
+        background task emitting silence until audio is enqueued.
+        """
+        if not self._paced_output or self._pacer is not None:
+            return
+        native = bool(getattr(self.audio_sender, "_input_is_mulaw_8k", False))
+        if native:
+            frame_bytes = 160
+            self._pacer_bytes_per_s = 8_000.0
+            self._pacer_silence = mulaw_silence_frame()
+        else:
+            frame_bytes = 640
+            self._pacer_bytes_per_s = 32_000.0
+            self._pacer_silence = pcm16_silence_frame(16000)
+        self._pacer = OutboundFramePacer(
+            frame_bytes=frame_bytes,
+            silence_frame=self._pacer_silence,
+            send_frame=self._paced_send_frame,
+        )
+        self._pacer_task = asyncio.create_task(self._run_pacer())
+
+    async def _run_pacer(self) -> None:
+        """Drive the pacer loop; swallow teardown-time errors."""
+        try:
+            await self._pacer.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive; loop must not crash the call
+            logger.debug("outbound pacer loop error", exc_info=True)
+
+    async def _stop_pacer(self) -> None:
+        """Stop + await the pacer loop (idempotent; safe at teardown)."""
+        pacer = getattr(self, "_pacer", None)
+        task = getattr(self, "_pacer_task", None)
+        if pacer is not None:
+            pacer.stop()
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - teardown
+                pass
+        self._pacer = None
+        self._pacer_task = None
+
+    async def _paced_send_frame(self, frame: bytes) -> None:
+        """Pacer ``send_frame`` callback: hand one paced frame to the carrier.
+
+        The per-carrier transcode/envelope is unchanged — this just calls the
+        existing ``audio_sender.send_audio``. Real (audio-bearing) frames
+        advance the emitted-playback cursor and anchor ``_first_audio_sent_at``;
+        the gap-filling silence frame (identity-compared) does neither.
+        """
+        await self.audio_sender.send_audio(frame)
+        if frame is not self._pacer_silence:
+            self._paced_emitted_s = (
+                getattr(self, "_paced_emitted_s", 0.0) + FRAME_MS / 1000.0
+            )
+            self._refresh_paced_backlog()
+            self._mark_first_audio_sent()
+
+    def _enqueue_paced(self, chunk: bytes) -> None:
+        """Queue one processed chunk on the pacer and advance the enqueue
+        cursor (``_turn_playback_total_s``) that stamps heard-prefix segments
+        and feeds the backlog estimate."""
+        self._pacer.enqueue(chunk)
+        if len(chunk) > 0:
+            self._turn_playback_total_s = (
+                getattr(self, "_turn_playback_total_s", 0.0)
+                + len(chunk) / self._pacer_bytes_per_s
+            )
+            self._refresh_paced_backlog()
+
+    def _refresh_paced_backlog(self) -> None:
+        """Drive ``_playback_buffered_until`` from the pacer's REAL emitted
+        position: ``remaining = enqueued_total - emitted``, anchored to now.
+        Because the pacer emits at realtime, ``buffered_until - now`` then
+        decrements in lockstep with playback, keeping ``_heard_response_prefix``
+        exact under pacing (vs the byte-estimate used on the unpaced path)."""
+        total = getattr(self, "_turn_playback_total_s", 0.0)
+        emitted = getattr(self, "_paced_emitted_s", 0.0)
+        self._playback_buffered_until = time.time() + max(0.0, total - emitted)
+
+    async def _send_pipeline_chunk(self, chunk: bytes) -> None:
+        """Route one processed pipeline audio chunk to the carrier.
+
+        Paced: enqueue on the frame pacer (which emits it on the wall-clock
+        grid). Unpaced (default): the current direct send — byte-identical to
+        the prior ``send_audio`` + ``_track_outbound_playback`` +
+        ``_mark_first_audio_sent`` triplet. ``getattr`` is defensive against
+        handler shells built via ``object.__new__``.
+        """
+        if getattr(self, "_pacer", None) is not None:
+            self._enqueue_paced(chunk)
+        else:
+            await self.audio_sender.send_audio(chunk)
+            self._track_outbound_playback(len(chunk))
+            self._mark_first_audio_sent()
 
     def _track_outbound_playback(self, num_bytes: int) -> None:
         """Advance ``_playback_buffered_until`` by the playout duration of an
@@ -8119,8 +8285,16 @@ class PipelineStreamHandler(StreamHandler):
                     # Local-recording tap (agent side) — decodes on the
                     # carrier-native μ-law fast path instead of skipping.
                     self._tap_pipeline_agent_audio(audio_chunk)
-                    await self.audio_sender.send_audio(audio_chunk)
-                    self._mark_first_audio_sent()
+                    # Paced: the greeting flows through the frame pacer too
+                    # (unifies the greeting onto the same wall-clock grid as
+                    # the turns). Unpaced (default): the current direct send —
+                    # byte-identical (no ``_track_outbound_playback`` here, as
+                    # the greeting stamps no heard-prefix segment).
+                    if getattr(self, "_pacer", None) is not None:
+                        self._enqueue_paced(audio_chunk)
+                    else:
+                        await self.audio_sender.send_audio(audio_chunk)
+                        self._mark_first_audio_sent()
         finally:
             # Drop any partial int16 byte to prevent cross-turn corruption
             # if the stream threw before a complete sample was delivered.
@@ -8191,6 +8365,24 @@ class PipelineStreamHandler(StreamHandler):
         if self._pending_marks:
             self._drain_pending_marks()
         self._first_message_mark_counter = 0
+        # Paced: hand the whole prewarm buffer to the frame pacer in
+        # ``_PREWARM_CHUNK_BYTES`` slices — no mark gating or per-chunk sleep,
+        # the pacer owns the wall-clock. Barge-in still drops the queue via
+        # ``_pacer.clear()``.
+        if getattr(self, "_pacer", None) is not None:
+            sent_any = False
+            for i in range(0, len(bytes_), self._PREWARM_CHUNK_BYTES):
+                if not self._is_speaking:
+                    break
+                chunk = bytes_[i : i + self._PREWARM_CHUNK_BYTES]
+                if self._aec is not None and not getattr(
+                    self, "_tts_output_format_native_for_carrier", False
+                ):
+                    self._aec.push_far_end(chunk)
+                self._tap_pipeline_agent_audio(chunk)
+                self._enqueue_paced(chunk)
+                sent_any = True
+            return sent_any
         first_chunk_sent = False
         # Once the mark window is first filled we switch to playout-time
         # pacing to prevent batch-ACK bursts from draining the carrier
@@ -8280,6 +8472,10 @@ class PipelineStreamHandler(StreamHandler):
             except (asyncio.CancelledError, Exception):
                 pass
         self._first_message_task = None
+        # Stop the outbound frame pacer (no-op when unpaced) before the
+        # carrier/adapters tear down so its loop stops writing to a closing
+        # socket.
+        await self._stop_pacer()
         # Cancel the STT consumer FIRST: while cleanup awaited the cancelled
         # dispatch task, the still-alive STT loop (blocked in
         # ``_await_dispatch_settle`` on that same task) could wake first and

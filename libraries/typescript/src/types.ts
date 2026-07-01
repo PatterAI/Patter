@@ -1062,6 +1062,17 @@ export interface AgentOptions {
    */
   readonly contextTokenBudget?: number;
   /**
+   * Opt-in wall-clock outbound frame pacing (pipeline mode). Omitted /
+   * `false` (default) keeps the event-driven send: each TTS/pipeline chunk
+   * is written to the carrier the instant it is produced (bursty). When
+   * `true`, outbound audio is re-framed into fixed 20 ms frames and emitted
+   * on a monotonic wall-clock grid (silence fills the gaps), which keeps the
+   * carrier jitter buffer primed and the playback cursor exact. Byte-identical
+   * to prior behaviour when `false` — the pacer is never engaged. Mirrors
+   * Python `Agent.paced_output`. See `OutboundFramePacer`.
+   */
+  readonly pacedOutput?: boolean;
+  /**
    * Input noise reduction for speakerphone / conference audio (OpenAI
    * Realtime mode only). `undefined` (default) omits the field entirely
    * (no reduction — today's behavior).

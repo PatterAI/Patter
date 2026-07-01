@@ -61,6 +61,19 @@ describe('[unit] pacer re-framing', () => {
     pacer.enqueue(Buffer.alloc(250, 0x01));
     expect(pacer.pendingBytes).toBe(250);
   });
+
+  it('clear drops buffered audio and emits silence next', () => {
+    const silence = mulawSilenceFrame();
+    const pacer = new OutboundFramePacer({ frameBytes: 160, silenceFrame: silence });
+    pacer.enqueue(Buffer.alloc(500, 0x01)); // ~3 frames queued
+    expect(pacer.pendingBytes).toBe(500);
+    pacer.clear(); // barge-in: drop the queued (cancelled) audio
+    expect(pacer.pendingBytes).toBe(0);
+    expect(pacer.nextFrame().equals(silence)).toBe(true);
+    // Re-usable after a clear.
+    pacer.enqueue(Buffer.alloc(160, 0x02));
+    expect(pacer.nextFrame().equals(Buffer.alloc(160, 0x02))).toBe(true);
+  });
 });
 
 class FakeClock {

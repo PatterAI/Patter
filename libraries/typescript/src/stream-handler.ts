@@ -21,6 +21,12 @@ import {
   formatsMatch,
   type AudioFormat,
 } from './audio/format';
+import {
+  FRAME_MS,
+  OutboundFramePacer,
+  mulawSilenceFrame,
+  pcm16SilenceFrame,
+} from './audio/pacer';
 import { LLMLoop } from './llm-loop';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager } from './handler-utils';
@@ -841,6 +847,26 @@ export class StreamHandler {
   private turnPlaybackTotalMs = 0;
   private turnSpokenSegments: Array<{ readonly text: string; readonly startMs: number }> = [];
   /**
+   * Opt-in wall-clock outbound frame pacer (``agent.pacedOutput``). Null
+   * (default) ⇒ every outbound send takes the current direct/event-driven
+   * path (byte-identical). When set, ``startPacer`` (called from
+   * ``initPipeline`` once the output codec is settled) creates one per call
+   * whose ``sendFrame`` runs ``encodePipelineAudio`` + ``bridge.sendAudio``;
+   * each pipeline send-site then enqueues through it. Mirrors Python
+   * ``_pacer``.
+   */
+  private pacer: OutboundFramePacer | null = null;
+  private pacerTask: Promise<void> | null = null;
+  /** Precomputed silence frame the pacer emits on an empty queue; identity-
+   * compared in ``pacedSendFrame`` to tell real audio from gap-fill silence. */
+  private pacerSilence: Buffer = Buffer.alloc(0);
+  /** Bytes/ms of the enqueued (pre-encode) format — 8 (native μ-law 8 kHz)
+   * or 32 (PCM16 16 kHz). Settled in ``startPacer``. */
+  private pacerBytesPerMs = 32;
+  /** Real (non-silence) audio emitted by the pacer this turn, in ms — the
+   * ground-truth "heard" cursor under pacing. Reset at ``beginSpeaking``. */
+  private pacedEmittedMs = 0;
+  /**
    * Optional barge-in confirmation strategies. With an empty array the
    * SDK falls back to the legacy "cancel on first VAD speech_start"
    * behaviour. With one or more strategies, a VAD speech_start during
@@ -1119,6 +1145,7 @@ export class StreamHandler {
     this.currentAgentSpokenText = '';
     // Fresh turn — reset the heard-prefix playback timeline.
     this.turnPlaybackTotalMs = 0;
+    this.pacedEmittedMs = 0;
     this.turnSpokenSegments = [];
     // Fresh turn — drop any pause-and-resume state and retained audio from
     // the previous turn (a paused turn can never reach here — the
@@ -1178,6 +1205,113 @@ export class StreamHandler {
     // Per-turn playout total — the time axis for the heard-prefix estimate
     // (see ``heardResponsePrefix``). Reset at ``beginSpeaking``.
     this.turnPlaybackTotalMs += chunkMs;
+  }
+
+  // -------------------------------------------------------------------------
+  // Opt-in wall-clock outbound pacing (``agent.pacedOutput``)
+  // -------------------------------------------------------------------------
+  /**
+   * Create + launch the outbound frame pacer for this call. No-op unless
+   * ``pacedOutput`` is enabled. Called from ``initPipeline`` AFTER
+   * ``configureOutboundAudio`` has settled the output codec, so the frame
+   * size / silence codec match the bytes the send-sites enqueue: native
+   * μ-law 8 kHz (160 B) when ``encodePipelineAudio`` passes wire bytes
+   * straight through, else PCM16 16 kHz (640 B). The loop runs as a tracked
+   * background task emitting silence until audio is enqueued.
+   */
+  private startPacer(): void {
+    if (!this.deps.agent.pacedOutput || this.pacer) return;
+    const native =
+      this.ttsOutputFormatNativeForCarrier &&
+      this.deps.bridge.telephonyProvider !== 'telnyx';
+    const frameBytes = native ? 160 : 640;
+    this.pacerBytesPerMs = native ? 8 : 32;
+    this.pacerSilence = native ? mulawSilenceFrame() : pcm16SilenceFrame(16000);
+    this.pacer = new OutboundFramePacer({
+      frameBytes,
+      silenceFrame: this.pacerSilence,
+      sendFrame: async (frame) => this.pacedSendFrame(frame),
+    });
+    this.pacerTask = this.pacer.run().catch((err) => {
+      getLogger().debug(`outbound pacer loop error: ${String(err)}`);
+    });
+  }
+
+  /** Stop + await the pacer loop (idempotent; safe at teardown). */
+  private async stopPacer(): Promise<void> {
+    const pacer = this.pacer;
+    const task = this.pacerTask;
+    if (pacer) pacer.stop();
+    this.pacer = null;
+    this.pacerTask = null;
+    if (task) {
+      try {
+        await task;
+      } catch {
+        /* teardown */
+      }
+    }
+  }
+
+  /**
+   * Pacer ``sendFrame`` callback: hand one paced frame to the carrier via the
+   * unchanged per-carrier transcode/envelope (``encodePipelineAudio`` +
+   * ``bridge.sendAudio``). Real (audio-bearing) frames advance the emitted-
+   * playback cursor and anchor ``firstAudioSentAt``; the gap-filling silence
+   * frame (identity-compared) does neither.
+   */
+  private async pacedSendFrame(frame: Buffer): Promise<void> {
+    const encoded = this.encodePipelineAudio(frame);
+    this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+    if (frame !== this.pacerSilence) {
+      this.pacedEmittedMs += FRAME_MS;
+      this.refreshPacedBacklog();
+      this.markFirstAudioSent();
+    }
+  }
+
+  /**
+   * Queue one processed chunk on the pacer and advance the enqueue cursor
+   * (``turnPlaybackTotalMs``) that stamps heard-prefix segments and feeds the
+   * backlog estimate.
+   */
+  private enqueuePaced(chunk: Buffer): void {
+    if (!this.pacer) return;
+    this.pacer.enqueue(chunk);
+    if (chunk.length > 0) {
+      this.turnPlaybackTotalMs += chunk.length / this.pacerBytesPerMs;
+      this.refreshPacedBacklog();
+    }
+  }
+
+  /**
+   * Drive ``playbackBufferedUntil`` from the pacer's REAL emitted position:
+   * ``remaining = enqueuedTotal - emitted``, anchored to now. Because the
+   * pacer emits at realtime, ``playbackBufferedUntil - now`` then decrements
+   * in lockstep with playback, keeping ``heardResponsePrefix`` exact under
+   * pacing (vs the byte-estimate used on the unpaced path).
+   */
+  private refreshPacedBacklog(): void {
+    const remaining = Math.max(0, this.turnPlaybackTotalMs - this.pacedEmittedMs);
+    this.playbackBufferedUntil = Date.now() + remaining;
+  }
+
+  /**
+   * Route one processed pipeline audio chunk to the carrier. Paced: enqueue
+   * on the frame pacer (which emits it on the wall-clock grid). Unpaced
+   * (default): the current direct send — byte-identical to the prior
+   * ``encodePipelineAudio`` + ``bridge.sendAudio`` + ``trackOutboundPlayback``
+   * + ``markFirstAudioSent`` block.
+   */
+  private sendPipelineChunk(processedAudio: Buffer): void {
+    if (this.pacer) {
+      this.enqueuePaced(processedAudio);
+    } else {
+      const encoded = this.encodePipelineAudio(processedAudio);
+      this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+      this.trackOutboundPlayback(processedAudio.length);
+      this.markFirstAudioSent();
+    }
   }
 
   /**
@@ -1269,6 +1403,14 @@ export class StreamHandler {
     // whatever audio was buffered ahead is dropped, so the playback cursor
     // snaps back to "nothing pending".
     this.playbackBufferedUntil = 0;
+    // Under pacing the not-yet-emitted backlog lives in the pacer's own
+    // queue, not the carrier — drop it in the same beat as the carrier
+    // ``sendClear`` so the cancelled audio never reaches the wire and cancel
+    // latency stays low. The loop keeps running and resumes emitting silence.
+    if (this.pacer) {
+      this.pacer.clear();
+      this.pacedEmittedMs = 0;
+    }
     // Drain any firstMessage mark waiters so a loop blocked on
     // ``waitForMarkWindow`` exits on the next tick and observes
     // ``!isSpeaking``. Without this the loop would stay blocked until
@@ -2969,6 +3111,9 @@ export class StreamHandler {
     // ``sendPacedFirstMessageBytes`` for the per-send reset that
     // protects the within-call path.
     this.clearGraceTimer();
+    // Stop the outbound frame pacer (no-op when unpaced) before the
+    // carrier/adapters tear down so its loop stops writing to a closing socket.
+    await this.stopPacer();
     this.flushResamplers();
     await this.closeSttOnce();
     try { this.adapter?.close(); } catch { /* ignore */ }
@@ -3009,6 +3154,8 @@ export class StreamHandler {
     // promises owned by the send loop, and reset the counter.
     this.drainPendingMarks();
     this.clearGraceTimer();
+    // Stop the outbound frame pacer (no-op when unpaced) before teardown.
+    await this.stopPacer();
     this.flushResamplers();
     // Drain STT first so in-flight transcripts fire before onCallEnd.
     await this.closeSttOnce();
@@ -3233,9 +3380,17 @@ export class StreamHandler {
           // mulaw fast path these are wire bytes, not PCM16 — pushing
           // them corrupted the AEC reference.
           if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
-          const encoded = this.encodePipelineAudio(chunk);
-          this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-          this.markFirstAudioSent();
+          // Paced: the greeting flows through the frame pacer too (unifies it
+          // onto the same wall-clock grid as the turns). Unpaced (default):
+          // the current direct send — byte-identical (no ``trackOutboundPlayback``
+          // here, as the greeting stamps no heard-prefix segment).
+          if (this.pacer) {
+            this.enqueuePaced(chunk);
+          } else {
+            const encoded = this.encodePipelineAudio(chunk);
+            this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
+            this.markFirstAudioSent();
+          }
         }
       }
     } catch (e) {
@@ -3269,6 +3424,24 @@ export class StreamHandler {
     // this path but ``onMark`` and the rest of the handler rely on the
     // counter being monotonic across the call lifetime.
     if (this.pendingMarks.length > 0) this.drainPendingMarks();
+    // Paced: hand the whole prewarm buffer to the frame pacer in 20 ms
+    // slices — no mark gating, the pacer owns the wall-clock. Barge-in still
+    // drops the queue via ``pacer.clear()``.
+    if (this.pacer) {
+      const nativeBytesPerMs = this.ttsOutputFormatNativeForCarrier
+        ? 8
+        : StreamHandler.PCM16_16K_BYTES_PER_MS;
+      const paceSlice = nativeBytesPerMs * FRAME_MS;
+      let anySent = false;
+      for (let i = 0; i < bytes.length; i += paceSlice) {
+        if (!this.isSpeaking) break;
+        const chunk = bytes.subarray(i, i + paceSlice);
+        if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
+        this.enqueuePaced(chunk);
+        anySent = true;
+      }
+      return anySent;
+    }
     let firstChunkSent = false;
     // Slice on the PSTN/G.711 packet quantum (20 ms). Twilio Media
     // Streams emits and consumes 20 ms μ-law frames natively, so each
@@ -3500,6 +3673,13 @@ export class StreamHandler {
     }
     getLogger().debug(`Pipeline mode (${label}): STT connect kicked off`);
 
+    // Opt-in wall-clock pacing: launch the outbound frame pacer now that the
+    // output codec is settled (``configureOutboundAudio`` ran above), so it is
+    // already emitting the fixed 20 ms grid (silence until audio) before the
+    // greeting — which then flows through it too. No-op when ``pacedOutput`` is
+    // off. Stopped in ``handleStop`` / ``handleWsClose``.
+    this.startPacer();
+
     if (this.deps.agent.firstMessage && !this.deps.onMessage && this.tts) {
       this.metricsAcc.startTurn();
       // Mark the agent as speaking for the duration of the first
@@ -3712,10 +3892,7 @@ export class StreamHandler {
           });
           recordSegment = false;
         }
-        const encoded = this.encodePipelineAudio(processedAudio);
-        this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-        this.trackOutboundPlayback(processedAudio.length);
-        this.markFirstAudioSent();
+        this.sendPipelineChunk(processedAudio);
       }
     } catch (e) {
       getLogger().error(`TTS streaming error (${this.deps.bridge.label}):`, e);
@@ -4390,6 +4567,14 @@ export class StreamHandler {
     this.pauseResumeIndex = index;
     this.turnPlaybackTotalMs = heardMs;
     this.playbackBufferedUntil = 0;
+    // Under pacing the beyond-heard backlog sits in the pacer queue (not the
+    // carrier), so the ``sendClear`` below cannot reach it — drop it and
+    // re-anchor the emitted cursor to the frozen heard offset. Resume
+    // re-enqueues the retained tail via ``drainSentenceEntry``.
+    if (this.pacer) {
+      this.pacer.clear();
+      this.pacedEmittedMs = heardMs;
+    }
     // The phase-1 grace wait (carrier backlog) is void after the clear;
     // resume re-arms it for the re-sent tail.
     this.clearGraceTimer();
@@ -4614,10 +4799,7 @@ export class StreamHandler {
       // carrier-native fast path where these are mulaw wire bytes that
       // would corrupt the int16-PCM-16k AEC reference.
       if (this.aec && !this.ttsOutputFormatNativeForCarrier) this.aec.pushFarEnd(chunk);
-      const encoded = this.encodePipelineAudio(chunk);
-      this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-      this.trackOutboundPlayback(chunk.length);
-      this.markFirstAudioSent();
+      this.sendPipelineChunk(chunk);
     }
   }
 
@@ -5039,10 +5221,7 @@ export class StreamHandler {
     if (this.aec && !this.ttsOutputFormatNativeForCarrier) {
       this.aec.pushFarEnd(processedAudio);
     }
-    const encoded = this.encodePipelineAudio(processedAudio);
-    this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-    this.trackOutboundPlayback(processedAudio.length);
-    this.markFirstAudioSent();
+    this.sendPipelineChunk(processedAudio);
   }
 
   /**
