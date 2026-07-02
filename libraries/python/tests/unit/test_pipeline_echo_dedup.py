@@ -199,7 +199,10 @@ class TestInterruptedTurnMarking:
 
         async def _result():
             yield "Ti racconto. "
-            # Simulate a barge-in cancelling the stream mid-turn.
+            # The sentence was synthesized + pushed within ms; simulate the
+            # carrier having played it out (confirmed heard) so the accurate
+            # heard-prefix records it before the barge-in cancels the stream.
+            h._mark_confirmed_s = 1.0
             h._llm_cancel_event.set()
             yield "Questo non si sente."
 

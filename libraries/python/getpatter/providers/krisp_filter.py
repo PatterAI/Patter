@@ -21,6 +21,7 @@ from getpatter.providers.krisp_instance import (
     KRISP_FRAME_DURATIONS,
     KRISP_NOT_INSTALLED_MESSAGE,
     KrispFrameDuration,
+    KrispModelKind,
     KrispSampleRate,
     KrispSDKManager,
     int_to_krisp_frame_duration,
@@ -47,6 +48,12 @@ class KrispVivaFilter(AudioFilter):
     sample_rate:
         Initial sample rate in Hz.  Defaults to ``16000``.  The internal Krisp
         session is lazily recreated if the runtime sample rate differs.
+    session_type:
+        Krisp session family the model must load through — :class:`KrispModelKind`.
+        ``NC`` (default) uses the plain noise-cancellation / VIVA telephony
+        session (``krisp_audio.NcInt16``); ``BVC`` uses the
+        Background-Voice-Cancellation session (``krisp_audio.BvcInt16``).
+        Must match the ``.kef`` model, or session creation fails inside the SDK.
 
     Raises
     ------
@@ -64,6 +71,7 @@ class KrispVivaFilter(AudioFilter):
         noise_suppression_level: int = 100,
         frame_duration_ms: Union[KrispFrameDuration, int] = KrispFrameDuration.MS_10,
         sample_rate: Union[KrispSampleRate, int, None] = None,
+        session_type: KrispModelKind = KrispModelKind.NC,
     ) -> None:
         if not KRISP_AUDIO_AVAILABLE or krisp_audio is None:
             raise RuntimeError(KRISP_NOT_INSTALLED_MESSAGE)
@@ -74,6 +82,7 @@ class KrispVivaFilter(AudioFilter):
         self._noise_suppression_level: int = noise_suppression_level
         self._sample_rate: int | None = None
         self._frame_duration_ms: int = frame_duration_ms
+        self._session_type: KrispModelKind = session_type
         # Internal re-framing buffer: Krisp sessions process EXACTLY
         # ``frame_duration_ms`` of audio per call, but the pipeline pushes
         # whatever the carrier delivers (typically 20 ms frames). Input is
@@ -138,16 +147,30 @@ class KrispVivaFilter(AudioFilter):
         model_info = krisp_audio.ModelInfo()
         model_info.path = self._model_path
 
-        nc_cfg = krisp_audio.NcSessionConfig()
-        nc_cfg.inputSampleRate = int_to_krisp_sample_rate(sample_rate)
-        nc_cfg.inputFrameDuration = int_to_krisp_frame_duration(self._frame_duration_ms)
-        nc_cfg.outputSampleRate = nc_cfg.inputSampleRate
-        nc_cfg.modelInfo = model_info
+        # Pick the Krisp session family for this model. BVC (Background Voice
+        # Cancellation) models require the ``BvcInt16`` session and its own
+        # config type; the VIVA/telephony noise-cancellation models load
+        # through ``NcInt16`` / ``NcSessionConfig``. The config surface is the
+        # same shape (sample rate, frame duration, model info) — only the
+        # session class differs.
+        if self._session_type == KrispModelKind.BVC:
+            cfg = krisp_audio.BvcSessionConfig()
+            create = krisp_audio.BvcInt16.create
+        else:
+            cfg = krisp_audio.NcSessionConfig()
+            create = krisp_audio.NcInt16.create
+
+        cfg.inputSampleRate = int_to_krisp_sample_rate(sample_rate)
+        cfg.inputFrameDuration = int_to_krisp_frame_duration(self._frame_duration_ms)
+        cfg.outputSampleRate = cfg.inputSampleRate
+        cfg.modelInfo = model_info
 
         try:
-            self._session = krisp_audio.NcInt16.create(nc_cfg)
+            self._session = create(cfg)
             self._sample_rate = sample_rate
-            logger.info("Krisp session created successfully")
+            logger.info(
+                "Krisp %s session created successfully", self._session_type.value
+            )
         except Exception as e:
             logger.error("Failed to create Krisp session: %s", e)
             raise

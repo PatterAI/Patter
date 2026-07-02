@@ -29,6 +29,22 @@ class LocalConfig:
     # accepting the request.
     # Set to False only for local development against mock providers.
     require_signature: bool = True
+    # SECURITY (#204): require a per-call stream-authentication token on the
+    # media-stream WebSocket endpoints (/ws/stream, /ws/telnyx/stream,
+    # /ws/plivo/stream). The token is minted by the SIGNATURE-VALIDATED carrier
+    # webhook (or an operator-initiated outbound call) and delivered back on the
+    # carrier's own custom-param channel (Twilio <Parameter>, Telnyx query
+    # string, Plivo extra_headers). When True (the default), a media WS that
+    # presents no / an invalid / an expired token is closed with WS 1008 BEFORE
+    # any provider (STT/LLM/TTS/Realtime) session is opened — this closes the
+    # toll-fraud + prompt-extraction hole where an unauthenticated peer could
+    # drive a full session on the operator's provider keys. The standard
+    # ``serve()`` path mints + embeds + validates the token itself, so normal
+    # inbound AND outbound calls keep working with zero operator action. Set to
+    # False ONLY for operators serving custom TwiML/XML that cannot carry the
+    # token — the connection is then allowed but a loud one-time WARNING is
+    # logged.
+    require_stream_auth: bool = True
     # When True, only the very first TTFB event per turn is emitted to the
     # EventBus. Default is False to preserve current per-segment emission
     # behaviour.

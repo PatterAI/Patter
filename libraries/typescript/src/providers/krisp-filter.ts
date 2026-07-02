@@ -42,6 +42,17 @@ export const KrispFrameDuration = {
 } as const;
 export type KrispFrameDuration = (typeof KrispFrameDuration)[keyof typeof KrispFrameDuration];
 
+/**
+ * Krisp session family a model must load through (parity with Python
+ * `KrispModelKind`). `NC` = plain noise cancellation / VIVA telephony;
+ * `BVC` = Background Voice Cancellation (a different Krisp session class).
+ */
+export const KrispModelKind = {
+  NC: 'nc',
+  BVC: 'bvc',
+} as const;
+export type KrispModelKind = (typeof KrispModelKind)[keyof typeof KrispModelKind];
+
 /** Options accepted by {@link KrispVivaFilter}. */
 export interface KrispVivaFilterOptions {
   /**
@@ -55,6 +66,13 @@ export interface KrispVivaFilterOptions {
   readonly frameDurationMs?: KrispFrameDuration | number;
   /** Initial sample rate in Hz. Defaults to `16000`. Re-created lazily if it changes mid-call. */
   readonly sampleRate?: KrispSampleRate | number;
+  /**
+   * Krisp session family for the model (parity with Python `session_type`).
+   * `NC` (default) selects the noise-cancellation session; `BVC` selects the
+   * Background-Voice-Cancellation session. Kept for API parity — the Node
+   * scaffold throws at construction regardless (no official Node Krisp SDK).
+   */
+  readonly sessionType?: KrispModelKind;
 }
 
 const NODE_SDK_UNAVAILABLE_MESSAGE =

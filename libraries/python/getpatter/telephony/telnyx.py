@@ -15,7 +15,7 @@ from urllib.parse import quote
 from starlette.websockets import WebSocketDisconnect
 
 from getpatter.observability.attributes import patter_call_scope
-from getpatter.telephony.common import _validate_e164
+from getpatter.telephony.common import STREAM_TOKEN_PARAM, _validate_e164
 from getpatter.utils.log_sanitize import mask_phone_number
 from getpatter.stream_handler import (
     AudioSender,
@@ -128,6 +128,7 @@ def telnyx_webhook_handler(
     callee: str,
     webhook_base_url: str,
     connection_id: str = "",
+    stream_token: str = "",
 ) -> dict:
     """Generate Telnyx Call Control response for an incoming call.
 
@@ -141,11 +142,16 @@ def telnyx_webhook_handler(
         callee: The called number.
         webhook_base_url: Hostname (no scheme) of this server, e.g. "abc.ngrok.io".
         connection_id: Telnyx TeXML App / Call Control App ID (optional).
+        stream_token: Per-call media-stream auth token (#204). Telnyx preserves
+            the query string, so it rides as ``&patter_stream_token=...``; the
+            WS handler validates it at accept before any provider session.
     """
     stream_url = (
         f"wss://{webhook_base_url}/ws/telnyx/stream/{call_id}"
         f"?caller={quote(caller)}&callee={quote(callee)}"
     )
+    if stream_token:
+        stream_url += f"&{STREAM_TOKEN_PARAM}={quote(stream_token, safe='')}"
     # Telnyx Call Control: answer first, then stream_start.
     # ``inbound_track`` halves WS upstream bandwidth — the bridge already
     # filters outbound media downstream, so requesting only inbound at the

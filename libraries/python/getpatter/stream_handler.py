@@ -25,6 +25,12 @@ if TYPE_CHECKING:
     pass
 
 from getpatter._speech_events import EouTrigger
+from getpatter.audio.pacer import (
+    FRAME_MS,
+    OutboundFramePacer,
+    mulaw_silence_frame,
+    pcm16_silence_frame,
+)
 from getpatter.models import HookContext, _invoke_transfer_fn
 from getpatter.observability.tracing import (
     SPAN_BARGEIN,
@@ -3354,6 +3360,27 @@ class PipelineStreamHandler(StreamHandler):
         self._output_is_mulaw_8k = (
             for_twilio if output_is_mulaw_8k is None else output_is_mulaw_8k
         )
+        # Opt-in wall-clock outbound frame pacing (``agent.paced_output``).
+        # Default OFF ⇒ the pacer is never created and every outbound send
+        # takes the current direct/event-driven path (byte-identical). When
+        # ON, ``_start_pacer`` (called from ``start()`` once the output codec
+        # is settled) creates one :class:`OutboundFramePacer` per call whose
+        # ``send_frame`` forwards to ``audio_sender.send_audio``; each direct
+        # send-site then enqueues through it instead.
+        self._paced_output = bool(getattr(agent, "paced_output", False))
+        self._pacer: OutboundFramePacer | None = None
+        self._pacer_task: asyncio.Task | None = None
+        # The precomputed silence frame the pacer emits on an empty queue —
+        # identity-compared in ``_paced_send_frame`` to distinguish real
+        # audio (advances the playback cursor) from gap-filling silence.
+        self._pacer_silence: bytes = b""
+        # Bytes/second of the enqueued (pre-carrier-transcode) format, used to
+        # convert chunk length → playout seconds. Settled in ``_start_pacer``.
+        self._pacer_bytes_per_s: float = 32_000.0
+        # Real (non-silence) audio actually emitted by the pacer this turn, in
+        # seconds — the ground-truth "heard" cursor under pacing. Reset with
+        # ``_turn_playback_total_s`` at ``_begin_speaking``.
+        self._paced_emitted_s: float = 0.0
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._send_dtmf_fn = send_dtmf_fn
@@ -3461,15 +3488,18 @@ class PipelineStreamHandler(StreamHandler):
         # caller actually HEARD when a barge-in lands. ``_turn_playback_total_s``
         # accumulates the playout duration of every chunk pushed this turn
         # (including filler audio, which keeps the timeline aligned);
-        # ``_turn_spoken_segments`` records ``(sentence_text,
-        # cumulative_start_s)`` for each RESPONSE sentence at its first audible
-        # chunk (filler / error-fallback audio advances the clock but adds no
-        # segment). ``heard = total - remaining_backlog`` then maps to a
-        # sentence-granular prefix — see ``_heard_response_prefix``. Both reset
+        # ``_turn_spoken_segments`` records ``(sentence_text, start_s, dur_s)``
+        # for each RESPONSE sentence: ``start_s`` is the cumulative playback
+        # position at its first audible chunk, ``dur_s`` its own playout
+        # duration (filled once the NEXT sentence stamps; the last/in-flight
+        # sentence keeps ``0.0`` and its extent is resolved from the live
+        # total). ``heard = total - remaining_backlog`` then maps to a
+        # WORD-ACCURATE prefix (whole heard sentences + the heard fraction of
+        # the sentence in flight) — see ``_heard_response_prefix``. Both reset
         # at ``_begin_speaking``. Mirrors TS ``turnPlaybackTotalMs`` /
         # ``turnSpokenSegments``.
         self._turn_playback_total_s: float = 0.0
-        self._turn_spoken_segments: list[tuple[str, float]] = []
+        self._turn_spoken_segments: list[tuple[str, float, float]] = []
         # Optional barge-in confirmation strategies (see
         # ``getpatter.services.barge_in_strategies``). With an empty tuple
         # the SDK uses the legacy "cancel on first VAD speech_start"
@@ -3483,6 +3513,23 @@ class PipelineStreamHandler(StreamHandler):
         self._barge_in_strategies: tuple = tuple(
             getattr(agent, "barge_in_strategies", ()) or ()
         )
+        # Opt-in barge-in RE-DELIVERY (see ``getpatter.services.redelivery``).
+        # When ``redeliver_interrupted`` is set, a confirmed barge-in captures
+        # the ``(heard, unsaid)`` split (``_maybe_arm_redelivery``) and the next
+        # user turn injects a one-shot system nudge on the LLM loop
+        # (``_arm_pending_redelivery_nudge``). Default off ⇒ no behaviour change.
+        self._redeliver_interrupted: bool = bool(
+            getattr(agent, "redeliver_interrupted", False)
+        )
+        from getpatter.services.redelivery import DEFAULT_REDELIVERY_POLICY
+
+        self._redelivery_policy = (
+            getattr(agent, "redelivery_policy", None) or DEFAULT_REDELIVERY_POLICY
+        )
+        # Armed ``(heard, unsaid)`` awaiting injection on the NEXT turn, or
+        # ``None`` when nothing is pending. Captured BEFORE the cancel sequence
+        # resets the turn's playback state.
+        self._pending_redelivery: tuple[str, str] | None = None
         _confirm_ms = getattr(agent, "barge_in_confirm_ms", 1500)
         try:
             self._barge_in_confirm_s: float = max(0.1, float(_confirm_ms) / 1000.0)
@@ -3580,6 +3627,12 @@ class PipelineStreamHandler(StreamHandler):
         # path stays a pure pass-through for handset/headset deployments
         # that don't need it.
         self._aec = None
+        # Bring-your-own-license noise denoiser resolved from
+        # ``agent.denoiser`` (string model id) at ``start()`` when no explicit
+        # ``agent.audio_filter`` instance is provided. ``None`` otherwise —
+        # SDK-owned, so it is closed in ``cleanup()`` (unlike a user-supplied
+        # ``audio_filter``, whose lifecycle the caller owns).
+        self._resolved_denoiser = None
         # Task reference for the in-flight LLM-consumption loop.  Set by
         # ``_process_streaming_response`` and cancelled on barge-in so the
         # provider stops streaming tokens we will never speak — saves API
@@ -3619,6 +3672,22 @@ class PipelineStreamHandler(StreamHandler):
         # generic ``audio_*`` marks the Realtime path sends so the two paths
         # can coexist without name collisions.
         self._first_message_mark_counter: int = 0
+        # --- Per-sentence carrier-confirmed heard cursor (Twilio only) ---
+        # A ``seg_<n>`` mark is emitted after each RESPONSE sentence's audio
+        # (``_emit_segment_mark``). When Twilio echoes it back (``on_mark``)
+        # the caller has provably PLAYED THROUGH that sentence, so
+        # ``_mark_confirmed_s`` — the end position of the last confirmed
+        # sentence — is ground truth that overrides the byte/pacer estimate in
+        # ``_heard_response_prefix`` when it is ahead. ``_seg_mark_counter`` is
+        # monotonic across the whole call so a stale echo from a prior turn can
+        # never alias a fresh ``seg_<n>``; ``_seg_mark_end_s`` and
+        # ``_mark_confirmed_s`` reset per turn at ``_begin_speaking``. Telnyx
+        # (no-op ``send_mark``) and Plivo (``checkpoint`` verb) never populate
+        # these — they fall back to the byte/pacer tiers. Mirrors TS
+        # ``segMarkEndMs`` / ``markConfirmedMs`` / ``segMarkCounter``.
+        self._seg_mark_counter: int = 0
+        self._seg_mark_end_s: dict[str, float] = {}
+        self._mark_confirmed_s: float = 0.0
         # Cached result of ``_is_tts_output_format_native_for_carrier()``
         # — settled once at ``start()`` time after ``set_telephony_carrier``
         # has run on the TTS adapter. ``True`` means
@@ -3693,6 +3762,11 @@ class PipelineStreamHandler(StreamHandler):
         # permanently broken model. Mirrors TS ``turnDetectorFailed`` and
         # the existing ``vadDisabled`` fail-once pattern.
         self._semantic_detector_failed: bool = False
+        # Latest in-flight caller transcript (interim or final) seen this
+        # turn — the trailing line of the rolling text a TEXT turn detector
+        # (NamoTurnDetector) scores. Only tracked when a detector is
+        # configured; reset on turn commit. Audio detectors ignore it.
+        self._semantic_last_transcript: str = ""
         # EOU trigger for the NEXT committed turn (``EouTrigger.VAD_SILENCE``
         # | ``EouTrigger.SEMANTIC_TURN_DETECTOR``). Stamped by the semantic
         # finalize paths, consumed (and reset) by ``_dispatch_turn``.
@@ -3856,6 +3930,18 @@ class PipelineStreamHandler(StreamHandler):
                     "install with `pip install getpatter[silero]` (numpy is part of that extra)."
                 )
 
+        # Bring-your-own-license denoiser: resolve the string model id ONCE at
+        # call start so a missing SDK / license / model surfaces here (fail
+        # fast) instead of silently no-op'ing per frame. Skipped when an
+        # explicit ``agent.audio_filter`` instance is provided (that takes
+        # precedence) or when ``agent.denoiser`` is unset (default no-op).
+        denoiser_id = getattr(self.agent, "denoiser", None)
+        if denoiser_id and getattr(self.agent, "audio_filter", None) is None:
+            from getpatter.providers.denoiser import resolve_denoiser
+
+            self._resolved_denoiser = resolve_denoiser(denoiser_id)
+            logger.info("denoiser '%s' resolved for pipeline inbound chain", denoiser_id)
+
         # Prewarm-handoff: try to adopt pre-opened provider WebSockets
         # that the prewarm pipeline (see
         # ``Patter._park_provider_connections``) parked during the
@@ -3966,6 +4052,13 @@ class PipelineStreamHandler(StreamHandler):
         self._stt_connect_task = stt_connect_task
 
         logger.debug("Pipeline mode: STT connect kicked off")
+
+        # Opt-in wall-clock pacing: launch the outbound frame pacer now that
+        # the output codec is settled (``set_source_format`` ran above), so it
+        # is already emitting the fixed 20 ms grid (silence until audio) before
+        # the greeting — which then flows through it too. No-op when
+        # ``paced_output`` is off. Stopped in ``cleanup``.
+        self._start_pacer()
 
         # Play first_message if configured and no on_message handler — as a
         # BACKGROUND task (see _play_first_message): the greeting must not
@@ -4427,6 +4520,11 @@ class PipelineStreamHandler(StreamHandler):
         """
         if self._tts is None:
             return True
+        # Whether this sentence is part of the LLM's reply (and therefore
+        # stamps a segment + gets an end-of-sentence carrier mark). Captured
+        # before ``record_segment`` may be flipped off by a mid-sentence
+        # retention overflow below.
+        should_mark = record_segment
 
         # Apply text transforms before the beforeSynthesize hook
         transformed = sentence
@@ -4554,24 +4652,22 @@ class PipelineStreamHandler(StreamHandler):
                 if record_segment:
                     # First audible chunk of this sentence — stamp its start
                     # on the per-turn playback timeline so a barge-in can
-                    # estimate the heard prefix at sentence granularity.
-                    # ``getattr`` is defensive against test fixtures built
-                    # via ``object.__new__`` (no ``__init__``).
-                    segments = getattr(self, "_turn_spoken_segments", None)
-                    if segments is not None:
-                        segments.append(
-                            (processed, getattr(self, "_turn_playback_total_s", 0.0))
-                        )
+                    # compute the heard prefix (whole + mid-sentence).
+                    self._stamp_spoken_segment(processed)
                     record_segment = False
-                await self.audio_sender.send_audio(processed_audio)
-                self._track_outbound_playback(len(processed_audio))
-                self._mark_first_audio_sent()
+                await self._send_pipeline_chunk(processed_audio)
         finally:
             await gen.aclose()
             _tts_span.__exit__(None, None, None)
             # Drop any partial int16 byte so cross-sentence corruption never
             # leaks past an exception / early return.
             self.audio_sender.reset_pcm_carry()
+        # Reaching here means the sentence finished WITHOUT a barge-in (the
+        # cancel paths ``return False`` mid-loop). Emit its end-of-sentence
+        # carrier mark so a Twilio echo can confirm the caller heard through
+        # it (no-op on non-Twilio / filler audio).
+        if should_mark and self._is_speaking:
+            await self._emit_segment_mark()
         return True
 
     def _schedule_long_turn_filler(
@@ -5143,6 +5239,12 @@ class PipelineStreamHandler(StreamHandler):
             # was left unheard (or, for a paused turn, while the frozen
             # pause cursor still does).
             self._maybe_truncate_completed_turn_history()
+            # Opt-in re-delivery: capture what the caller HEARD vs the un-heard
+            # remainder NOW — the cancel sequence below resets
+            # ``_playback_buffered_until`` (the split's input). Armed here,
+            # injected as a one-shot nudge on the next user turn. No-op unless
+            # ``redeliver_interrupted`` is set and the policy approves.
+            self._maybe_arm_redelivery()
             # Pause-and-resume: a kill while paused discards the held
             # buffers (queued sentences + retained audio) and wakes any
             # pause-decision waiter, which then observes the interrupt.
@@ -5152,6 +5254,16 @@ class PipelineStreamHandler(StreamHandler):
             # pending grace task so its phase-1 wait (carrier backlog) /
             # tail-grace flag cannot fire against the cancelled turn.
             self._playback_buffered_until = 0.0
+            # Under pacing the not-yet-emitted backlog lives in the pacer's
+            # own queue, not the carrier — drop it in the same beat as the
+            # carrier ``send_clear`` so the cancelled audio never reaches the
+            # wire and cancel latency stays low. The loop keeps running and
+            # resumes emitting silence. ``getattr`` is defensive against test
+            # fixtures that build a handler shell via ``object.__new__``.
+            _pacer = getattr(self, "_pacer", None)
+            if _pacer is not None:
+                _pacer.clear()
+                self._paced_emitted_s = 0.0
             self._clear_grace_task()
             # Unblock any firstMessage paced-send loop that's sitting in
             # ``_wait_for_mark_window`` — without this the loop keeps
@@ -5377,6 +5489,20 @@ class PipelineStreamHandler(StreamHandler):
         self._pause_resume_index = idx
         self._turn_playback_total_s = heard_s
         self._playback_buffered_until = 0.0
+        # Freeze the carrier-confirmed heard cursor at the pause offset too —
+        # the ``send_clear`` below voids anything beyond it, so a stale
+        # ``seg_<n>`` echo for cleared audio must not push it past ``heard_s``.
+        self._mark_confirmed_s = min(getattr(self, "_mark_confirmed_s", 0.0), heard_s)
+        # Under pacing the beyond-heard backlog sits in the pacer queue (not
+        # the carrier), so the ``send_clear`` below cannot reach it — drop it
+        # explicitly and re-anchor the emitted cursor to the frozen heard
+        # offset. Resume re-enqueues the retained tail via
+        # ``_drain_sentence_entry``. ``getattr`` is defensive against handler
+        # shells built via ``object.__new__``.
+        _pacer = getattr(self, "_pacer", None)
+        if _pacer is not None:
+            _pacer.clear()
+            self._paced_emitted_s = heard_s
         # The phase-1 grace wait (carrier backlog) is void after the clear;
         # resume re-arms it for the re-sent tail.
         self._clear_grace_task()
@@ -5613,11 +5739,7 @@ class PipelineStreamHandler(StreamHandler):
             entry["sent"] = idx + 1
             chunk = entry["chunks"][idx]
             if idx == 0:
-                segments = getattr(self, "_turn_spoken_segments", None)
-                if segments is not None:
-                    segments.append(
-                        (entry["text"], getattr(self, "_turn_playback_total_s", 0.0))
-                    )
+                self._stamp_spoken_segment(entry["text"])
             # Far-end tap mirrors the direct send path: SKIPPED on the
             # carrier-native fast path where these are mulaw 8 kHz wire
             # bytes that would corrupt the int16-PCM-16k AEC reference.
@@ -5628,9 +5750,7 @@ class PipelineStreamHandler(StreamHandler):
             # Local-recording tap (agent side) — decodes on the
             # carrier-native μ-law fast path instead of skipping.
             self._tap_pipeline_agent_audio(chunk)
-            await self.audio_sender.send_audio(chunk)
-            self._track_outbound_playback(len(chunk))
-            self._mark_first_audio_sent()
+            await self._send_pipeline_chunk(chunk)
 
     def _passes_paused_kill_filters(self, transcript) -> bool:
         """Whether a transcript may KILL a paused turn: it must be a
@@ -5725,6 +5845,12 @@ class PipelineStreamHandler(StreamHandler):
                 # stt_ms measures from speech-start not final-transcript delivery.
                 if transcript.text and self.metrics is not None:
                     self.metrics.start_turn_if_idle()
+                # Track the latest in-flight caller text (interim or final) so a
+                # TEXT turn detector can score the rolling transcript on the VAD
+                # speech_end edge. Only when a detector is configured (zero cost
+                # otherwise); audio detectors never read it.
+                if transcript.text and self._turn_detector is not None:
+                    self._semantic_last_transcript = transcript.text
                 # Emit fine-grained transcript events (additive — existing
                 # ``on_transcript`` callback path is unchanged).
                 if transcript.text and self._event_bus is not None:
@@ -6168,9 +6294,7 @@ class PipelineStreamHandler(StreamHandler):
         # Local-recording tap (agent side) — decodes on the carrier-native
         # μ-law fast path instead of skipping.
         self._tap_pipeline_agent_audio(processed_audio)
-        await self.audio_sender.send_audio(processed_audio)
-        self._track_outbound_playback(len(processed_audio))
-        self._mark_first_audio_sent()
+        await self._send_pipeline_chunk(processed_audio)
 
     async def _spec_ensure_flushed(self, spec: _SpeculativeTurn) -> None:
         """Idempotent release flush: take the floor (``_begin_speaking``),
@@ -6214,9 +6338,7 @@ class PipelineStreamHandler(StreamHandler):
                     spec.buffered = []
                     return
                 if record_segment:
-                    self._turn_spoken_segments.append(
-                        (sentence_text, self._turn_playback_total_s)
-                    )
+                    self._stamp_spoken_segment(sentence_text)
                     record_segment = False
                 await self._spec_send_chunk(spec, audio)
             self.audio_sender.reset_pcm_carry()
@@ -6411,6 +6533,10 @@ class PipelineStreamHandler(StreamHandler):
                 ),
                 language=getattr(self.agent, "language", "en"),
             )
+            # Inject any armed re-delivery nudge as a one-shot system message
+            # for this turn (disarms it either way — never leaks to a later
+            # turn). Opt-in; no-op by default.
+            self._arm_pending_redelivery_nudge()
             result = self._llm_loop.run(
                 filtered_text,
                 snapshot,
@@ -6761,6 +6887,10 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_turn_committed()
             _close_endpoint_span()
+            # Inject any armed re-delivery nudge as a one-shot system message
+            # for this turn (disarms it either way — never leaks to a later
+            # turn). Opt-in; no-op by default.
+            self._arm_pending_redelivery_nudge()
             result = self._llm_loop.run(
                 filtered_text,
                 history_snapshot,
@@ -6894,7 +7024,13 @@ class PipelineStreamHandler(StreamHandler):
             chain = InputProcessingChain(
                 input_is_mulaw_8k=self._input_is_mulaw_8k,
                 get_aec=lambda: getattr(self, "_aec", None),
-                get_audio_filter=lambda: getattr(self.agent, "audio_filter", None),
+                # Explicit ``audio_filter`` instance wins; otherwise fall back
+                # to the SDK-resolved ``agent.denoiser`` filter (resolved once
+                # in ``start()``). Parallel opt-ins — see ``Agent.denoiser``.
+                get_audio_filter=lambda: (
+                    getattr(self.agent, "audio_filter", None)
+                    or getattr(self, "_resolved_denoiser", None)
+                ),
                 get_vad=lambda: (
                     getattr(self.agent, "vad", None) or getattr(self, "_auto_vad", None)
                 ),
@@ -7050,6 +7186,14 @@ class PipelineStreamHandler(StreamHandler):
                                 # ``send_clear`` above dropped the carrier's
                                 # buffered audio — reset the playback cursor.
                                 self._playback_buffered_until = 0.0
+                                # Drop the pacer's own (not-yet-emitted) backlog
+                                # in the same beat so the cancelled tail never
+                                # reaches the wire under pacing. ``getattr`` is
+                                # defensive against ``object.__new__`` shells.
+                                _pacer = getattr(self, "_pacer", None)
+                                if _pacer is not None:
+                                    _pacer.clear()
+                                    self._paced_emitted_s = 0.0
                                 self._clear_grace_task()
                                 # Tear down the in-flight LLM stream too. The
                                 # consumption loop polls ``_llm_cancel_event``
@@ -7218,6 +7362,10 @@ class PipelineStreamHandler(StreamHandler):
     # While a hold is active, re-score after each additional silence window
     # of this many milliseconds of inbound audio (~10 frames at 20 ms/frame).
     _SEMANTIC_POLL_MS: int = 200
+    # How many recent conversation turns (user + assistant) to include ahead
+    # of the caller's current in-flight utterance in the rolling transcript a
+    # TEXT turn detector scores. Bounded so the tokenizer prompt stays small.
+    _SEMANTIC_TRANSCRIPT_TURNS: int = 4
 
     def _semantic_buffer_append(self, pcm: bytes) -> None:
         """Append a post-decode PCM16-16k frame to the rolling 8 s window."""
@@ -7242,6 +7390,34 @@ class PipelineStreamHandler(StreamHandler):
         smart-turn integrations, which score per-turn audio)."""
         self._semantic_audio_ring.clear()
         self._semantic_audio_ring_bytes = 0
+        # The committed utterance now lives in ``conversation_history``; drop
+        # the in-flight transcript so the next turn's text starts clean.
+        self._semantic_last_transcript = ""
+
+    def _semantic_transcript_text(self) -> str:
+        """Assemble the rolling transcript for a TEXT turn detector.
+
+        The last few conversation turns (user + assistant, oldest first)
+        followed by the caller's current in-flight utterance — the text a
+        detector like ``NamoTurnDetector`` tokenizes to decide whether the
+        caller has finished their turn. Audio detectors ignore this.
+        Returns an empty string when there is nothing to score yet.
+        """
+        parts: list[str] = []
+        history = getattr(self, "conversation_history", None)
+        if history:
+            recent = [
+                str(entry.get("text") or "").strip()
+                for entry in history
+                if entry.get("role") in ("user", "assistant")
+            ]
+            recent = [text for text in recent if text]
+            if recent:
+                parts.extend(recent[-self._SEMANTIC_TRANSCRIPT_TURNS :])
+        in_flight = (getattr(self, "_semantic_last_transcript", "") or "").strip()
+        if in_flight:
+            parts.append(in_flight)
+        return "\n".join(parts)
 
     async def _semantic_eou_check(self) -> None:
         """Score the rolling window; finalize, or hold for more silence.
@@ -7257,7 +7433,12 @@ class PipelineStreamHandler(StreamHandler):
         if detector is None:
             return
         try:
-            probability = float(await detector.predict(self._semantic_window_bytes()))
+            probability = float(
+                await detector.predict(
+                    self._semantic_window_bytes(),
+                    transcript=self._semantic_transcript_text(),
+                )
+            )
         except Exception as exc:
             self._semantic_detector_failed = True
             logger.warning(
@@ -7468,7 +7649,12 @@ class PipelineStreamHandler(StreamHandler):
         self._current_agent_spoken_text = ""
         # Fresh turn — reset the heard-prefix playback timeline.
         self._turn_playback_total_s = 0.0
+        self._paced_emitted_s = 0.0
         self._turn_spoken_segments = []
+        # Fresh turn — drop the previous turn's carrier-confirmed seg marks
+        # (the counter stays monotonic so names never alias across turns).
+        self._seg_mark_end_s = {}
+        self._mark_confirmed_s = 0.0
         # Fresh turn — drop any pause-and-resume state and retained audio
         # from the previous turn (a paused turn can never reach here — the
         # pause-decision wait resolves before the turn ends — but be
@@ -7505,6 +7691,164 @@ class PipelineStreamHandler(StreamHandler):
         if self._first_audio_sent_at is None:
             self._first_audio_sent_at = time.time()
 
+    # ------------------------------------------------------------------
+    # Opt-in wall-clock outbound pacing (``agent.paced_output``)
+    # ------------------------------------------------------------------
+    def _start_pacer(self) -> None:
+        """Create + launch the outbound frame pacer for this call.
+
+        No-op unless ``paced_output`` is enabled. Called from ``start()``
+        AFTER the output codec is settled (``set_source_format`` has run), so
+        the frame size / silence codec match the bytes the send-sites enqueue:
+        native μ-law 8 kHz (160 B) when the sender passes wire bytes straight
+        through, else PCM16 16 kHz (640 B). The loop runs as a tracked
+        background task emitting silence until audio is enqueued.
+        """
+        if not self._paced_output or self._pacer is not None:
+            return
+        native = bool(getattr(self.audio_sender, "_input_is_mulaw_8k", False))
+        if native:
+            frame_bytes = 160
+            self._pacer_bytes_per_s = 8_000.0
+            self._pacer_silence = mulaw_silence_frame()
+        else:
+            frame_bytes = 640
+            self._pacer_bytes_per_s = 32_000.0
+            self._pacer_silence = pcm16_silence_frame(16000)
+        self._pacer = OutboundFramePacer(
+            frame_bytes=frame_bytes,
+            silence_frame=self._pacer_silence,
+            send_frame=self._paced_send_frame,
+        )
+        self._pacer_task = asyncio.create_task(self._run_pacer())
+
+    async def _run_pacer(self) -> None:
+        """Drive the pacer loop; swallow teardown-time errors."""
+        try:
+            await self._pacer.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive; loop must not crash the call
+            logger.debug("outbound pacer loop error", exc_info=True)
+
+    async def _stop_pacer(self) -> None:
+        """Stop + await the pacer loop (idempotent; safe at teardown)."""
+        pacer = getattr(self, "_pacer", None)
+        task = getattr(self, "_pacer_task", None)
+        if pacer is not None:
+            pacer.stop()
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - teardown
+                pass
+        self._pacer = None
+        self._pacer_task = None
+
+    async def _paced_send_frame(self, frame: bytes) -> None:
+        """Pacer ``send_frame`` callback: hand one paced frame to the carrier.
+
+        The per-carrier transcode/envelope is unchanged — this just calls the
+        existing ``audio_sender.send_audio``. Real (audio-bearing) frames
+        advance the emitted-playback cursor and anchor ``_first_audio_sent_at``;
+        the gap-filling silence frame (identity-compared) does neither.
+        """
+        await self.audio_sender.send_audio(frame)
+        if frame is not self._pacer_silence:
+            self._paced_emitted_s = (
+                getattr(self, "_paced_emitted_s", 0.0) + FRAME_MS / 1000.0
+            )
+            self._refresh_paced_backlog()
+            self._mark_first_audio_sent()
+
+    def _enqueue_paced(self, chunk: bytes) -> None:
+        """Queue one processed chunk on the pacer and advance the enqueue
+        cursor (``_turn_playback_total_s``) that stamps heard-prefix segments
+        and feeds the backlog estimate."""
+        self._pacer.enqueue(chunk)
+        if len(chunk) > 0:
+            self._turn_playback_total_s = (
+                getattr(self, "_turn_playback_total_s", 0.0)
+                + len(chunk) / self._pacer_bytes_per_s
+            )
+            self._refresh_paced_backlog()
+
+    def _refresh_paced_backlog(self) -> None:
+        """Drive ``_playback_buffered_until`` from the pacer's REAL emitted
+        position: ``remaining = enqueued_total - emitted``, anchored to now.
+        Because the pacer emits at realtime, ``buffered_until - now`` then
+        decrements in lockstep with playback, keeping ``_heard_response_prefix``
+        exact under pacing (vs the byte-estimate used on the unpaced path)."""
+        total = getattr(self, "_turn_playback_total_s", 0.0)
+        emitted = getattr(self, "_paced_emitted_s", 0.0)
+        self._playback_buffered_until = time.time() + max(0.0, total - emitted)
+
+    async def _send_pipeline_chunk(self, chunk: bytes) -> None:
+        """Route one processed pipeline audio chunk to the carrier.
+
+        Paced: enqueue on the frame pacer (which emits it on the wall-clock
+        grid). Unpaced (default): the current direct send — byte-identical to
+        the prior ``send_audio`` + ``_track_outbound_playback`` +
+        ``_mark_first_audio_sent`` triplet. ``getattr`` is defensive against
+        handler shells built via ``object.__new__``.
+        """
+        if getattr(self, "_pacer", None) is not None:
+            self._enqueue_paced(chunk)
+        else:
+            await self.audio_sender.send_audio(chunk)
+            self._track_outbound_playback(len(chunk))
+            self._mark_first_audio_sent()
+
+    def _stamp_spoken_segment(self, text: str) -> None:
+        """Append a heard-prefix segment for a RESPONSE sentence at the current
+        playback cursor, finalizing the previous segment's playout duration.
+
+        Each entry is ``(text, start_s, dur_s)``: ``start_s`` is the per-turn
+        playback position at the sentence's first audible chunk; ``dur_s`` is
+        its own playout duration, filled here when the NEXT sentence stamps
+        (``dur = new_start - prev_start``). The last/in-flight sentence keeps
+        ``dur_s == 0.0`` and ``_heard_response_split`` resolves its extent from
+        the live playback total. Sentences are pushed back-to-back with no
+        un-stamped audio between them (filler / error-fallback audio only
+        precedes the first response sentence), so ``new_start - prev_start`` is
+        the exact per-sentence duration. Centralizes the three stamp sites
+        (``_synthesize_sentence`` / spec flush / retention drain). ``getattr``
+        is defensive against fixtures built via ``object.__new__``.
+        """
+        segments = getattr(self, "_turn_spoken_segments", None)
+        if segments is None:
+            return
+        total_s = getattr(self, "_turn_playback_total_s", 0.0)
+        if segments:
+            prev_text, prev_start, prev_dur = segments[-1]
+            if prev_dur <= 0.0:
+                segments[-1] = (prev_text, prev_start, max(0.0, total_s - prev_start))
+        segments.append((text, total_s, 0.0))
+
+    async def _emit_segment_mark(self) -> None:
+        """Emit a per-sentence ``seg_<n>`` carrier mark after a RESPONSE
+        sentence's audio (Twilio only).
+
+        A Twilio echo of this mark (handled in ``on_mark``) confirms the caller
+        has PLAYED THROUGH the sentence, advancing ``_mark_confirmed_s`` — a
+        carrier-truthed cursor more accurate than the byte/pacer estimate. The
+        end position recorded is the current playback total (all of this
+        sentence's audio has been pushed by the time this runs). No-op on
+        non-Twilio carriers (Telnyx ``send_mark`` is a no-op; Plivo uses
+        ``checkpoint``) — they stay on the byte/pacer tiers. Best-effort: a
+        ``send_mark`` failure is logged and swallowed.
+        """
+        if not getattr(self, "_for_twilio", False):
+            return
+        self._seg_mark_counter = getattr(self, "_seg_mark_counter", 0) + 1
+        name = f"seg_{self._seg_mark_counter}"
+        self._seg_mark_end_s[name] = getattr(self, "_turn_playback_total_s", 0.0)
+        try:
+            await self.audio_sender.send_mark(name)
+        except Exception as exc:  # noqa: BLE001 - best effort
+            logger.debug("segment send_mark failed (%s): %s", name, exc)
+
     def _track_outbound_playback(self, num_bytes: int) -> None:
         """Advance ``_playback_buffered_until`` by the playout duration of an
         outbound TTS chunk.
@@ -7536,31 +7880,118 @@ class PipelineStreamHandler(StreamHandler):
             getattr(self, "_turn_playback_total_s", 0.0) + chunk_s
         )
 
-    def _heard_response_prefix(self) -> tuple[str, bool] | None:
-        """Estimate the response prefix the caller actually HEARD this turn.
+    @staticmethod
+    def _split_sentence_at_fraction(text: str, fraction: float) -> tuple[str, str]:
+        """Split ``text`` into ``(heard, unsaid)`` at ``fraction`` of its
+        words, snapped to a whole-word boundary (never mid-word).
 
-        The pipeline pushes audio faster than realtime, so at barge-in time
-        ``heard = total_pushed - carrier_backlog`` seconds of audio have
-        actually played. Mapped at sentence granularity against
-        ``_turn_spoken_segments``: a sentence counts as heard once its
-        playback has STARTED (``start <= heard``), so the sentence playing at
-        the moment of interruption is included.
-
-        Returns ``None`` when no segments were tracked this turn (nothing
-        synthesized through the tracked path — callers fall back to the
-        legacy full-text behaviour). Otherwise ``(heard_text,
-        heard_everything)``. Mirrors TS ``heardResponsePrefix``.
+        Deterministic proportional-by-word approximation of which words the
+        caller heard when a barge-in lands mid-sentence: word durations are
+        assumed ∝ word count and the cut is rounded to the nearest word
+        boundary (half up). ``heard + " " + unsaid`` reconstructs the
+        whitespace-normalized sentence exactly.
         """
-        segments = getattr(self, "_turn_spoken_segments", None)
-        if not segments:
-            return None
+        words = text.split()
+        if not words:
+            return "", ""
+        f = min(1.0, max(0.0, fraction))
+        k = int(f * len(words) + 0.5)  # round half up to a word boundary
+        k = min(len(words), max(0, k))
+        return " ".join(words[:k]), " ".join(words[k:])
+
+    def _played_position_s(self) -> float:
+        """The best-available played position this turn, in seconds, on the
+        highest tier of the played-position ladder:
+
+        (i)  Twilio carrier-confirmed ``seg_<n>`` marks — ``_mark_confirmed_s``
+             is ground truth that the caller PLAYED THROUGH that sentence.
+        (ii) Under ``paced_output`` the pacer refreshes ``_playback_buffered_
+             until`` from its REAL emitted-frame cursor.
+        (iii) Otherwise the byte-duration estimate folded into the same
+             ``_playback_buffered_until`` by ``_track_outbound_playback``.
+
+        Tiers (ii)/(iii) both surface as ``total - remaining_backlog``; the
+        carrier-confirmed cursor overrides them when it is ahead.
+        """
         total_s = getattr(self, "_turn_playback_total_s", 0.0)
         remaining_s = max(
             0.0, getattr(self, "_playback_buffered_until", 0.0) - time.time()
         )
         heard_s = max(0.0, total_s - remaining_s)
-        heard = [text for text, start_s in segments if start_s <= heard_s]
-        return " ".join(heard), len(heard) == len(segments)
+        return max(heard_s, getattr(self, "_mark_confirmed_s", 0.0))
+
+    def _heard_response_split(self) -> tuple[str, str, bool] | None:
+        """Split this turn's spoken text into ``(heard, unsaid,
+        heard_everything)`` at the played position.
+
+        Fully-played sentences are included verbatim; the sentence in flight
+        at interruption is split on a word boundary by its played fraction
+        (``_split_sentence_at_fraction``); not-yet-started sentences are all
+        unsaid. Per-sentence extent comes from the segment's own ``dur_s``
+        when finalized, else the next sentence's start, else the live playback
+        total. ``heard + " " + unsaid`` is the whole spoken text (the unsaid
+        remainder is the exact complement of the heard prefix).
+
+        This is the richer internal accessor exposing heard vs unsaid (the
+        re-delivery feature consumes the unsaid tail); the public
+        ``_heard_response_prefix`` keeps its stable ``(heard, everything)``
+        shape on top of it. Returns ``None`` when no segments were tracked
+        this turn (callers fall back to the legacy full-text behaviour).
+        Mirrors TS ``heardResponseSplit``.
+        """
+        segments = getattr(self, "_turn_spoken_segments", None)
+        if not segments:
+            return None
+        total_s = getattr(self, "_turn_playback_total_s", 0.0)
+        heard_s = self._played_position_s()
+        heard_parts: list[str] = []
+        unsaid_parts: list[str] = []
+        n = len(segments)
+        for i, seg in enumerate(segments):
+            text, start_s, dur_s = seg
+            if dur_s > 0.0:
+                end_s = start_s + dur_s
+            elif i + 1 < n:
+                end_s = segments[i + 1][1]
+            else:
+                end_s = total_s
+            # A pause rewind can leave ``total_s`` behind a stale later
+            # segment's ``start_s``; never let a segment end before it starts.
+            end_s = max(end_s, start_s)
+            # Order matters: "not started" is checked first so a segment whose
+            # start sits at/after the play head is never mis-read as "fully
+            # heard" when its resolved end collapses onto the play head.
+            if start_s >= heard_s:
+                unsaid_parts.append(text)  # not started
+            elif end_s <= heard_s + 1e-6:
+                heard_parts.append(text)  # fully heard
+            else:  # in flight — proportional word-boundary split
+                span = end_s - start_s
+                frac = (heard_s - start_s) / span if span > 1e-9 else 0.0
+                heard_words, unsaid_words = self._split_sentence_at_fraction(
+                    text, frac
+                )
+                if heard_words:
+                    heard_parts.append(heard_words)
+                if unsaid_words:
+                    unsaid_parts.append(unsaid_words)
+        return " ".join(heard_parts), " ".join(unsaid_parts), not unsaid_parts
+
+    def _heard_response_prefix(self) -> tuple[str, bool] | None:
+        """The response prefix the caller actually HEARD this turn, as
+        ``(heard_text, heard_everything)`` — whole heard sentences plus the
+        heard fraction of the sentence in flight (word-accurate, no round-up).
+
+        Returns ``None`` when no segments were tracked (callers fall back to
+        the legacy full-text behaviour). Stable public shape; the richer
+        heard/unsaid split lives in ``_heard_response_split``. Mirrors TS
+        ``heardResponsePrefix``.
+        """
+        split = self._heard_response_split()
+        if split is None:
+            return None
+        heard_text, _unsaid, heard_everything = split
+        return heard_text, heard_everything
 
     def _rewrite_last_assistant_entry(self, text: str) -> None:
         """Replace the text of the most recent assistant entry in the
@@ -7614,6 +8045,65 @@ class PipelineStreamHandler(StreamHandler):
             if heard_text
             else "[interrupted by caller]"
         )
+
+    def _maybe_arm_redelivery(self) -> None:
+        """Capture the ``(heard, unsaid)`` split for opt-in re-delivery.
+
+        Called from :meth:`_do_cancel_for_barge_in` right after the completed-
+        turn truncation and BEFORE the cancel sequence resets the playback
+        cursor. No-op unless ``agent.redeliver_interrupted`` is set, no segments
+        were tracked, or the :class:`RedeliveryPolicy` declines. When it arms,
+        ``_pending_redelivery`` holds ``(heard, unsaid)`` for the next turn.
+        Mirrors TS ``maybeArmRedelivery``.
+        """
+        if not getattr(self, "_redeliver_interrupted", False):
+            return
+        split = self._heard_response_split()
+        if split is None:
+            return
+        heard, unsaid, heard_everything = split
+        from getpatter.services.redelivery import DEFAULT_REDELIVERY_POLICY
+
+        policy = getattr(self, "_redelivery_policy", None) or DEFAULT_REDELIVERY_POLICY
+        try:
+            should = policy.should_redeliver(
+                heard=heard, unsaid=unsaid, heard_everything=heard_everything
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RedeliveryPolicy %s raised; not arming re-delivery: %s",
+                type(policy).__name__,
+                exc,
+            )
+            return
+        if not should:
+            return
+        self._pending_redelivery = (heard, unsaid)
+        logger.debug(
+            "Re-delivery armed: %d word(s) un-heard", len(unsaid.split())
+        )
+
+    def _arm_pending_redelivery_nudge(self) -> None:
+        """Inject any armed re-delivery as a one-shot LLM system nudge.
+
+        Called right before dispatching a user turn to the built-in LLM loop.
+        Disarms ``_pending_redelivery`` unconditionally (so it can never leak
+        to a later turn) and, when a loop exists, sets the nudge on it — the
+        loop consumes it in ``_build_messages`` for exactly this turn. No-op
+        when nothing is armed or there is no built-in LLM loop (e.g. the
+        ``on_message`` path). Mirrors TS ``armPendingRedeliveryNudge``.
+        """
+        pending = getattr(self, "_pending_redelivery", None)
+        if pending is None:
+            return
+        self._pending_redelivery = None
+        loop = getattr(self, "_llm_loop", None)
+        if loop is None:
+            return
+        from getpatter.services.redelivery import build_redelivery_nudge
+
+        heard, unsaid = pending
+        loop.set_redelivery_nudge(build_redelivery_nudge(heard, unsaid))
 
     def _can_barge_in(self) -> bool:
         """Whether barge-in is allowed to fire right now.
@@ -8016,11 +8506,22 @@ class PipelineStreamHandler(StreamHandler):
                 self._pending_marks.pop(0)
 
     async def on_mark(self, mark_name: str) -> None:
-        """Handle a Twilio ``mark`` echo and resolve the matching firstMessage
-        waiter (if any). Marks are matched FIFO: an echo for ``fm_3`` also
+        """Handle a Twilio ``mark`` echo.
+
+        ``seg_<n>`` marks (per-sentence heard-position confirmations) advance
+        the monotonic ``_mark_confirmed_s`` cursor and return WITHOUT touching
+        the ``fm_*`` first-message flow-control FIFO. Everything else is a
+        firstMessage waiter and is matched FIFO: an echo for ``fm_3`` also
         resolves ``fm_1`` and ``fm_2`` in case the carrier batches echoes.
         """
         if not mark_name:
+            return
+        if mark_name.startswith("seg_"):
+            end_s = getattr(self, "_seg_mark_end_s", {}).get(mark_name)
+            if end_s is not None:
+                self._mark_confirmed_s = max(
+                    getattr(self, "_mark_confirmed_s", 0.0), end_s
+                )
             return
         idx = -1
         for i, (name, _fut) in enumerate(self._pending_marks):
@@ -8125,8 +8626,16 @@ class PipelineStreamHandler(StreamHandler):
                     # Local-recording tap (agent side) — decodes on the
                     # carrier-native μ-law fast path instead of skipping.
                     self._tap_pipeline_agent_audio(audio_chunk)
-                    await self.audio_sender.send_audio(audio_chunk)
-                    self._mark_first_audio_sent()
+                    # Paced: the greeting flows through the frame pacer too
+                    # (unifies the greeting onto the same wall-clock grid as
+                    # the turns). Unpaced (default): the current direct send —
+                    # byte-identical (no ``_track_outbound_playback`` here, as
+                    # the greeting stamps no heard-prefix segment).
+                    if getattr(self, "_pacer", None) is not None:
+                        self._enqueue_paced(audio_chunk)
+                    else:
+                        await self.audio_sender.send_audio(audio_chunk)
+                        self._mark_first_audio_sent()
         finally:
             # Drop any partial int16 byte to prevent cross-turn corruption
             # if the stream threw before a complete sample was delivered.
@@ -8197,6 +8706,24 @@ class PipelineStreamHandler(StreamHandler):
         if self._pending_marks:
             self._drain_pending_marks()
         self._first_message_mark_counter = 0
+        # Paced: hand the whole prewarm buffer to the frame pacer in
+        # ``_PREWARM_CHUNK_BYTES`` slices — no mark gating or per-chunk sleep,
+        # the pacer owns the wall-clock. Barge-in still drops the queue via
+        # ``_pacer.clear()``.
+        if getattr(self, "_pacer", None) is not None:
+            sent_any = False
+            for i in range(0, len(bytes_), self._PREWARM_CHUNK_BYTES):
+                if not self._is_speaking:
+                    break
+                chunk = bytes_[i : i + self._PREWARM_CHUNK_BYTES]
+                if self._aec is not None and not getattr(
+                    self, "_tts_output_format_native_for_carrier", False
+                ):
+                    self._aec.push_far_end(chunk)
+                self._tap_pipeline_agent_audio(chunk)
+                self._enqueue_paced(chunk)
+                sent_any = True
+            return sent_any
         first_chunk_sent = False
         # Once the mark window is first filled we switch to playout-time
         # pacing to prevent batch-ACK bursts from draining the carrier
@@ -8286,6 +8813,10 @@ class PipelineStreamHandler(StreamHandler):
             except (asyncio.CancelledError, Exception):
                 pass
         self._first_message_task = None
+        # Stop the outbound frame pacer (no-op when unpaced) before the
+        # carrier/adapters tear down so its loop stops writing to a closing
+        # socket.
+        await self._stop_pacer()
         # Cancel the STT consumer FIRST: while cleanup awaited the cancelled
         # dispatch task, the still-alive STT loop (blocked in
         # ``_await_dispatch_settle`` on that same task) could wake first and
@@ -8386,6 +8917,16 @@ class PipelineStreamHandler(StreamHandler):
         if chain is not None:
             chain.flush()
             self._input_chain = None
+        # Close the SDK-resolved denoiser (an ``agent.denoiser`` filter Patter
+        # constructed). A user-supplied ``agent.audio_filter`` is NOT closed
+        # here — its lifecycle is owned by the caller.
+        _denoiser = getattr(self, "_resolved_denoiser", None)
+        if _denoiser is not None:
+            try:
+                await _denoiser.close()
+            except Exception as _exc:  # noqa: BLE001 - teardown must continue
+                logger.warning("denoiser close failed: %s", _exc)
+            self._resolved_denoiser = None
 
     @property
     def stt(self):

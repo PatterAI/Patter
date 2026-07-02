@@ -223,9 +223,12 @@ class TestBargeInDuringBufferedBacklog:
             "Frase due.", PipelineHookExecutor(None), ctx, [False]
         )
 
+        # (text, start_s, dur_s): "Frase uno." is finalized to its own 0.2 s
+        # playout when "Frase due." stamps; the last sentence keeps dur_s=0.0
+        # (its extent resolves from the live playback total).
         assert handler._turn_spoken_segments == [
-            ("Frase uno.", 0.0),
-            ("Frase due.", pytest.approx(0.2)),
+            ("Frase uno.", 0.0, pytest.approx(0.2)),
+            ("Frase due.", pytest.approx(0.2), 0.0),
         ]
 
     async def test_filler_audio_advances_clock_without_segment(self) -> None:
@@ -283,29 +286,14 @@ class TestBargeInDuringBufferedBacklog:
 
 @pytest.mark.unit
 class TestHeardResponsePrefix:
-    def test_maps_backlog_to_sentence_prefix(self) -> None:
+    def test_fully_played_turn_returns_full_text(self) -> None:
+        # (a) everything drained out of the carrier → full text, everything
+        # heard.
         handler = _make_handler(_make_audio_sender())
         handler._turn_spoken_segments = [
-            ("Frase uno.", 0.0),
-            ("Frase due.", 2.0),
-            ("Frase tre.", 4.0),
+            ("Frase uno.", 0.0, 2.0),
+            ("Frase due.", 2.0, 0.0),
         ]
-        handler._turn_playback_total_s = 6.0
-        # 4 s still buffered → only the first 2 s actually played.
-        handler._playback_buffered_until = time.time() + 4.0
-
-        text, heard_everything = handler._heard_response_prefix()
-
-        assert text == "Frase uno. Frase due."
-        assert heard_everything is False
-
-    def test_no_segments_returns_none(self) -> None:
-        handler = _make_handler(_make_audio_sender())
-        assert handler._heard_response_prefix() is None
-
-    def test_drained_backlog_means_everything_heard(self) -> None:
-        handler = _make_handler(_make_audio_sender())
-        handler._turn_spoken_segments = [("Frase uno.", 0.0), ("Frase due.", 2.0)]
         handler._turn_playback_total_s = 4.0
         handler._playback_buffered_until = 0.0  # long drained
 
@@ -313,6 +301,141 @@ class TestHeardResponsePrefix:
 
         assert text == "Frase uno. Frase due."
         assert heard_everything is True
+
+    def test_midsentence_interruption_splits_on_word_boundary(self) -> None:
+        # (b) barge-in after 1.5 of 3 sentences: sentence one in full plus the
+        # heard fraction of sentence two, cut on a word boundary (never
+        # mid-word). heard_everything False.
+        handler = _make_handler(_make_audio_sender())
+        handler._turn_spoken_segments = [
+            ("Sentence one here.", 0.0, 2.0),  # 0..2 s
+            ("The second sentence goes here.", 2.0, 2.0),  # 2..4 s (5 words)
+            ("Third and final sentence.", 4.0, 0.0),  # 4..6 s
+        ]
+        handler._turn_playback_total_s = 6.0
+        # 3.0 s played → sentence one full, sentence two half (word boundary).
+        handler._playback_buffered_until = time.time() + 3.0
+
+        text, heard_everything = handler._heard_response_prefix()
+
+        assert text == "Sentence one here. The second sentence"
+        assert heard_everything is False
+
+    def test_sentence_exactly_at_playhead_is_not_yet_heard(self) -> None:
+        # A sentence whose start == the play head has produced no sound yet:
+        # accurate semantics count it as unsaid (no round-up to whole
+        # sentences, unlike the pre-fix behaviour).
+        handler = _make_handler(_make_audio_sender())
+        handler._turn_spoken_segments = [
+            ("Frase uno.", 0.0, 2.0),
+            ("Frase due.", 2.0, 2.0),
+            ("Frase tre.", 4.0, 0.0),
+        ]
+        handler._turn_playback_total_s = 6.0
+        handler._playback_buffered_until = time.time() + 4.0  # heard = 2.0 s
+
+        text, heard_everything = handler._heard_response_prefix()
+
+        assert text == "Frase uno."
+        assert heard_everything is False
+
+    def test_no_segments_returns_none(self) -> None:
+        handler = _make_handler(_make_audio_sender())
+        assert handler._heard_response_prefix() is None
+        assert handler._heard_response_split() is None
+
+    def test_unsaid_remainder_is_exact_complement(self) -> None:
+        # (f) the unsaid accessor is the exact complement of the heard prefix:
+        # heard + unsaid reconstructs the whole spoken text.
+        handler = _make_handler(_make_audio_sender())
+        handler._turn_spoken_segments = [
+            ("Sentence one here.", 0.0, 2.0),
+            ("The second sentence goes here.", 2.0, 2.0),
+            ("Third and final sentence.", 4.0, 0.0),
+        ]
+        handler._turn_playback_total_s = 6.0
+        handler._playback_buffered_until = time.time() + 3.0  # heard = 3.0 s
+
+        heard, _heard_everything = handler._heard_response_prefix()
+        _h, unsaid, _e = handler._heard_response_split()
+        full = (
+            "Sentence one here. The second sentence goes here. "
+            "Third and final sentence."
+        )
+
+        assert heard == "Sentence one here. The second sentence"
+        assert unsaid == "goes here. Third and final sentence."
+        assert " ".join(p for p in (heard, unsaid) if p) == full
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestHeardPrefixMarkCursor:
+    async def test_twilio_mark_cursor_beats_byte_estimate(self) -> None:
+        # (c) a seg_<n> carrier echo advances the mark-confirmed cursor and
+        # yields a further-along (more accurate) prefix than the lagging byte
+        # estimate.
+        handler = _make_handler(_make_audio_sender())
+        handler._turn_spoken_segments = [
+            ("Uno.", 0.0, 2.0),
+            ("Due.", 2.0, 2.0),
+            ("Tre.", 4.0, 0.0),
+        ]
+        handler._turn_playback_total_s = 6.0
+        # Byte estimate lags badly: 5.5 s still "buffered" → ~0.5 s "played".
+        handler._playback_buffered_until = time.time() + 5.5
+
+        byte_only, _ = handler._heard_response_prefix()
+        assert byte_only == ""  # nothing confirmed heard yet
+
+        # The carrier echoes seg_2 (end of the second sentence at 4.0 s).
+        handler._seg_mark_end_s = {"seg_1": 2.0, "seg_2": 4.0}
+        await handler.on_mark("seg_2")
+        assert handler._mark_confirmed_s == 4.0
+
+        text, heard_everything = handler._heard_response_prefix()
+        assert text == "Uno. Due."
+        assert heard_everything is False
+
+    async def test_synthesize_sentence_emits_segment_mark(self) -> None:
+        class _StubTTS:
+            async def synthesize(self, _text: str):
+                yield b"\x00" * 6400  # 200 ms PCM16 @ 16 kHz
+
+        sender = _make_audio_sender()
+        handler = _make_handler(sender)
+        handler._tts = _StubTTS()
+        handler._is_speaking = True
+
+        from getpatter.services.pipeline_hooks import PipelineHookExecutor
+
+        await handler._synthesize_sentence(
+            "Frase uno.",
+            PipelineHookExecutor(None),
+            handler._build_hook_context(),
+            [True],
+        )
+
+        sender.send_mark.assert_awaited_with("seg_1")
+        assert handler._seg_mark_end_s["seg_1"] == pytest.approx(0.2)
+
+    async def test_seg_mark_does_not_disturb_fm_flow_control(self) -> None:
+        # (e) fm_* first-message flow-control still resolves unbroken; a seg_
+        # mark only advances the heard cursor and never touches the fm_ FIFO.
+        handler = _make_handler(_make_audio_sender())
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        handler._pending_marks = [("fm_1", fut)]
+        handler._seg_mark_end_s = {"seg_1": 2.0}
+
+        await handler.on_mark("seg_1")
+        assert handler._mark_confirmed_s == 2.0
+        assert handler._pending_marks == [("fm_1", fut)]
+        assert not fut.done()
+
+        await handler.on_mark("fm_1")
+        assert fut.done()
+        assert handler._pending_marks == []
 
 
 # ---------------------------------------------------------------------------
@@ -330,12 +453,14 @@ def _completed_turn_handler(full_text: str) -> PipelineStreamHandler:
     )
     handler.transcript_entries.append({"role": "assistant", "text": full_text})
     handler._turn_spoken_segments = [
-        ("Frase uno.", 0.0),
-        ("Frase due.", 2.0),
-        ("Frase tre.", 4.0),
+        ("Frase uno.", 0.0, 2.0),  # 0..2 s
+        ("Frase due.", 2.0, 2.0),  # 2..4 s
+        ("Frase tre.", 4.0, 0.0),  # 4..6 s
     ]
     handler._turn_playback_total_s = 6.0
-    handler._playback_buffered_until = time.time() + 4.0
+    # 1.8 s still buffered → heard ≈ 4.2 s: sentence one and two in full,
+    # sentence three barely begun (rounds to no words).
+    handler._playback_buffered_until = time.time() + 1.8
     return handler
 
 
@@ -396,7 +521,7 @@ class TestMidTurnHeardPrefixMarker:
         """An agent-runtime LLM delivers the full reply at once: every
         sentence is synthesized into the carrier buffer within ms, but the
         caller has only HEARD the first one when the barge-in lands. The
-        history marker must record that prefix, not the whole reply."""
+        history marker must record that heard prefix, not the whole reply."""
         monkeypatch.setenv("PATTER_TTS_TAIL_GRACE_MS", "0")
         handler = _make_handler(_make_audio_sender())
 
@@ -411,8 +536,12 @@ class TestMidTurnHeardPrefixMarker:
         async def _result():
             yield "Frase uno. "
             yield "Frase due. "
-            # Barge-in lands after both sentences were PUSHED (4 s buffered)
-            # but before any further token.
+            # Both sentences were PUSHED into the carrier buffer within ms, but
+            # the caller has only PLAYED sentence one (2.0 s) — the carrier
+            # confirmed its seg mark. Pin the mark-confirmed cursor to mirror
+            # that (the byte estimate alone would say ~nothing played yet, as
+            # nothing has drained in real time).
+            handler._mark_confirmed_s = 2.0
             handler._llm_cancel_event.set()
             yield "Frase tre."
 

@@ -44,6 +44,9 @@ import { Carrier as PlivoCarrier } from "./telephony/plivo";
 import { Realtime as OpenAIRealtime } from "./engines/openai";
 import { Realtime2 as OpenAIRealtime2 } from "./engines/openai-2";
 import { ConvAI as ElevenLabsConvAI } from "./engines/elevenlabs";
+import { GeminiLive } from "./engines/gemini";
+import { GeminiCascade } from "./engines/gemini-cascade";
+import { InworldRealtime } from "./engines/inworld";
 import { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import { resolveLogRoot } from "./services/call-log";
 import { validateAllToolSchemas } from "./tools/schema-validation";
@@ -746,10 +749,39 @@ export class Patter {
           provider: 'elevenlabs_convai',
           voice: working.voice ?? engine.voice,
         };
+      } else if (engine instanceof GeminiLive) {
+        working = {
+          ...working,
+          provider: 'gemini_live',
+          // Explicit agent() kwargs win over the engine marker value.
+          model: working.model ?? engine.model,
+          voice: working.voice ?? engine.voice,
+        };
+      } else if (engine instanceof GeminiCascade) {
+        working = {
+          ...working,
+          provider: 'gemini_cascade',
+          // Explicit agent() kwargs win over the engine marker value.
+          model: working.model ?? engine.liveModel,
+          voice: working.voice ?? engine.voice,
+        };
+      } else if (engine instanceof InworldRealtime) {
+        working = {
+          ...working,
+          provider: 'inworld_realtime',
+          // Explicit agent() kwargs win over the engine marker value.
+          model: working.model ?? engine.model,
+          voice: working.voice ?? engine.voice,
+          realtimeTurnDetection:
+            working.realtimeTurnDetection ?? engine.turnDetection,
+          openaiRealtimeGateResponseOnTranscript:
+            working.openaiRealtimeGateResponseOnTranscript ??
+            engine.gateResponseOnTranscript,
+        };
       } else {
         this.recordConfigIncomplete('engine_config');
         throw new Error(
-          "Unknown engine. Expected OpenAIRealtime, OpenAIRealtime2, or ElevenLabsConvAI instance.",
+          "Unknown engine. Expected OpenAIRealtime, OpenAIRealtime2, ElevenLabsConvAI, GeminiLive, GeminiCascade, or InworldRealtime instance.",
         );
       }
     } else if (
@@ -765,7 +797,7 @@ export class Patter {
 
     // Validate provider
     if (working.provider) {
-      const valid = ['openai_realtime', 'elevenlabs_convai', 'pipeline'];
+      const valid = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'gemini_cascade', 'inworld_realtime', 'pipeline'];
       if (!valid.includes(working.provider)) {
         this.recordConfigIncomplete('engine_config');
         throw new Error(`provider must be one of: ${valid.join(', ')}. Got: '${working.provider}'`);
@@ -1031,8 +1063,8 @@ export class Patter {
     }
 
     // Validate provider
-    const validProviders = ['openai_realtime', 'elevenlabs_convai', 'pipeline'] as const;
-    if (opts.agent.provider && !validProviders.includes(opts.agent.provider)) {
+    const validProviders = ['openai_realtime', 'elevenlabs_convai', 'gemini_live', 'gemini_cascade', 'inworld_realtime', 'pipeline'] as const;
+    if (opts.agent.provider && !validProviders.includes(opts.agent.provider as typeof validProviders[number])) {
       throw new Error(`agent.provider must be one of: ${validProviders.join(', ')}`);
     }
 
@@ -1127,6 +1159,10 @@ export class Patter {
         telnyxPublicKey: carrier.kind === 'telnyx' ? carrier.publicKey : undefined,
         plivoAuthId: carrier.kind === 'plivo' ? carrier.authId : undefined,
         plivoAuthToken: carrier.kind === 'plivo' ? carrier.authToken : undefined,
+        // SECURITY (#204): fail closed by default. `undefined` is treated as
+        // `true` by the server (`requireStreamAuth !== false`); only an explicit
+        // `false` disables per-call stream auth.
+        requireStreamAuth: opts.requireStreamAuth,
         persistRoot: this.localConfig.persistRoot,
       },
       opts.agent,
@@ -1925,7 +1961,18 @@ export class Patter {
     // (``libraries/python/getpatter/providers/twilio_adapter.py``) which uses
     // ``twiml=...`` for outbound calls.
     const streamUrl = `wss://${webhookUrl}/ws/stream/outbound`;
-    const inlineTwiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${streamUrl}"/></Connect></Response>`;
+    // SECURITY (#204): mint a per-call stream-auth token and deliver it as a
+    // <Parameter> (Twilio strips the query string from <Stream url=...>). It is
+    // registered against the real CallSid once the Twilio REST response returns
+    // it below, so the media WS 'start' frame is authenticated before any
+    // provider session opens. Token is base64url (XML-safe). When no embedded
+    // server is running there is nothing to validate against, so the token is
+    // simply omitted.
+    const streamToken = this.embeddedServer ? this.embeddedServer.generateStreamToken() : '';
+    const tokenParam = streamToken
+      ? `<Parameter name="patter_stream_token" value="${streamToken}"/>`
+      : '';
+    const inlineTwiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${streamUrl}">${tokenParam}</Stream></Connect></Response>`;
     const params = new URLSearchParams({
       To: options.to,
       From: phoneNumber,
@@ -1998,6 +2045,13 @@ export class Patter {
         status: 'initiated',
       } as const;
       if (this.embeddedServer) {
+        // SECURITY (#204): now that Twilio has assigned the CallSid, bind the
+        // stream-auth token minted for the inline TwiML to it so the media WS
+        // 'start' frame (which carries this CallSid) validates. Empty token =>
+        // no-op (embedded server absent at TwiML build time).
+        if (streamToken) {
+          this.embeddedServer.registerStreamToken(twilioCallSid, streamToken);
+        }
         this.embeddedServer.metricsStore.recordCallInitiated(initiatedPayload);
         // Register the per-callSid AMD callback now that we have the CallSid.
         // Keying by callSid avoids a single-slot race when multiple outbound

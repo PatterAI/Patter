@@ -98,9 +98,9 @@ def _seed_partially_heard_turn(h: PipelineStreamHandler) -> None:
     """Three sentences pushed; sentence one fully played, sentence two
     mid-playback, sentence three still entirely in the carrier buffer."""
     h._turn_spoken_segments = [
-        ("Frase uno.", 0.0),
-        ("Frase due.", 2.0),
-        ("Frase tre.", 4.0),
+        ("Frase uno.", 0.0, 2.0),
+        ("Frase due.", 2.0, 2.0),
+        ("Frase tre.", 4.0, 0.0),
     ]
     h._turn_playback_total_s = 6.0
     # 3.5 s still buffered → heard = 2.5 s: inside sentence two.
@@ -325,7 +325,7 @@ class TestResumeAfterTimeout:
         """All stamped sentences fully played at pause time → nothing to
         re-send; the resume only releases the gate."""
         h = _make_handler(confirm_s=0.03)
-        h._turn_spoken_segments = [("Frase uno.", 0.0)]
+        h._turn_spoken_segments = [("Frase uno.", 0.0, 0.0)]
         h._turn_playback_total_s = 2.0
         h._playback_buffered_until = 0.0  # fully drained
         h._turn_sentence_audio = [
@@ -399,7 +399,9 @@ class TestKillOnConfirmingTranscript:
     ) -> None:
         """Post-complete pause→kill: the cursor was frozen at pause time, so
         the history rewrite must still see the heard prefix (not skip on
-        'no backlog')."""
+        'no backlog'). The freeze landed 2.5 s in — mid sentence two — so the
+        accurate prefix is sentence one plus the heard fraction of sentence
+        two (word boundary)."""
         h = _make_handler(confirm_s=10)
         _seed_partially_heard_turn(h)
         full = "Frase uno. Frase due. Frase tre."
@@ -413,7 +415,7 @@ class TestKillOnConfirmingTranscript:
             Transcript(text="aspetta un attimo", is_final=True, speech_final=True)
         )
 
-        expected = "Frase uno. Frase due. [interrupted by caller]"
+        expected = "Frase uno. Frase [interrupted by caller]"
         assert h.conversation_history[-1]["text"] == expected
         assert h.transcript_entries[-1]["text"] == expected
 

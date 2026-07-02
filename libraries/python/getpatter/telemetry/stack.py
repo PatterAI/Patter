@@ -42,6 +42,7 @@ STACK_VENDORS: frozenset[str] = frozenset(
         "lmnt",
         "rime",
         "inworld",
+        "sarvam",
         "telnyx",
         "other",
     }
@@ -54,6 +55,7 @@ _VENDOR_ALIASES: dict[str, str] = {
     "openai_tts": "openai",
     "openai_transcribe": "openai",
     "elevenlabs_ws": "elevenlabs",
+    "soniox_tts": "soniox",
     "telnyx_stt": "telnyx",
     "telnyx_tts": "telnyx",
 }

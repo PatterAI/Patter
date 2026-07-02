@@ -33,8 +33,16 @@ SONIOX_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 
 
 class SonioxModel(StrEnum):
-    """Known Soniox real-time STT models."""
+    """Known Soniox real-time STT models.
 
+    ``STT_RT_V5`` is the current default (GA 2026-06-16). It is fully
+    API-compatible with v4 — same WebSocket URL, in-band ``api_key``, request
+    params and token-stream shape — so adopting it is a pure model-id swap.
+    The older ids are kept reachable for back-compat (Soniox auto-routes
+    retired v4/v3 ids to v5 server-side).
+    """
+
+    STT_RT_V5 = "stt-rt-v5"
     STT_RT_V4 = "stt-rt-v4"
     STT_RT_V3 = "stt-rt-v3"
     STT_RT_V2 = "stt-rt-v2"
@@ -139,7 +147,7 @@ class SonioxSTT(STTProvider):
 
     Args:
         api_key: Soniox API key.
-        model: Soniox STT model (default ``"stt-rt-v4"``).
+        model: Soniox STT model (default ``"stt-rt-v5"``).
         language_hints: Optional BCP-47 language hints (e.g. ``["en", "it"]``).
         language_hints_strict: When True, restrict to the hints supplied.
         sample_rate: PCM sample rate (Hz). Defaults to 16 kHz, matching
@@ -149,6 +157,13 @@ class SonioxSTT(STTProvider):
         enable_language_identification: Attach language codes to tokens.
         max_endpoint_delay_ms: Silence, in ms, before Soniox reports an
             endpoint. Must be in ``[500, 3000]`` (validated by the server).
+        endpoint_sensitivity: Optional v5 endpoint control in ``[-1.0, 1.0]``
+            (Soniox default ``0.0``). Higher = more/sooner endpoints, lower =
+            wait longer (good for dictation/slow speakers). Omitted from the
+            config when ``None`` so default behaviour is unchanged.
+        endpoint_latency_adjustment_level: Optional v5 latency-reduction
+            aggressiveness, one of ``0|1|2|3`` (Soniox default ``0``). Omitted
+            from the config when ``None``.
         client_reference_id: Optional correlation ID for Soniox dashboards.
         base_url: Override the Soniox WebSocket URL (used by tests).
     """
@@ -160,7 +175,7 @@ class SonioxSTT(STTProvider):
         self,
         api_key: str,
         *,
-        model: Union[SonioxModel, str] = SonioxModel.STT_RT_V4,
+        model: Union[SonioxModel, str] = SonioxModel.STT_RT_V5,
         language_hints: list[str] | None = None,
         language_hints_strict: bool = False,
         sample_rate: Union[SonioxSampleRate, int] = SonioxSampleRate.HZ_16000,
@@ -168,6 +183,8 @@ class SonioxSTT(STTProvider):
         enable_speaker_diarization: bool = False,
         enable_language_identification: bool = True,
         max_endpoint_delay_ms: int = 500,
+        endpoint_sensitivity: float | None = None,
+        endpoint_latency_adjustment_level: int | None = None,
         client_reference_id: str | None = None,
         base_url: str = SONIOX_WS_URL,
     ) -> None:
@@ -175,6 +192,17 @@ class SonioxSTT(STTProvider):
             raise ValueError("Soniox api_key is required")
         if not (500 <= max_endpoint_delay_ms <= 3000):
             raise ValueError("max_endpoint_delay_ms must be between 500 and 3000")
+        if endpoint_sensitivity is not None and not (
+            -1.0 <= endpoint_sensitivity <= 1.0
+        ):
+            raise ValueError("endpoint_sensitivity must be between -1.0 and 1.0")
+        if (
+            endpoint_latency_adjustment_level is not None
+            and endpoint_latency_adjustment_level not in (0, 1, 2, 3)
+        ):
+            raise ValueError(
+                "endpoint_latency_adjustment_level must be 0, 1, 2, or 3"
+            )
 
         self.api_key = api_key
         self.model = model
@@ -185,6 +213,8 @@ class SonioxSTT(STTProvider):
         self.enable_speaker_diarization = enable_speaker_diarization
         self.enable_language_identification = enable_language_identification
         self.max_endpoint_delay_ms = max_endpoint_delay_ms
+        self.endpoint_sensitivity = endpoint_sensitivity
+        self.endpoint_latency_adjustment_level = endpoint_latency_adjustment_level
         self.client_reference_id = client_reference_id
         self.base_url = base_url
 
@@ -227,7 +257,7 @@ class SonioxSTT(STTProvider):
         cls,
         api_key: str,
         language_hints: list[str] | None = None,
-        model: Union[SonioxModel, str] = SonioxModel.STT_RT_V4,
+        model: Union[SonioxModel, str] = SonioxModel.STT_RT_V5,
     ) -> "SonioxSTT":
         """Create a Soniox adapter configured for Twilio-style 8 kHz linear PCM.
 
@@ -259,6 +289,14 @@ class SonioxSTT(STTProvider):
             "enable_language_identification": self.enable_language_identification,
             "max_endpoint_delay_ms": self.max_endpoint_delay_ms,
         }
+        # v5 endpoint controls — opt-in; omitted when unset so the wire config
+        # stays byte-identical to the pre-v5 default.
+        if self.endpoint_sensitivity is not None:
+            config["endpoint_sensitivity"] = self.endpoint_sensitivity
+        if self.endpoint_latency_adjustment_level is not None:
+            config["endpoint_latency_adjustment_level"] = (
+                self.endpoint_latency_adjustment_level
+            )
         if self.language_hints:
             config["language_hints"] = self.language_hints
             config["language_hints_strict"] = self.language_hints_strict

@@ -9,6 +9,19 @@ import re
 
 from getpatter.providers.base import STTProvider, TTSProvider
 
+# SECURITY (#204): names of the per-call media-stream auth token as it travels
+# on each carrier's custom-param channel. Kept in one place so the mint sites
+# (server / adapters) and the WS read sites stay in lock-step. Mirrors the
+# TypeScript SDK constants of the same value.
+#
+#   * Twilio: a ``<Parameter name="patter_stream_token" .../>`` that arrives in
+#     ``start.customParameters`` (Twilio strips query params from <Stream>).
+#   * Telnyx: a ``?...&patter_stream_token=`` query param on the stream URL
+#     (Telnyx preserves the query string), read at WS accept.
+#   * Plivo: an ``X-Patter-Stream-Token`` extra header echoed on the start frame.
+STREAM_TOKEN_PARAM = "patter_stream_token"
+STREAM_TOKEN_HEADER = "X-Patter-Stream-Token"
+
 
 def _validate_e164(number: str) -> bool:
     """Return True if *number* is a valid E.164 phone number."""
@@ -276,7 +289,43 @@ def _create_tts_from_config(config):
         # ``api_key`` carries the Base64 ``Authorization: Basic`` token.
         return InworldTTS(auth_token=config.api_key, voice=config.voice, **kwargs)
 
+    if provider == "soniox_tts":
+        from getpatter.providers.soniox_tts import SonioxTTS  # type: ignore[import]
+
+        allowed = {
+            "model",
+            "language",
+            "audio_format",
+            "sample_rate",
+            "bitrate",
+            "speed",
+            "base_url",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        return SonioxTTS(api_key=config.api_key, voice=config.voice, **kwargs)
+
+    if provider == "sarvam":
+        from getpatter.providers.sarvam_tts import SarvamTTS  # type: ignore[import]
+
+        allowed = {
+            "model",
+            "language",
+            "codec",
+            "sample_rate",
+            "pace",
+            "pitch",
+            "loudness",
+            "temperature",
+            "enable_preprocessing",
+            "dict_id",
+            "base_url",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        # The Sarvam adapter calls the user-facing ``voice`` a ``speaker``.
+        return SarvamTTS(api_key=config.api_key, speaker=config.voice, **kwargs)
+
     raise ValueError(
         f"Unknown TTS provider '{provider}'. "
-        "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld."
+        "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld, "
+        "soniox_tts, sarvam."
     )

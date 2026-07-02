@@ -33,6 +33,8 @@ import type { WebSocket as WSWebSocket } from 'ws';
 
 class FakeTurnDetector implements TurnDetectorProvider {
   readonly windows: Buffer[] = [];
+  /** Records the rolling transcript passed to each predict (widened arg). */
+  readonly transcripts: Array<string | undefined> = [];
   /** Prediction attempts — counted even when predict throws. */
   attempts = 0;
   private readonly probs: number[];
@@ -45,10 +47,11 @@ class FakeTurnDetector implements TurnDetectorProvider {
     this.probs = [...probs];
   }
 
-  async predict(pcm16Window: Buffer): Promise<number> {
+  async predict(pcm16Window: Buffer, transcript?: string): Promise<number> {
     this.attempts += 1;
     if (this.raiseOnCall) throw new Error('model exploded');
     this.windows.push(pcm16Window);
+    this.transcripts.push(transcript);
     if (this.probs.length > 1) return this.probs.shift()!;
     return this.probs[0];
   }
@@ -122,9 +125,16 @@ interface Priv {
   semanticHoldActive: boolean;
   semanticHoldTimer: ReturnType<typeof setTimeout> | null;
   semanticAudioRingBytes: number;
+  semanticLastTranscript: string;
   lastEouTrigger: string;
   turnDetectorFailed: boolean;
+  history: {
+    push(entry: { role: string; text: string; timestamp: number }): void;
+    entries: Array<{ role: string; text: string; timestamp: number }>;
+  };
   semanticWindowBytes(): Buffer;
+  semanticTranscriptText(): string;
+  resetSemanticWindow(): void;
   cancelSemanticHold(): void;
   processTranscript(t: { text: string; isFinal: boolean; speechFinal?: boolean }): Promise<void>;
 }
@@ -515,6 +525,69 @@ describe('StreamHandler — semantic turn detection (opt-in)', () => {
     expect(priv.semanticHoldActive).toBe(false);
     expect(priv.semanticHoldTimer).toBeNull();
     expect(stt.finalize).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. Rolling transcript is assembled + passed to predict (text detectors)
+  // -------------------------------------------------------------------------
+
+  it('passes the rolling transcript (recent turns + in-flight utterance) to predict', async () => {
+    const detector = new FakeTurnDetector([0.9]);
+    const { handler, priv } = buildHandler({
+      vadEvents: [speechEnd()],
+      turnDetector: detector,
+    });
+    // Prior committed dialogue …
+    priv.history.push({ role: 'user', text: 'Hi there', timestamp: Date.now() });
+    priv.history.push({ role: 'assistant', text: 'Hello! How can I help?', timestamp: Date.now() });
+    // … plus the caller's current in-flight utterance (as processTranscript
+    // would have tracked it on the newest interim).
+    priv.semanticLastTranscript = 'I want to book a table for';
+
+    await handler.handleAudio(mulawFrame()); // speech_end → predict
+
+    expect(detector.transcripts).toEqual([
+      'Hi there\nHello! How can I help?\nI want to book a table for',
+    ]);
+  });
+
+  it('bounds the rolling transcript to the most recent turns', async () => {
+    const detector = new FakeTurnDetector([0.1]); // hold so we can inspect it
+    const { handler, priv } = buildHandler({
+      vadEvents: [speechEnd()],
+      turnDetector: detector,
+      maxSemanticHoldMs: 60_000,
+    });
+    for (let i = 0; i < 8; i++) {
+      priv.history.push({
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        text: `turn ${i}`,
+        timestamp: Date.now(),
+      });
+    }
+    priv.semanticLastTranscript = 'current';
+
+    await handler.handleAudio(mulawFrame());
+    priv.cancelSemanticHold();
+
+    // Only the last 4 history turns are kept, then the in-flight utterance.
+    expect(detector.transcripts[0]).toBe('turn 4\nturn 5\nturn 6\nturn 7\ncurrent');
+  });
+
+  it('tracks the latest interim transcript for the detector', async () => {
+    const detector = new FakeTurnDetector([0.9]);
+    const { priv } = buildHandler({ turnDetector: detector });
+    await priv.processTranscript({ text: 'partial one', isFinal: false });
+    await priv.processTranscript({ text: 'partial one two', isFinal: false });
+    expect(priv.semanticLastTranscript).toBe('partial one two');
+  });
+
+  it('resets the in-flight transcript when the rolling window resets', () => {
+    const detector = new FakeTurnDetector([0.9]);
+    const { priv } = buildHandler({ turnDetector: detector });
+    priv.semanticLastTranscript = 'leftover';
+    priv.resetSemanticWindow();
+    expect(priv.semanticLastTranscript).toBe('');
   });
 
   // -------------------------------------------------------------------------

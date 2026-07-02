@@ -77,11 +77,23 @@ class TwilioAdapter(TelephonyProvider):
         to_number: str,
         stream_url: str,
         extra_params: dict | None = None,
+        parameters: dict | None = None,
     ) -> str:
-        """Place an outbound Twilio call that streams media to *stream_url*."""
+        """Place an outbound Twilio call that streams media to *stream_url*.
+
+        ``parameters`` is forwarded as ``<Parameter name="..." value="..."/>``
+        children of ``<Stream>`` (Twilio strips query params from the stream
+        URL). Used to carry the per-call media-stream auth token (#204) to the
+        WS ``start.customParameters`` for outbound calls.
+        """
         twiml = VoiceResponse()
         connect = Connect()
-        connect.stream(url=stream_url)
+        stream = connect.stream(url=stream_url)
+        if parameters:
+            for name, value in parameters.items():
+                if value is None:
+                    continue
+                stream.parameter(name=name, value=str(value))
         twiml.append(connect)
         call_kwargs: dict = {"to": to_number, "from_": from_number, "twiml": str(twiml)}
         if extra_params:
