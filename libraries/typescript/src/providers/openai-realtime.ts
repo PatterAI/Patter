@@ -340,8 +340,12 @@ export class OpenAIRealtimeAdapter {
    * Build the production session.update body. Mirrors the body sent
    * inside `connect()` so warmup can apply identical configuration to
    * the upstream session and prime it without billing.
+   *
+   * `protected` (not `private`) so OpenAI-Realtime-compatible subclasses can
+   * reuse the v1 session shape verbatim — e.g. `InworldRealtimeAdapter`, which
+   * speaks the same wire protocol against a different endpoint.
    */
-  private buildSessionConfig(): Record<string, unknown> {
+  protected buildSessionConfig(): Record<string, unknown> {
     const config: Record<string, unknown> = {
       input_audio_format: this.audioFormat,
       output_audio_format: this.audioFormat,

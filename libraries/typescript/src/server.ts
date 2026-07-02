@@ -13,7 +13,10 @@ import type { TelemetryClient } from './telemetry/client';
 import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
 import { OpenAIRealtime2Adapter } from './providers/openai-realtime-2';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
-import { PlivoAdapter, dropPlivoVoicemail, plivoInboundCustomParams } from './providers/plivo-adapter';
+import { GeminiLiveAdapter } from './providers/gemini-live';
+import { GeminiCascadeAdapter } from './providers/gemini-cascade';
+import { InworldRealtimeAdapter } from './providers/inworld-realtime';
+import { PlivoAdapter, dropPlivoVoicemail, plivoInboundCustomParams, parsePlivoExtraHeaders } from './providers/plivo-adapter';
 import { TwilioAdapter } from './providers/twilio-adapter';
 import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
 // Re-export so existing imports from './server' keep working after the
@@ -34,6 +37,7 @@ import {
   buildHandoffTool,
 } from './stream-handler';
 import { buildUseSkillTool } from './skills';
+import { StreamTokenStore, generateStreamToken } from './stream-auth';
 import { getLogger } from './logger';
 import type { TelephonyBridge } from './stream-handler';
 import type {
@@ -81,6 +85,19 @@ export interface LocalConfig {
    */
   requireSignature?: boolean;
   /**
+   * SECURITY (#204): require a valid per-call stream-authentication token on
+   * every media-stream WebSocket before any provider (STT/LLM/TTS/Realtime)
+   * session is opened. When `true` (the default — fail closed), a missing /
+   * invalid / expired / mismatched token causes the WS to be closed with code
+   * 1008 and NO provider connection is opened. When explicitly `false` (for
+   * operators serving custom TwiML/XML that cannot carry the token), the WS is
+   * accepted without a token and a loud one-time warning is logged. The
+   * standard `serve()` path mints, embeds, and validates the token itself, so
+   * normal inbound AND outbound Twilio/Telnyx/Plivo calls keep working with
+   * zero operator action.
+   */
+  requireStreamAuth?: boolean;
+  /**
    * Resolved on-disk persistence root for the dashboard's call history,
    * or ``null`` to disable. Computed by ``client.ts`` from the public
    * ``LocalOptions.persist`` option (with ``PATTER_LOG_DIR`` env-var
@@ -90,7 +107,7 @@ export interface LocalConfig {
   persistRoot?: string | null;
 }
 
-type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter;
+type AIAdapter = OpenAIRealtimeAdapter | ElevenLabsConvAIAdapter | GeminiLiveAdapter | GeminiCascadeAdapter;
 
 export const TRANSFER_CALL_TOOL = {
   name: 'transfer_call',
@@ -645,6 +662,82 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
   // ``handleUseSkillFunctionCall``). Mirrors the Python Realtime ``start()``.
   if (agent.skills && agent.skills.length > 0) {
     tools.push(buildUseSkillTool(agent.skills));
+  }
+  // Gemini Live mode: construct GeminiLiveAdapter from the engine marker's
+  // own credentials/voice/model. Mirrors the ElevenLabs branch above — a
+  // distinct (non-OpenAI) adapter built from the engine's own apiKey — but
+  // placed here because Gemini advertises the same tool list (agent tools +
+  // transfer_call/end_call/handoff) as the OpenAI path.
+  if (agent.provider === 'gemini_live') {
+    if (!engine || engine.kind !== 'gemini_live') {
+      throw new Error(
+        "Gemini Live mode requires `agent.engine = new GeminiLive({...})`.",
+      );
+    }
+    return new GeminiLiveAdapter(engine.apiKey, {
+      ...(agent.model ?? engine.model ? { model: agent.model ?? engine.model } : {}),
+      ...(agent.voice ?? engine.voice ? { voice: agent.voice ?? engine.voice } : {}),
+      ...(agent.language ? { language: agent.language } : {}),
+      ...(engine.temperature !== undefined ? { temperature: engine.temperature } : {}),
+      ...(engine.affectiveDialog !== undefined ? { affectiveDialog: engine.affectiveDialog } : {}),
+      ...(engine.proactiveAudio !== undefined ? { proactiveAudio: engine.proactiveAudio } : {}),
+      ...(engine.vad !== undefined ? { vad: engine.vad } : {}),
+      // Thinking is OFF by default for voice (adapter applies thinkingBudget:0)
+      // — only forward the opt-in overrides when the marker set them.
+      ...(engine.thinking !== undefined ? { thinking: engine.thinking } : {}),
+      ...(engine.thinkingBudget !== undefined ? { thinkingBudget: engine.thinkingBudget } : {}),
+      ...(engine.apiVersion !== undefined ? { apiVersion: engine.apiVersion } : {}),
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
+  }
+  if (agent.provider === 'gemini_cascade') {
+    if (!engine || engine.kind !== 'gemini_cascade') {
+      throw new Error(
+        "Gemini Cascade mode requires `agent.engine = new GeminiCascade({...})`.",
+      );
+    }
+    return new GeminiCascadeAdapter(engine.apiKey, {
+      model: agent.model ?? engine.liveModel,
+      ttsModel: engine.ttsModel,
+      voice: agent.voice ?? engine.voice,
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
+  }
+  // Inworld Realtime mode: construct InworldRealtimeAdapter from the engine
+  // marker. Inworld's Realtime API is OpenAI-Realtime-compatible, so the
+  // adapter subclasses OpenAIRealtimeAdapter and advertises the SAME tool list
+  // (agent tools + transfer_call/end_call/handoff/use_skill) built above.
+  if (agent.provider === 'inworld_realtime') {
+    if (!engine || engine.kind !== 'inworld_realtime') {
+      throw new Error(
+        "Inworld Realtime mode requires `agent.engine = new InworldRealtime({...})`.",
+      );
+    }
+    const agentOpts = agent as {
+      realtimeTurnDetection?: import('./types').RealtimeTurnDetection;
+      openaiRealtimeGateResponseOnTranscript?: boolean;
+    };
+    return new InworldRealtimeAdapter(engine.apiKey, {
+      ...(agent.model ?? engine.model ? { model: agent.model ?? engine.model } : {}),
+      ...(agent.voice ?? engine.voice ? { voice: agent.voice ?? engine.voice } : {}),
+      ...(engine.baseUrl ? { baseUrl: engine.baseUrl } : {}),
+      ...(engine.transcriptionLanguage !== undefined
+        ? { transcriptionLanguage: engine.transcriptionLanguage }
+        : {}),
+      ...((agentOpts.realtimeTurnDetection ?? engine.turnDetection) !== undefined
+        ? { turnDetection: agentOpts.realtimeTurnDetection ?? engine.turnDetection }
+        : {}),
+      ...((agentOpts.openaiRealtimeGateResponseOnTranscript ?? engine.gateResponseOnTranscript) !== undefined
+        ? {
+            gateResponseOnTranscript:
+              agentOpts.openaiRealtimeGateResponseOnTranscript ?? engine.gateResponseOnTranscript,
+          }
+        : {}),
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
   }
   const isOpenAIEngine = engine && (engine.kind === 'openai_realtime' || engine.kind === 'openai_realtime_2');
   const openaiKey = isOpenAIEngine ? engine.apiKey : (config.openaiKey ?? '');
@@ -1208,6 +1301,14 @@ export class EmbeddedServer {
   }
   private twilioTokenWarningLogged = false;
   private telnyxSigWarningLogged = false;
+  /**
+   * Per-call media-stream authentication tokens (GitHub issue #204). Minted in
+   * the signature-validated carrier webhooks / outbound dial and required by the
+   * media WS before the provider session opens. See {@link StreamTokenStore}.
+   */
+  private readonly streamTokens = new StreamTokenStore();
+  /** Guards the one-time "stream auth disabled" warning (requireStreamAuth=false). */
+  private streamAuthDisabledWarned = false;
   readonly metricsStore: MetricsStore;
   /** Anonymous telemetry client, set by ``client.ts`` ``serve()``; emits the
    * per-call ``call_completed`` event from the call-end path. */
@@ -2004,7 +2105,13 @@ export class EmbeddedServer {
       const callee = (req.body.To as string) || '';
       const rawStreamUrl = `wss://${this.config.webhookUrl}/ws/stream/${callSid}`;
       const xmlStreamUrl = xmlEscape(rawStreamUrl);
-      const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlStreamUrl}"><Parameter name="caller" value="${xmlEscape(caller)}"/><Parameter name="callee" value="${xmlEscape(callee)}"/></Stream></Connect></Response>`;
+      // SECURITY (#204): mint a per-call token bound to the CallSid. Twilio
+      // strips the query string from <Stream url=...>, so the token rides as a
+      // <Parameter> and arrives in start.customParameters on the WS 'start'
+      // frame. This webhook is signature-validated above, so only a legitimate
+      // carrier ever receives the token.
+      const streamToken = this.streamTokens.mint(callSid);
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlStreamUrl}"><Parameter name="caller" value="${xmlEscape(caller)}"/><Parameter name="callee" value="${xmlEscape(callee)}"/><Parameter name="patter_stream_token" value="${xmlEscape(streamToken)}"/></Stream></Connect></Response>`;
       res.type('text/xml').send(twiml);
     });
 
@@ -2236,9 +2343,15 @@ export class EmbeddedServer {
           // see above.
           const caller = payload.from ?? '';
           const callee = payload.to ?? '';
+          // SECURITY (#204): Telnyx's stream URL already carries query params,
+          // so the per-call token rides alongside caller/callee and is read from
+          // websocket.query_params at WS accept. This webhook is Ed25519-verified
+          // above, so only a legitimate carrier ever receives the token.
+          const streamToken = this.streamTokens.mint(callControlId);
           const streamUrl =
             `wss://${this.config.webhookUrl}/ws/stream/${encodeURIComponent(callControlId)}` +
-            `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
+            `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}` +
+            `&patter_stream_token=${encodeURIComponent(streamToken)}`;
           getLogger().info(`Telnyx call.initiated ${callControlId} — answering with inline stream`);
           const resp = await fetch(`${apiBase}/calls/${encodeURIComponent(callControlId)}/actions/answer`, {
             method: 'POST',
@@ -2267,9 +2380,14 @@ export class EmbeddedServer {
             // is the ONLY place outbound audio is wired.
             const outCaller = payload.from ?? '';
             const outCallee = payload.to ?? '';
+            // SECURITY (#204): mint the per-call token for this outbound leg on
+            // the Ed25519-verified call.answered webhook (the only place
+            // outbound audio is wired), delivered via the stream URL query.
+            const streamToken = this.streamTokens.mint(callControlId);
             const streamUrl =
               `wss://${this.config.webhookUrl}/ws/stream/${encodeURIComponent(callControlId)}` +
-              `?caller=${encodeURIComponent(outCaller)}&callee=${encodeURIComponent(outCallee)}`;
+              `?caller=${encodeURIComponent(outCaller)}&callee=${encodeURIComponent(outCallee)}` +
+              `&patter_stream_token=${encodeURIComponent(streamToken)}`;
             getLogger().info(
               `Telnyx call.answered ${callControlId} (outgoing) — starting media stream`,
             );
@@ -2361,9 +2479,16 @@ export class EmbeddedServer {
       if (requestUuid && callUuid) this.aliasCallId(requestUuid, callUuid);
       const qs = `?caller=${encodeURIComponent(caller)}&callee=${encodeURIComponent(callee)}`;
       const streamUrl = `wss://${this.config.webhookUrl}/ws/plivo/stream/${callUuid || 'outbound'}${qs}`;
+      // SECURITY (#204): Plivo carries custom metadata via extra_headers (the
+      // same channel as X-PH-caller/callee), echoed back on the WS 'start'
+      // frame. Mint the per-call token here on the V3-signature-validated
+      // webhook (inbound AND answered-outbound share this route) and deliver it
+      // as X-Patter-Stream-Token.
+      const streamToken = this.streamTokens.mint(callUuid || 'outbound');
       const xml = PlivoAdapter.generateStreamXml(streamUrl, 'audio/x-mulaw;rate=8000', {
         'X-PH-caller': caller,
         'X-PH-callee': callee,
+        'X-Patter-Stream-Token': streamToken,
       });
       res.type('text/xml').send(xml);
     });
@@ -2487,7 +2612,15 @@ export class EmbeddedServer {
     // Telephony providers (Twilio/Telnyx) only open 1 connection per call;
     // a limit of 10 concurrent connections per IP is generous but blocks abuse.
     const MAX_WS_PER_IP = 10;
+    // Global concurrent-WS backstop (#204 XFF hardening). The per-IP cap keys on
+    // a header-derived IP that a peer behind a non-Cloudflare proxy can forge to
+    // get a fresh bucket per connection; this absolute ceiling bounds the total
+    // open sockets regardless of the (spoofable) IP key, so a header-forging
+    // flood cannot open unbounded connections. Sized well above any realistic
+    // concurrent-call count for a single embedded server.
+    const MAX_WS_TOTAL = 500;
     const wsConnectionsByIp = new Map<string, number>();
+    let wsConnectionsTotal = 0;
 
     this.server.on('upgrade', (req, socket, head) => {
       let remoteIp = (req.socket?.remoteAddress ?? 'unknown').replace(/^::ffff:/, '');
@@ -2495,6 +2628,18 @@ export class EmbeddedServer {
       // WS arrives from loopback — keying the cap on the socket peer put all
       // calls in one shared bucket (legitimate call #11 rejected; one remote
       // abuser could exhaust it). Prefer the tunnel-provided client IP.
+      //
+      // SECURITY (#204): this tunnel-header trust is a DoS-CAP KEY ONLY — it is
+      // NOT authentication and MUST NOT be relied on for identity. A peer behind
+      // a non-Cloudflare proxy can forge cf-connecting-ip / x-forwarded-for to
+      // land in a fresh per-IP bucket. That is acceptable here because the real
+      // access control is the per-call stream-auth token, enforced separately in
+      // the WS handlers BEFORE any provider session opens (authorizeStream):
+      // an unauthenticated peer is rejected regardless of which bucket it lands
+      // in. We keep trusting the header for the rate-limit key so legitimate
+      // tunneled calls (all arriving from loopback) do not share one bucket, and
+      // add the absolute MAX_WS_TOTAL backstop below to bound a forged-header
+      // connection flood.
       if (remoteIp === '127.0.0.1' || remoteIp === '::1') {
         const fwd =
           (req.headers['cf-connecting-ip'] as string | undefined) ??
@@ -2502,6 +2647,14 @@ export class EmbeddedServer {
           '';
         const firstHop = fwd.split(',')[0]?.trim();
         if (firstHop) remoteIp = firstHop.replace(/^::ffff:/, '');
+      }
+      if (wsConnectionsTotal >= MAX_WS_TOTAL) {
+        getLogger().warn(
+          `WebSocket upgrade rejected: global connection ceiling (${MAX_WS_TOTAL}) reached`,
+        );
+        socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
+        socket.destroy();
+        return;
       }
       const currentCount = wsConnectionsByIp.get(remoteIp) ?? 0;
       if (currentCount >= MAX_WS_PER_IP) {
@@ -2512,6 +2665,7 @@ export class EmbeddedServer {
       }
       this.wss!.handleUpgrade(req, socket, head, (ws) => {
         wsConnectionsByIp.set(remoteIp, (wsConnectionsByIp.get(remoteIp) ?? 0) + 1);
+        wsConnectionsTotal += 1;
         ws.once('close', () => {
           const count = (wsConnectionsByIp.get(remoteIp) ?? 1) - 1;
           if (count <= 0) {
@@ -2519,6 +2673,7 @@ export class EmbeddedServer {
           } else {
             wsConnectionsByIp.set(remoteIp, count);
           }
+          wsConnectionsTotal = Math.max(0, wsConnectionsTotal - 1);
         });
         this.wss!.emit('connection', ws, req);
       });
@@ -2965,6 +3120,74 @@ export class EmbeddedServer {
   }
 
   // ---------------------------------------------------------------------------
+  // Per-call media-stream authentication (GitHub issue #204)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Generate a fresh stream-auth token WITHOUT storing it. Used by the outbound
+   * Twilio path in `client.ts`, which embeds the token in inline TwiML before
+   * the carrier REST response reveals the CallSid the WS will present, then
+   * calls {@link registerStreamToken} once the CallSid is known.
+   */
+  generateStreamToken(): string {
+    return generateStreamToken();
+  }
+
+  /**
+   * Store a pre-generated stream-auth token under `callKey` (outbound path).
+   * Inbound webhooks mint + store in a single step via `this.streamTokens.mint`.
+   */
+  registerStreamToken(callKey: string, token: string): void {
+    if (!callKey || !token) return;
+    this.streamTokens.register(callKey, token);
+  }
+
+  /**
+   * Authorize a media-stream WebSocket BEFORE any provider session is opened.
+   *
+   * Fail-closed by default (`requireStreamAuth`): on a missing / invalid /
+   * expired / mismatched token the socket is closed with code 1008 (policy
+   * violation) and `false` is returned so the caller opens NO provider
+   * connection and synthesises NO TTS. When `requireStreamAuth` is explicitly
+   * `false`, the connection is allowed and a loud one-time warning is logged.
+   *
+   * NEVER logs the presented token, the stored token, or any transcript.
+   */
+  private authorizeStream(
+    ws: WSWebSocket,
+    callKey: string,
+    presented: string | undefined | null,
+    carrierLabel: string,
+  ): boolean {
+    if (this.config.requireStreamAuth === false) {
+      if (!this.streamAuthDisabledWarned) {
+        this.streamAuthDisabledWarned = true;
+        getLogger().warn(
+          'Stream authentication is DISABLED (requireStreamAuth=false). Media-stream ' +
+            'WebSockets are accepted WITHOUT a per-call token — an unauthenticated peer ' +
+            'that reaches this host can drive a session on your provider keys. Only keep ' +
+            'this off when serving custom TwiML/XML that cannot carry the token, behind ' +
+            'your own access control.',
+        );
+      }
+      return true;
+    }
+    if (this.streamTokens.validate(callKey, presented)) {
+      return true;
+    }
+    // No PII, no token value: only the carrier label and a generic reason.
+    getLogger().warn(
+      `Rejected ${carrierLabel} media stream: missing or invalid stream-auth token`,
+    );
+    try {
+      ws.close(1008, 'stream authentication required');
+    } catch {
+      /* socket may already be closing */
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
   // Twilio WebSocket message parser (thin layer)
   // ---------------------------------------------------------------------------
 
@@ -3013,8 +3236,16 @@ export class EmbeddedServer {
           handler.setStreamSid(data.streamSid ?? '');
           const callSid = data.start?.callSid ?? '';
           const customParameters = data.start?.customParameters ?? {};
+          // SECURITY (#204): validate the per-call token BEFORE opening any
+          // provider session (the billable part). The token was minted by the
+          // signature-validated /webhooks/twilio/voice handler (inbound) or the
+          // outbound call() dial and delivered as a <Parameter>. Strip it from
+          // customParameters so it never reaches the prompt/template vars, logs,
+          // or metadata.json.
+          const { patter_stream_token: presentedToken, ...cleanParameters } = customParameters;
+          if (!this.authorizeStream(ws, callSid, presentedToken, 'Twilio')) return;
           if (callSid) this.activeCallIds.set(ws, callSid);
-          await handler.handleCallStart(callSid, customParameters);
+          await handler.handleCallStart(callSid, cleanParameters);
         } else if (event === 'media') {
           const payload = data.media?.payload ?? '';
           // ``await`` keeps a rejection inside the outer try/catch — un-awaited
@@ -3063,6 +3294,15 @@ export class EmbeddedServer {
   private handleTelnyxStream(ws: WSWebSocket, url: URL): void {
     const caller = url.searchParams.get('caller') ?? '';
     const callee = url.searchParams.get('callee') ?? '';
+    // SECURITY (#204): Telnyx delivers the token in the stream-URL query, so we
+    // can validate as early as possible — at accept, before any frame is read
+    // or provider session opened. The call_control_id is the last path segment
+    // (the key the token was minted under in the signed webhook).
+    const callControlId = decodeURIComponent(
+      url.pathname.split('/').filter(Boolean).pop() ?? '',
+    );
+    const presentedToken = url.searchParams.get('patter_stream_token');
+    if (!this.authorizeStream(ws, callControlId, presentedToken, 'Telnyx')) return;
     const bridge = new TelnyxBridge(this.config);
     const handler = new StreamHandler(this.buildStreamHandlerDeps(bridge), ws, caller, callee);
     let streamStarted = false;
@@ -3223,6 +3463,12 @@ export class EmbeddedServer {
           // hangup / transfer / recording / cost REST calls.
           handler.setStreamSid(data.start?.streamId ?? '');
           const callId = data.start?.callId ?? '';
+          // SECURITY (#204): the per-call token arrives in extra_headers as
+          // X-Patter-Stream-Token (minted on the V3-signed webhook). Validate
+          // BEFORE opening any provider session. plivoInboundCustomParams strips
+          // the token so it never becomes a prompt/template variable.
+          const presentedToken = parsePlivoExtraHeaders(data.extra_headers ?? '')['X-Patter-Stream-Token'];
+          if (!this.authorizeStream(ws, callId, presentedToken, 'Plivo')) return;
           if (callId) this.activeCallIds.set(ws, callId);
           // Plivo's extra_headers are the metadata channel mirroring Twilio's
           // <Parameter> customParameters: developer-supplied headers become

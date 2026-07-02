@@ -20,7 +20,7 @@ Installation extras:
 See ``pyproject.toml`` and the top-level README for the full matrix.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 from getpatter._speech_events import (
     AgentState,
@@ -121,6 +121,8 @@ from getpatter.tts.cartesia import TTS as CartesiaTTS
 from getpatter.tts.rime import TTS as RimeTTS
 from getpatter.tts.lmnt import TTS as LMNTTTS
 from getpatter.tts.inworld import TTS as InworldTTS
+from getpatter.tts.soniox import TTS as SonioxTTS
+from getpatter.tts.sarvam import TTS as SarvamTTS
 
 # LLM flat aliases — parity with libraries/typescript/src/index.ts and mirror of STT/TTS layout.
 from getpatter.llm.openai import LLM as OpenAILLM
@@ -501,6 +503,8 @@ __all__ = [
     "RimeTTS",
     "LMNTTTS",
     "InworldTTS",
+    "SonioxTTS",
+    "SarvamTTS",
     "OpenAILLM",
     "AnthropicLLM",
     "GroqLLM",

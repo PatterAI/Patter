@@ -11,8 +11,17 @@ import { getLogger } from '../logger';
 
 const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket';
 
-/** Known Soniox real-time STT models. */
+/**
+ * Known Soniox real-time STT models.
+ *
+ * `STT_RT_V5` is the current default (GA 2026-06-16). It is fully
+ * API-compatible with v4 — same WebSocket URL, in-band `api_key`, request
+ * params and token-stream shape — so adopting it is a pure model-id swap.
+ * Older ids stay reachable for back-compat (Soniox auto-routes retired
+ * v4/v3 ids to v5 server-side).
+ */
 export const SonioxModel = {
+  STT_RT_V5: 'stt-rt-v5',
   STT_RT_V4: 'stt-rt-v4',
   STT_RT_V3: 'stt-rt-v3',
   STT_RT_V2: 'stt-rt-v2',
@@ -119,6 +128,17 @@ export interface SonioxSTTOptions {
   readonly enableSpeakerDiarization?: boolean;
   readonly enableLanguageIdentification?: boolean;
   readonly maxEndpointDelayMs?: number;
+  /**
+   * Optional v5 endpoint control in `[-1.0, 1.0]` (Soniox default `0.0`).
+   * Higher = more/sooner endpoints, lower = wait longer. Omitted from the
+   * config when undefined so default behaviour is unchanged.
+   */
+  readonly endpointSensitivity?: number;
+  /**
+   * Optional v5 latency-reduction aggressiveness, one of `0 | 1 | 2 | 3`
+   * (Soniox default `0`). Omitted from the config when undefined.
+   */
+  readonly endpointLatencyAdjustmentLevel?: number;
   readonly clientReferenceId?: string;
   readonly baseUrl?: string;
 }
@@ -142,6 +162,8 @@ export class SonioxSTT {
   private readonly enableSpeakerDiarization: boolean;
   private readonly enableLanguageIdentification: boolean;
   private readonly maxEndpointDelayMs: number;
+  private readonly endpointSensitivity?: number;
+  private readonly endpointLatencyAdjustmentLevel?: number;
   private readonly clientReferenceId?: string;
   private readonly baseUrl: string;
 
@@ -157,9 +179,22 @@ export class SonioxSTT {
     if (maxEndpointDelayMs < 500 || maxEndpointDelayMs > 3000) {
       throw new Error('maxEndpointDelayMs must be between 500 and 3000');
     }
+    const { endpointSensitivity, endpointLatencyAdjustmentLevel } = options;
+    if (
+      endpointSensitivity !== undefined &&
+      (endpointSensitivity < -1.0 || endpointSensitivity > 1.0)
+    ) {
+      throw new Error('endpointSensitivity must be between -1.0 and 1.0');
+    }
+    if (
+      endpointLatencyAdjustmentLevel !== undefined &&
+      ![0, 1, 2, 3].includes(endpointLatencyAdjustmentLevel)
+    ) {
+      throw new Error('endpointLatencyAdjustmentLevel must be 0, 1, 2, or 3');
+    }
 
     this.apiKey = apiKey;
-    this.model = options.model ?? SonioxModel.STT_RT_V4;
+    this.model = options.model ?? SonioxModel.STT_RT_V5;
     this.languageHints = options.languageHints;
     this.languageHintsStrict = options.languageHintsStrict ?? false;
     this.sampleRate = options.sampleRate ?? SonioxSampleRate.HZ_16000;
@@ -167,6 +202,8 @@ export class SonioxSTT {
     this.enableSpeakerDiarization = options.enableSpeakerDiarization ?? false;
     this.enableLanguageIdentification = options.enableLanguageIdentification ?? true;
     this.maxEndpointDelayMs = maxEndpointDelayMs;
+    this.endpointSensitivity = endpointSensitivity;
+    this.endpointLatencyAdjustmentLevel = endpointLatencyAdjustmentLevel;
     this.clientReferenceId = options.clientReferenceId;
     this.baseUrl = options.baseUrl ?? SONIOX_WS_URL;
   }
@@ -191,6 +228,14 @@ export class SonioxSTT {
       enable_language_identification: this.enableLanguageIdentification,
       max_endpoint_delay_ms: this.maxEndpointDelayMs,
     };
+    // v5 endpoint controls — opt-in; omitted when unset so the wire config
+    // stays byte-identical to the pre-v5 default.
+    if (this.endpointSensitivity !== undefined) {
+      config.endpoint_sensitivity = this.endpointSensitivity;
+    }
+    if (this.endpointLatencyAdjustmentLevel !== undefined) {
+      config.endpoint_latency_adjustment_level = this.endpointLatencyAdjustmentLevel;
+    }
     if (this.languageHints) {
       config.language_hints = this.languageHints;
       config.language_hints_strict = this.languageHintsStrict;

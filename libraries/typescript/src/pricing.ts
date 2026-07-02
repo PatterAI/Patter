@@ -171,6 +171,10 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // Previous $0.0173 default reflected a legacy Standard tier that was
   // retired; users were being over-billed ~4.3x.
   speechmatics: { unit: PricingUnit.MINUTE, price: 0.004 },
+  // Gemini multimodal STT (gemini-2.5-flash, audio in → text out). Audio input
+  // ~$0.30/1M tokens at ~32 tokens/sec ≈ $0.00058/min; round to a small flat
+  // per-minute estimate. Preview pricing — verify before GA.
+  gemini_stt: { unit: PricingUnit.MINUTE, price: 0.001 },
   // TTS — per 1,000 characters synthesized.
   // Source: https://elevenlabs.io/pricing/api (verified 2026-05-11). The
   // per-1K-character API/overage rate is flat across all plan tiers (Free
@@ -256,6 +260,36 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
       'inworld-tts-1.5-mini': { price: 0.015 },
     },
   },
+  // Gemini TTS (gemini-3.1-flash-tts-preview). Output audio ~$20/1M audio
+  // tokens (~25 tok/sec) + ~$1/1M text input ≈ ~$0.034 per 1K chars spoken.
+  // Preview pricing — verify before GA.
+  gemini_tts: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    price: 0.034,
+    models: {
+      'gemini-3.1-flash-tts-preview': { price: 0.034 },
+    },
+  },
+  // Soniox real-time TTS. Soniox publishes a $0.70/hr headline for generated
+  // speech (native billing is token-based: input text $4/1M + output audio
+  // $21.50/1M). Patter's TTS cost model is per-character, so we express the rate
+  // per 1k chars: at a typical ~900 chars/min spoken (~150 wpm) ≈ 54,000
+  // chars/hr, $0.70/hr ÷ 54 ≈ $0.013 / 1k chars. Source:
+  // https://soniox.com/pricing (also https://soniox.com/text-to-speech).
+  soniox_tts: { unit: PricingUnit.THOUSAND_CHARS, price: 0.013 },
+  // Sarvam AI Bulbul TTS — per 1,000 characters. INR is authoritative; USD is an
+  // indicative FX conversion (~Rs 83-84/USD). Bulbul v3 (default): Rs 30 / 10k
+  // chars ≈ $0.036/1k; Bulbul v2: Rs 15 / 10k ≈ $0.018/1k. Billed per character,
+  // rounded up per request. Source: https://www.sarvam.ai/api-pricing
+  sarvam: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = bulbul:v3.
+    price: 0.036,
+    models: {
+      'bulbul:v3': { price: 0.036 },
+      'bulbul:v2': { price: 0.018 },
+    },
+  },
   // OpenAI Realtime — per token. Provider defaults match
   // gpt-realtime-mini / gpt-4o-mini-realtime-preview (Patter's default).
   // Per-model overrides under ``models`` are auto-resolved when the
@@ -321,6 +355,30 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
         text_output_per_token: 0.000020,
         cached_audio_input_per_token: 0.0000020,
         cached_text_input_per_token: 0.0000025,
+      },
+    },
+  },
+  // Gemini Cascade — two-leg architecture: Live leg (text in/out per token)
+  // and TTS leg (text-in / audio-out per token). Rates per 1M tokens (USD).
+  // Sources: Google AI Studio pricing page (verified 2026-06-18).
+  //   gemini-3.1-flash-live-preview: $0.30/M text input, $2.50/M text output.
+  //   gemini-3.1-flash-tts-preview:  $1.00/M text input, $20.00/M audio output.
+  // Provider defaults represent the Live leg; TTS leg rates are per-model.
+  gemini_cascade: {
+    unit: PricingUnit.TOKEN,
+    // Live leg defaults (gemini-3.1-flash-live-preview): text in/out only.
+    text_input_per_token: 0.00000030,   // $0.30 per 1M text input tokens
+    text_output_per_token: 0.0000025,   // $2.50 per 1M text output tokens
+    models: {
+      // Live STT+brain leg (TEXT modality — no audio output from this leg).
+      'gemini-3.1-flash-live-preview': {
+        text_input_per_token: 0.00000030,
+        text_output_per_token: 0.0000025,
+      },
+      // TTS voice-synthesis leg: text in → audio out.
+      'gemini-3.1-flash-tts-preview': {
+        text_input_per_token: 0.0000010,    // $1.00 per 1M text input tokens
+        audio_output_per_token: 0.000020,   // $20.00 per 1M audio output tokens
       },
     },
   },
@@ -626,6 +684,7 @@ export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
     'gemini-2.5-pro': { input: 1.25, output: 10.0 },
     'gemini-2.5-flash': { input: 0.30, output: 2.50 },
     'gemini-live-2.5-flash-native-audio': { input: 0.30, output: 2.50 },
+    'gemini-3.1-flash-live-preview': { input: 0.30, output: 2.50 },
   },
   groq: {
     // Rates as of 2026-05-08; verify against groq.com/pricing.
