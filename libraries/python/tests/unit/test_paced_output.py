@@ -169,12 +169,12 @@ class TestPacedPlaybackTracking:
 
         # Sentence "one": stamped at the current cursor, then 2 frames enqueued.
         handler._turn_spoken_segments.append(
-            ("one", handler._turn_playback_total_s)
+            ("one", handler._turn_playback_total_s, 0.0)
         )
         await handler._send_pipeline_chunk(b"\x01" * 640 * 2)  # +40 ms
         # Sentence "two": stamped at 40 ms, then 1 frame enqueued.
         handler._turn_spoken_segments.append(
-            ("two", handler._turn_playback_total_s)
+            ("two", handler._turn_playback_total_s, 0.0)
         )
         await handler._send_pipeline_chunk(b"\x02" * 640)  # +20 ms  (total 60 ms)
 
@@ -184,7 +184,10 @@ class TestPacedPlaybackTracking:
         prefix = handler._heard_response_prefix()
         assert prefix is not None
         text, heard_everything = prefix
-        # heard ~= 20 ms < "two".start (40 ms) -> only "one" was heard.
+        # (d) The paced emitted-frame cursor (NOT the faster enqueue burst)
+        # drives the cutoff: heard ~= 20 ms lands mid-"one" (0..40 ms). The
+        # single word rounds to the nearest boundary (heard) while "two"
+        # (start 40 ms) has not begun.
         assert text == "one"
         assert heard_everything is False
 

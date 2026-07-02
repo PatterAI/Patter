@@ -164,10 +164,10 @@ describe('[unit] paced output — playback tracking', () => {
     const pacer = attachTestPacer(h, clock);
 
     // Sentence "one" stamped at the current cursor, then 2 frames enqueued.
-    h.turnSpokenSegments.push({ text: 'one', startMs: h.turnPlaybackTotalMs });
+    h.turnSpokenSegments.push({ text: 'one', startMs: h.turnPlaybackTotalMs, durMs: 0 });
     h.sendPipelineChunk(Buffer.alloc(160 * 2, 0x01)); // +40 ms
     // Sentence "two" stamped at 40 ms, then 1 frame enqueued.
-    h.turnSpokenSegments.push({ text: 'two', startMs: h.turnPlaybackTotalMs });
+    h.turnSpokenSegments.push({ text: 'two', startMs: h.turnPlaybackTotalMs, durMs: 0 });
     h.sendPipelineChunk(Buffer.alloc(160, 0x02)); // +20 ms (total 60 ms)
 
     // Only ONE 20 ms frame actually leaves the SDK.
@@ -175,7 +175,10 @@ describe('[unit] paced output — playback tracking', () => {
 
     const prefix = h.heardResponsePrefix();
     expect(prefix).not.toBeNull();
-    // heard ~= 20 ms < "two".startMs (40 ms) -> only "one" was heard.
+    // (d) The paced emitted-frame cursor (NOT the faster enqueue burst) drives
+    // the cutoff: heard ~= 20 ms lands mid-"one" (0..40 ms); the single word
+    // rounds to the nearest boundary (heard) while "two" (start 40 ms) has not
+    // begun.
     expect(prefix.text).toBe('one');
     expect(prefix.heardEverything).toBe(false);
   });

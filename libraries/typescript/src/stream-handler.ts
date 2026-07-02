@@ -837,15 +837,38 @@ export class StreamHandler {
    * caller actually HEARD when a barge-in lands. ``turnPlaybackTotalMs``
    * accumulates the playout duration of every chunk pushed this turn
    * (including filler audio, which keeps the timeline aligned);
-   * ``turnSpokenSegments`` records ``{text, startMs}`` for each RESPONSE
-   * sentence at its first audible chunk (filler / error-fallback audio
-   * advances the clock but adds no segment). ``heard = total - backlog``
-   * then maps to a sentence-granular prefix — see ``heardResponsePrefix``.
-   * Both reset at ``beginSpeaking``. Mirrors Python
-   * ``_turn_playback_total_s`` / ``_turn_spoken_segments``.
+   * ``turnSpokenSegments`` records ``{text, startMs, durMs}`` for each
+   * RESPONSE sentence: ``startMs`` is the cumulative playback position at its
+   * first audible chunk, ``durMs`` its own playout duration (filled once the
+   * NEXT sentence stamps; the last/in-flight sentence keeps ``0`` and its
+   * extent is resolved from the live total). ``heard = total - backlog`` then
+   * maps to a WORD-ACCURATE prefix (whole heard sentences + the heard
+   * fraction of the sentence in flight) — see ``heardResponsePrefix``. Both
+   * reset at ``beginSpeaking``. Mirrors Python ``_turn_playback_total_s`` /
+   * ``_turn_spoken_segments``.
    */
   private turnPlaybackTotalMs = 0;
-  private turnSpokenSegments: Array<{ readonly text: string; readonly startMs: number }> = [];
+  private turnSpokenSegments: Array<{
+    readonly text: string;
+    readonly startMs: number;
+    readonly durMs: number;
+  }> = [];
+  /**
+   * Per-sentence carrier-confirmed heard cursor (Twilio only). A ``seg_<n>``
+   * mark is emitted after each RESPONSE sentence's audio (``emitSegmentMark``);
+   * a Twilio echo (``onMark``) proves the caller PLAYED THROUGH it, advancing
+   * ``markConfirmedMs`` — the end position of the last confirmed sentence —
+   * which overrides the byte/pacer estimate in ``heardResponsePrefix`` when it
+   * is ahead. ``segMarkCounter`` is monotonic across the whole call so a stale
+   * echo from a prior turn can never alias a fresh ``seg_<n>``; ``segMarkEndMs``
+   * and ``markConfirmedMs`` reset per turn at ``beginSpeaking``. Telnyx (no-op
+   * ``sendMark``) and Plivo (``checkpoint`` verb) never populate these — they
+   * fall back to the byte/pacer tiers. Mirrors Python ``_seg_mark_counter`` /
+   * ``_seg_mark_end_s`` / ``_mark_confirmed_s``.
+   */
+  private segMarkCounter = 0;
+  private segMarkEndMs: Map<string, number> = new Map();
+  private markConfirmedMs = 0;
   /**
    * Opt-in wall-clock outbound frame pacer (``agent.pacedOutput``). Null
    * (default) ⇒ every outbound send takes the current direct/event-driven
@@ -1147,6 +1170,10 @@ export class StreamHandler {
     this.turnPlaybackTotalMs = 0;
     this.pacedEmittedMs = 0;
     this.turnSpokenSegments = [];
+    // Fresh turn — drop the previous turn's carrier-confirmed seg marks (the
+    // counter stays monotonic so names never alias across turns).
+    this.segMarkEndMs = new Map();
+    this.markConfirmedMs = 0;
     // Fresh turn — drop any pause-and-resume state and retained audio from
     // the previous turn (a paused turn can never reach here — the
     // pause-decision wait resolves before the turn ends — but be
@@ -1190,6 +1217,59 @@ export class StreamHandler {
    * (``ttsOutputFormatNativeForCarrier`` — Twilio/Plivo ``ulaw_8000``;
    * Telnyx native is ``pcm_16000`` so it stays at 32 bytes/ms).
    */
+  /**
+   * Append a heard-prefix segment for a RESPONSE sentence at the current
+   * playback cursor, finalizing the previous segment's playout duration.
+   *
+   * Each entry is ``{text, startMs, durMs}``: ``startMs`` is the per-turn
+   * playback position at the sentence's first audible chunk; ``durMs`` is
+   * filled here when the NEXT sentence stamps (``dur = newStart - prevStart``).
+   * The last/in-flight sentence keeps ``durMs === 0`` and ``heardResponseSplit``
+   * resolves its extent from the live playback total. Sentences are pushed
+   * back-to-back with no un-stamped audio between them (filler / error-fallback
+   * audio only precedes the first response sentence), so ``newStart -
+   * prevStart`` is the exact per-sentence duration. Centralizes the three stamp
+   * sites (``synthesizeSentence`` / spec flush / retention drain). Mirrors
+   * Python ``_stamp_spoken_segment``.
+   */
+  private stampSpokenSegment(text: string): void {
+    const segments = this.turnSpokenSegments;
+    const totalMs = this.turnPlaybackTotalMs;
+    if (segments.length > 0) {
+      const prev = segments[segments.length - 1];
+      if (prev.durMs <= 0) {
+        segments[segments.length - 1] = {
+          text: prev.text,
+          startMs: prev.startMs,
+          durMs: Math.max(0, totalMs - prev.startMs),
+        };
+      }
+    }
+    segments.push({ text, startMs: totalMs, durMs: 0 });
+  }
+
+  /**
+   * Emit a per-sentence ``seg_<n>`` carrier mark after a RESPONSE sentence's
+   * audio (Twilio only). A Twilio echo (``onMark``) confirms the caller has
+   * PLAYED THROUGH the sentence, advancing ``markConfirmedMs`` — a
+   * carrier-truthed cursor more accurate than the byte/pacer estimate. The end
+   * position recorded is the current playback total (all of this sentence's
+   * audio has been pushed by the time this runs). No-op on non-Twilio carriers
+   * (Telnyx ``sendMark`` is a no-op; Plivo uses ``checkpoint``) — they stay on
+   * the byte/pacer tiers. Mirrors Python ``_emit_segment_mark``.
+   */
+  private emitSegmentMark(): void {
+    if (this.deps.bridge.telephonyProvider !== 'twilio') return;
+    this.segMarkCounter += 1;
+    const name = `seg_${this.segMarkCounter}`;
+    this.segMarkEndMs.set(name, this.turnPlaybackTotalMs);
+    try {
+      this.deps.bridge.sendMark(this.ws, name, this.streamSid);
+    } catch (err) {
+      getLogger().debug(`segment sendMark failed (${name}): ${String(err)}`);
+    }
+  }
+
   private trackOutboundPlayback(numBytes: number): void {
     if (numBytes <= 0) return;
     const bytesPerMs =
@@ -1315,27 +1395,103 @@ export class StreamHandler {
   }
 
   /**
-   * Estimate the response prefix the caller actually HEARD this turn.
-   *
-   * The pipeline pushes audio faster than realtime, so at barge-in time
-   * ``heard = totalPushed - carrierBacklog`` ms of audio have actually
-   * played. Mapped at sentence granularity against ``turnSpokenSegments``:
-   * a sentence counts as heard once its playback has STARTED
-   * (``startMs <= heardMs``), so the sentence playing at the moment of
-   * interruption is included.
-   *
-   * Returns ``null`` when no segments were tracked this turn (nothing
-   * synthesized through the tracked path — callers fall back to the legacy
-   * full-text behaviour). Mirrors Python ``_heard_response_prefix``.
+   * The response prefix the caller actually HEARD this turn — whole heard
+   * sentences plus the heard fraction of the sentence in flight
+   * (word-accurate, no round-up). Returns ``null`` when no segments were
+   * tracked (callers fall back to the legacy full-text behaviour). Stable
+   * public shape; the richer heard/unsaid split lives in
+   * ``heardResponseSplit``. Mirrors Python ``_heard_response_prefix``.
    */
   private heardResponsePrefix(): { text: string; heardEverything: boolean } | null {
-    if (this.turnSpokenSegments.length === 0) return null;
+    const split = this.heardResponseSplit();
+    if (split === null) return null;
+    return { text: split.heard, heardEverything: split.heardEverything };
+  }
+
+  /**
+   * Best-available played position this turn (ms), on the highest tier of the
+   * played-position ladder: (i) Twilio carrier-confirmed ``seg_<n>`` marks
+   * (``markConfirmedMs`` — ground truth the caller played THROUGH a sentence);
+   * (ii) under ``pacedOutput`` the pacer refreshes ``playbackBufferedUntil``
+   * from its REAL emitted-frame cursor; (iii) otherwise the byte-duration
+   * estimate folded into the same ``playbackBufferedUntil``. Tiers (ii)/(iii)
+   * surface as ``total - backlog``; the carrier cursor overrides them when
+   * ahead.
+   */
+  private playedPositionMs(): number {
     const remainingMs = Math.max(0, this.playbackBufferedUntil - Date.now());
     const heardMs = Math.max(0, this.turnPlaybackTotalMs - remainingMs);
-    const heard = this.turnSpokenSegments.filter((s) => s.startMs <= heardMs);
+    return Math.max(heardMs, this.markConfirmedMs);
+  }
+
+  /**
+   * Split ``text`` into ``[heard, unsaid]`` at ``fraction`` of its words,
+   * snapped to a whole-word boundary (never mid-word). Deterministic
+   * proportional-by-word approximation of which words the caller heard when a
+   * barge-in lands mid-sentence: word durations are assumed ∝ word count and
+   * the cut is rounded to the nearest word boundary (half up). ``heard`` + ' '
+   * + ``unsaid`` reconstructs the whitespace-normalized sentence exactly.
+   * Mirrors Python ``_split_sentence_at_fraction``.
+   */
+  private static splitSentenceAtFraction(text: string, fraction: number): [string, string] {
+    const words = text.split(/\s+/).filter((w) => w.length > 0);
+    if (words.length === 0) return ['', ''];
+    const f = Math.min(1, Math.max(0, fraction));
+    let k = Math.floor(f * words.length + 0.5); // round half up to a boundary
+    k = Math.min(words.length, Math.max(0, k));
+    return [words.slice(0, k).join(' '), words.slice(k).join(' ')];
+  }
+
+  /**
+   * Split this turn's spoken text into ``{heard, unsaid, heardEverything}`` at
+   * the played position. Fully-played sentences are included verbatim; the
+   * sentence in flight is split on a word boundary by its played fraction;
+   * not-yet-started sentences are all unsaid. Per-sentence extent comes from
+   * the segment's own ``durMs`` when finalized, else the next sentence's
+   * start, else the live playback total. ``heard`` + ' ' + ``unsaid`` is the
+   * whole spoken text (the unsaid remainder is the exact complement of the
+   * heard prefix; the re-delivery feature consumes it). This is the richer
+   * internal accessor behind the stable ``heardResponsePrefix``. Returns
+   * ``null`` when no segments were tracked (callers fall back to the legacy
+   * full-text behaviour). Mirrors Python ``_heard_response_split``.
+   */
+  private heardResponseSplit():
+    | { heard: string; unsaid: string; heardEverything: boolean }
+    | null {
+    const segments = this.turnSpokenSegments;
+    if (segments.length === 0) return null;
+    const totalMs = this.turnPlaybackTotalMs;
+    const heardMs = this.playedPositionMs();
+    const heardParts: string[] = [];
+    const unsaidParts: string[] = [];
+    const n = segments.length;
+    for (let i = 0; i < n; i++) {
+      const { text, startMs, durMs } = segments[i];
+      let endMs =
+        durMs > 0 ? startMs + durMs : i + 1 < n ? segments[i + 1].startMs : totalMs;
+      // A pause rewind can leave ``totalMs`` behind a stale later segment's
+      // ``startMs``; never let a segment end before it starts.
+      endMs = Math.max(endMs, startMs);
+      // Order matters: "not started" is checked first so a segment whose start
+      // sits at/after the play head is never mis-read as "fully heard" when its
+      // resolved end collapses onto the play head.
+      if (startMs >= heardMs) {
+        unsaidParts.push(text); // not started
+      } else if (endMs <= heardMs + 1e-6) {
+        heardParts.push(text); // fully heard
+      } else {
+        // In flight — proportional word-boundary split.
+        const span = endMs - startMs;
+        const frac = span > 1e-9 ? (heardMs - startMs) / span : 0;
+        const [heardWords, unsaidWords] = StreamHandler.splitSentenceAtFraction(text, frac);
+        if (heardWords) heardParts.push(heardWords);
+        if (unsaidWords) unsaidParts.push(unsaidWords);
+      }
+    }
     return {
-      text: heard.map((s) => s.text).join(' '),
-      heardEverything: heard.length === this.turnSpokenSegments.length,
+      heard: heardParts.join(' '),
+      unsaid: unsaidParts.join(' '),
+      heardEverything: unsaidParts.length === 0,
     };
   }
 
@@ -2749,6 +2905,17 @@ export class StreamHandler {
   /** Handle a Twilio Media Streams `mark` event acknowledging audio playback boundaries. */
   async onMark(markName: string): Promise<void> {
     if (!markName) return;
+    // Per-sentence heard-position marks (seg_<n>): a carrier echo confirms the
+    // caller has played through this sentence. Advance the monotonic
+    // mark-confirmed cursor and return WITHOUT touching the firstMessage
+    // flow-control FIFO or ``lastConfirmedMark``.
+    if (markName.startsWith('seg_')) {
+      const endMs = this.segMarkEndMs.get(markName);
+      if (endMs !== undefined) {
+        this.markConfirmedMs = Math.max(this.markConfirmedMs, endMs);
+      }
+      return;
+    }
     // Resolve the firstMessage mark waiter (if any) so the send loop
     // can advance its sliding window. We resolve the matched entry AND
     // every entry before it in the queue — Twilio sometimes batches
@@ -3812,6 +3979,11 @@ export class StreamHandler {
     if (processedText === null) return;
 
     this.resetTtsCarry();
+    // Whether this sentence is part of the LLM's reply (and therefore stamps a
+    // segment + gets an end-of-sentence carrier mark). Captured before
+    // ``recordSegment`` may be flipped off by a mid-sentence retention overflow
+    // below.
+    const shouldMark = recordSegment;
     // Pause-and-resume retention: in ``bargeInMode: 'pause_resume'`` every
     // chunk of a RESPONSE sentence is kept in a per-sentence entry so a
     // paused turn can re-send the cleared-but-unheard tail at resume time
@@ -3884,16 +4056,18 @@ export class StreamHandler {
         }
         if (recordSegment) {
           // First audible chunk of this sentence — stamp its start on the
-          // per-turn playback timeline so a barge-in can estimate the heard
-          // prefix at sentence granularity.
-          this.turnSpokenSegments.push({
-            text: processedText,
-            startMs: this.turnPlaybackTotalMs,
-          });
+          // per-turn playback timeline so a barge-in can compute the heard
+          // prefix (whole + mid-sentence).
+          this.stampSpokenSegment(processedText);
           recordSegment = false;
         }
         this.sendPipelineChunk(processedAudio);
       }
+      // Reaching here means the sentence finished WITHOUT a barge-in (the
+      // cancel paths ``break`` mid-loop, leaving ``isSpeaking`` false). Emit
+      // its end-of-sentence carrier mark so a Twilio echo can confirm the
+      // caller heard through it (no-op on non-Twilio / filler audio).
+      if (shouldMark && this.isSpeaking) this.emitSegmentMark();
     } catch (e) {
       getLogger().error(`TTS streaming error (${this.deps.bridge.label}):`, e);
     } finally {
@@ -4567,6 +4741,10 @@ export class StreamHandler {
     this.pauseResumeIndex = index;
     this.turnPlaybackTotalMs = heardMs;
     this.playbackBufferedUntil = 0;
+    // Freeze the carrier-confirmed heard cursor at the pause offset too — the
+    // ``sendClear`` below voids anything beyond it, so a stale ``seg_<n>`` echo
+    // for cleared audio must not push it past ``heardMs``.
+    this.markConfirmedMs = Math.min(this.markConfirmedMs, heardMs);
     // Under pacing the beyond-heard backlog sits in the pacer queue (not the
     // carrier), so the ``sendClear`` below cannot reach it — drop it and
     // re-anchor the emitted cursor to the frozen heard offset. Resume
@@ -4790,10 +4968,7 @@ export class StreamHandler {
       entry.sent = idx + 1;
       const chunk = entry.chunks[idx];
       if (idx === 0) {
-        this.turnSpokenSegments.push({
-          text: entry.text,
-          startMs: this.turnPlaybackTotalMs,
-        });
+        this.stampSpokenSegment(entry.text);
       }
       // Far-end tap mirrors the direct send path: SKIPPED on the
       // carrier-native fast path where these are mulaw wire bytes that
@@ -5266,7 +5441,7 @@ export class StreamHandler {
           return;
         }
         if (recordSegment) {
-          this.turnSpokenSegments.push({ text, startMs: this.turnPlaybackTotalMs });
+          this.stampSpokenSegment(text);
           recordSegment = false;
         }
         await this.specSendChunk(spec, audio);

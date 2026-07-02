@@ -117,7 +117,7 @@ interface Priv {
   pauseResumeIndex: number;
   turnOutputDone: boolean;
   turnPlaybackTotalMs: number;
-  turnSpokenSegments: Array<{ text: string; startMs: number }>;
+  turnSpokenSegments: Array<{ text: string; startMs: number; durMs: number }>;
   playbackBufferedUntil: number;
   dispatchTask: Promise<void> | null;
   lastCommitText: string;
@@ -182,9 +182,9 @@ function makeHandler(agentOverrides: Partial<AgentOptions> = {}): {
  * mid-playback, sentence three still entirely in the carrier buffer. */
 function seedPartiallyHeardTurn(p: Priv): void {
   p.turnSpokenSegments = [
-    { text: 'Frase uno.', startMs: 0 },
-    { text: 'Frase due.', startMs: 2000 },
-    { text: 'Frase tre.', startMs: 4000 },
+    { text: 'Frase uno.', startMs: 0, durMs: 2000 },
+    { text: 'Frase due.', startMs: 2000, durMs: 2000 },
+    { text: 'Frase tre.', startMs: 4000, durMs: 0 },
   ];
   p.turnPlaybackTotalMs = 6000;
   // 3.5 s still buffered → heard = 2.5 s: inside sentence two.
@@ -459,7 +459,7 @@ describe('pause_resume — RESUME after the confirm window expires', () => {
 
   it('resume with nothing unheard just unpauses', () => {
     const { p, deps } = makeHandler({ bargeInConfirmMs: 30 });
-    p.turnSpokenSegments = [{ text: 'Frase uno.', startMs: 0 }];
+    p.turnSpokenSegments = [{ text: 'Frase uno.', startMs: 0, durMs: 0 }];
     p.turnPlaybackTotalMs = 2000;
     p.playbackBufferedUntil = 0; // fully drained
     p.turnSentenceAudio = [
@@ -543,7 +543,9 @@ describe('pause_resume — KILL on a confirming transcript', () => {
 
   it('a post-complete kill truncates history to the FROZEN heard prefix', () => {
     // The cursor was frozen at pause time, so the history rewrite must
-    // still see the heard prefix (not skip on "no backlog").
+    // still see the heard prefix (not skip on "no backlog"). The freeze
+    // landed 2.5 s in — mid sentence two — so the accurate prefix is sentence
+    // one plus the heard fraction of sentence two (word boundary).
     const { p } = makeHandler({ bargeInConfirmMs: 10_000 });
     seedPartiallyHeardTurn(p);
     const full = 'Frase uno. Frase due. Frase tre.';
@@ -553,7 +555,7 @@ describe('pause_resume — KILL on a confirming transcript', () => {
     p.handleBargeIn({ text: 'aspetta un attimo', isFinal: true, speechFinal: true });
 
     expect(p.history.entries[p.history.entries.length - 1].text).toBe(
-      'Frase uno. Frase due. [interrupted by caller]',
+      'Frase uno. Frase [interrupted by caller]',
     );
   });
 

@@ -3416,15 +3416,18 @@ class PipelineStreamHandler(StreamHandler):
         # caller actually HEARD when a barge-in lands. ``_turn_playback_total_s``
         # accumulates the playout duration of every chunk pushed this turn
         # (including filler audio, which keeps the timeline aligned);
-        # ``_turn_spoken_segments`` records ``(sentence_text,
-        # cumulative_start_s)`` for each RESPONSE sentence at its first audible
-        # chunk (filler / error-fallback audio advances the clock but adds no
-        # segment). ``heard = total - remaining_backlog`` then maps to a
-        # sentence-granular prefix — see ``_heard_response_prefix``. Both reset
+        # ``_turn_spoken_segments`` records ``(sentence_text, start_s, dur_s)``
+        # for each RESPONSE sentence: ``start_s`` is the cumulative playback
+        # position at its first audible chunk, ``dur_s`` its own playout
+        # duration (filled once the NEXT sentence stamps; the last/in-flight
+        # sentence keeps ``0.0`` and its extent is resolved from the live
+        # total). ``heard = total - remaining_backlog`` then maps to a
+        # WORD-ACCURATE prefix (whole heard sentences + the heard fraction of
+        # the sentence in flight) — see ``_heard_response_prefix``. Both reset
         # at ``_begin_speaking``. Mirrors TS ``turnPlaybackTotalMs`` /
         # ``turnSpokenSegments``.
         self._turn_playback_total_s: float = 0.0
-        self._turn_spoken_segments: list[tuple[str, float]] = []
+        self._turn_spoken_segments: list[tuple[str, float, float]] = []
         # Optional barge-in confirmation strategies (see
         # ``getpatter.services.barge_in_strategies``). With an empty tuple
         # the SDK uses the legacy "cancel on first VAD speech_start"
@@ -3580,6 +3583,22 @@ class PipelineStreamHandler(StreamHandler):
         # generic ``audio_*`` marks the Realtime path sends so the two paths
         # can coexist without name collisions.
         self._first_message_mark_counter: int = 0
+        # --- Per-sentence carrier-confirmed heard cursor (Twilio only) ---
+        # A ``seg_<n>`` mark is emitted after each RESPONSE sentence's audio
+        # (``_emit_segment_mark``). When Twilio echoes it back (``on_mark``)
+        # the caller has provably PLAYED THROUGH that sentence, so
+        # ``_mark_confirmed_s`` — the end position of the last confirmed
+        # sentence — is ground truth that overrides the byte/pacer estimate in
+        # ``_heard_response_prefix`` when it is ahead. ``_seg_mark_counter`` is
+        # monotonic across the whole call so a stale echo from a prior turn can
+        # never alias a fresh ``seg_<n>``; ``_seg_mark_end_s`` and
+        # ``_mark_confirmed_s`` reset per turn at ``_begin_speaking``. Telnyx
+        # (no-op ``send_mark``) and Plivo (``checkpoint`` verb) never populate
+        # these — they fall back to the byte/pacer tiers. Mirrors TS
+        # ``segMarkEndMs`` / ``markConfirmedMs`` / ``segMarkCounter``.
+        self._seg_mark_counter: int = 0
+        self._seg_mark_end_s: dict[str, float] = {}
+        self._mark_confirmed_s: float = 0.0
         # Cached result of ``_is_tts_output_format_native_for_carrier()``
         # — settled once at ``start()`` time after ``set_telephony_carrier``
         # has run on the TTS adapter. ``True`` means
@@ -4406,6 +4425,11 @@ class PipelineStreamHandler(StreamHandler):
         """
         if self._tts is None:
             return True
+        # Whether this sentence is part of the LLM's reply (and therefore
+        # stamps a segment + gets an end-of-sentence carrier mark). Captured
+        # before ``record_segment`` may be flipped off by a mid-sentence
+        # retention overflow below.
+        should_mark = record_segment
 
         # Apply text transforms before the beforeSynthesize hook
         transformed = sentence
@@ -4533,14 +4557,8 @@ class PipelineStreamHandler(StreamHandler):
                 if record_segment:
                     # First audible chunk of this sentence — stamp its start
                     # on the per-turn playback timeline so a barge-in can
-                    # estimate the heard prefix at sentence granularity.
-                    # ``getattr`` is defensive against test fixtures built
-                    # via ``object.__new__`` (no ``__init__``).
-                    segments = getattr(self, "_turn_spoken_segments", None)
-                    if segments is not None:
-                        segments.append(
-                            (processed, getattr(self, "_turn_playback_total_s", 0.0))
-                        )
+                    # compute the heard prefix (whole + mid-sentence).
+                    self._stamp_spoken_segment(processed)
                     record_segment = False
                 await self._send_pipeline_chunk(processed_audio)
         finally:
@@ -4549,6 +4567,12 @@ class PipelineStreamHandler(StreamHandler):
             # Drop any partial int16 byte so cross-sentence corruption never
             # leaks past an exception / early return.
             self.audio_sender.reset_pcm_carry()
+        # Reaching here means the sentence finished WITHOUT a barge-in (the
+        # cancel paths ``return False`` mid-loop). Emit its end-of-sentence
+        # carrier mark so a Twilio echo can confirm the caller heard through
+        # it (no-op on non-Twilio / filler audio).
+        if should_mark and self._is_speaking:
+            await self._emit_segment_mark()
         return True
 
     def _schedule_long_turn_filler(
@@ -5364,6 +5388,10 @@ class PipelineStreamHandler(StreamHandler):
         self._pause_resume_index = idx
         self._turn_playback_total_s = heard_s
         self._playback_buffered_until = 0.0
+        # Freeze the carrier-confirmed heard cursor at the pause offset too —
+        # the ``send_clear`` below voids anything beyond it, so a stale
+        # ``seg_<n>`` echo for cleared audio must not push it past ``heard_s``.
+        self._mark_confirmed_s = min(getattr(self, "_mark_confirmed_s", 0.0), heard_s)
         # Under pacing the beyond-heard backlog sits in the pacer queue (not
         # the carrier), so the ``send_clear`` below cannot reach it — drop it
         # explicitly and re-anchor the emitted cursor to the frozen heard
@@ -5610,11 +5638,7 @@ class PipelineStreamHandler(StreamHandler):
             entry["sent"] = idx + 1
             chunk = entry["chunks"][idx]
             if idx == 0:
-                segments = getattr(self, "_turn_spoken_segments", None)
-                if segments is not None:
-                    segments.append(
-                        (entry["text"], getattr(self, "_turn_playback_total_s", 0.0))
-                    )
+                self._stamp_spoken_segment(entry["text"])
             # Far-end tap mirrors the direct send path: SKIPPED on the
             # carrier-native fast path where these are mulaw 8 kHz wire
             # bytes that would corrupt the int16-PCM-16k AEC reference.
@@ -6213,9 +6237,7 @@ class PipelineStreamHandler(StreamHandler):
                     spec.buffered = []
                     return
                 if record_segment:
-                    self._turn_spoken_segments.append(
-                        (sentence_text, self._turn_playback_total_s)
-                    )
+                    self._stamp_spoken_segment(sentence_text)
                     record_segment = False
                 await self._spec_send_chunk(spec, audio)
             self.audio_sender.reset_pcm_carry()
@@ -7520,6 +7542,10 @@ class PipelineStreamHandler(StreamHandler):
         self._turn_playback_total_s = 0.0
         self._paced_emitted_s = 0.0
         self._turn_spoken_segments = []
+        # Fresh turn — drop the previous turn's carrier-confirmed seg marks
+        # (the counter stays monotonic so names never alias across turns).
+        self._seg_mark_end_s = {}
+        self._mark_confirmed_s = 0.0
         # Fresh turn — drop any pause-and-resume state and retained audio
         # from the previous turn (a paused turn can never reach here — the
         # pause-decision wait resolves before the turn ends — but be
@@ -7665,6 +7691,55 @@ class PipelineStreamHandler(StreamHandler):
             self._track_outbound_playback(len(chunk))
             self._mark_first_audio_sent()
 
+    def _stamp_spoken_segment(self, text: str) -> None:
+        """Append a heard-prefix segment for a RESPONSE sentence at the current
+        playback cursor, finalizing the previous segment's playout duration.
+
+        Each entry is ``(text, start_s, dur_s)``: ``start_s`` is the per-turn
+        playback position at the sentence's first audible chunk; ``dur_s`` is
+        its own playout duration, filled here when the NEXT sentence stamps
+        (``dur = new_start - prev_start``). The last/in-flight sentence keeps
+        ``dur_s == 0.0`` and ``_heard_response_split`` resolves its extent from
+        the live playback total. Sentences are pushed back-to-back with no
+        un-stamped audio between them (filler / error-fallback audio only
+        precedes the first response sentence), so ``new_start - prev_start`` is
+        the exact per-sentence duration. Centralizes the three stamp sites
+        (``_synthesize_sentence`` / spec flush / retention drain). ``getattr``
+        is defensive against fixtures built via ``object.__new__``.
+        """
+        segments = getattr(self, "_turn_spoken_segments", None)
+        if segments is None:
+            return
+        total_s = getattr(self, "_turn_playback_total_s", 0.0)
+        if segments:
+            prev_text, prev_start, prev_dur = segments[-1]
+            if prev_dur <= 0.0:
+                segments[-1] = (prev_text, prev_start, max(0.0, total_s - prev_start))
+        segments.append((text, total_s, 0.0))
+
+    async def _emit_segment_mark(self) -> None:
+        """Emit a per-sentence ``seg_<n>`` carrier mark after a RESPONSE
+        sentence's audio (Twilio only).
+
+        A Twilio echo of this mark (handled in ``on_mark``) confirms the caller
+        has PLAYED THROUGH the sentence, advancing ``_mark_confirmed_s`` — a
+        carrier-truthed cursor more accurate than the byte/pacer estimate. The
+        end position recorded is the current playback total (all of this
+        sentence's audio has been pushed by the time this runs). No-op on
+        non-Twilio carriers (Telnyx ``send_mark`` is a no-op; Plivo uses
+        ``checkpoint``) — they stay on the byte/pacer tiers. Best-effort: a
+        ``send_mark`` failure is logged and swallowed.
+        """
+        if not getattr(self, "_for_twilio", False):
+            return
+        self._seg_mark_counter = getattr(self, "_seg_mark_counter", 0) + 1
+        name = f"seg_{self._seg_mark_counter}"
+        self._seg_mark_end_s[name] = getattr(self, "_turn_playback_total_s", 0.0)
+        try:
+            await self.audio_sender.send_mark(name)
+        except Exception as exc:  # noqa: BLE001 - best effort
+            logger.debug("segment send_mark failed (%s): %s", name, exc)
+
     def _track_outbound_playback(self, num_bytes: int) -> None:
         """Advance ``_playback_buffered_until`` by the playout duration of an
         outbound TTS chunk.
@@ -7696,31 +7771,118 @@ class PipelineStreamHandler(StreamHandler):
             getattr(self, "_turn_playback_total_s", 0.0) + chunk_s
         )
 
-    def _heard_response_prefix(self) -> tuple[str, bool] | None:
-        """Estimate the response prefix the caller actually HEARD this turn.
+    @staticmethod
+    def _split_sentence_at_fraction(text: str, fraction: float) -> tuple[str, str]:
+        """Split ``text`` into ``(heard, unsaid)`` at ``fraction`` of its
+        words, snapped to a whole-word boundary (never mid-word).
 
-        The pipeline pushes audio faster than realtime, so at barge-in time
-        ``heard = total_pushed - carrier_backlog`` seconds of audio have
-        actually played. Mapped at sentence granularity against
-        ``_turn_spoken_segments``: a sentence counts as heard once its
-        playback has STARTED (``start <= heard``), so the sentence playing at
-        the moment of interruption is included.
-
-        Returns ``None`` when no segments were tracked this turn (nothing
-        synthesized through the tracked path — callers fall back to the
-        legacy full-text behaviour). Otherwise ``(heard_text,
-        heard_everything)``. Mirrors TS ``heardResponsePrefix``.
+        Deterministic proportional-by-word approximation of which words the
+        caller heard when a barge-in lands mid-sentence: word durations are
+        assumed ∝ word count and the cut is rounded to the nearest word
+        boundary (half up). ``heard + " " + unsaid`` reconstructs the
+        whitespace-normalized sentence exactly.
         """
-        segments = getattr(self, "_turn_spoken_segments", None)
-        if not segments:
-            return None
+        words = text.split()
+        if not words:
+            return "", ""
+        f = min(1.0, max(0.0, fraction))
+        k = int(f * len(words) + 0.5)  # round half up to a word boundary
+        k = min(len(words), max(0, k))
+        return " ".join(words[:k]), " ".join(words[k:])
+
+    def _played_position_s(self) -> float:
+        """The best-available played position this turn, in seconds, on the
+        highest tier of the played-position ladder:
+
+        (i)  Twilio carrier-confirmed ``seg_<n>`` marks — ``_mark_confirmed_s``
+             is ground truth that the caller PLAYED THROUGH that sentence.
+        (ii) Under ``paced_output`` the pacer refreshes ``_playback_buffered_
+             until`` from its REAL emitted-frame cursor.
+        (iii) Otherwise the byte-duration estimate folded into the same
+             ``_playback_buffered_until`` by ``_track_outbound_playback``.
+
+        Tiers (ii)/(iii) both surface as ``total - remaining_backlog``; the
+        carrier-confirmed cursor overrides them when it is ahead.
+        """
         total_s = getattr(self, "_turn_playback_total_s", 0.0)
         remaining_s = max(
             0.0, getattr(self, "_playback_buffered_until", 0.0) - time.time()
         )
         heard_s = max(0.0, total_s - remaining_s)
-        heard = [text for text, start_s in segments if start_s <= heard_s]
-        return " ".join(heard), len(heard) == len(segments)
+        return max(heard_s, getattr(self, "_mark_confirmed_s", 0.0))
+
+    def _heard_response_split(self) -> tuple[str, str, bool] | None:
+        """Split this turn's spoken text into ``(heard, unsaid,
+        heard_everything)`` at the played position.
+
+        Fully-played sentences are included verbatim; the sentence in flight
+        at interruption is split on a word boundary by its played fraction
+        (``_split_sentence_at_fraction``); not-yet-started sentences are all
+        unsaid. Per-sentence extent comes from the segment's own ``dur_s``
+        when finalized, else the next sentence's start, else the live playback
+        total. ``heard + " " + unsaid`` is the whole spoken text (the unsaid
+        remainder is the exact complement of the heard prefix).
+
+        This is the richer internal accessor exposing heard vs unsaid (the
+        re-delivery feature consumes the unsaid tail); the public
+        ``_heard_response_prefix`` keeps its stable ``(heard, everything)``
+        shape on top of it. Returns ``None`` when no segments were tracked
+        this turn (callers fall back to the legacy full-text behaviour).
+        Mirrors TS ``heardResponseSplit``.
+        """
+        segments = getattr(self, "_turn_spoken_segments", None)
+        if not segments:
+            return None
+        total_s = getattr(self, "_turn_playback_total_s", 0.0)
+        heard_s = self._played_position_s()
+        heard_parts: list[str] = []
+        unsaid_parts: list[str] = []
+        n = len(segments)
+        for i, seg in enumerate(segments):
+            text, start_s, dur_s = seg
+            if dur_s > 0.0:
+                end_s = start_s + dur_s
+            elif i + 1 < n:
+                end_s = segments[i + 1][1]
+            else:
+                end_s = total_s
+            # A pause rewind can leave ``total_s`` behind a stale later
+            # segment's ``start_s``; never let a segment end before it starts.
+            end_s = max(end_s, start_s)
+            # Order matters: "not started" is checked first so a segment whose
+            # start sits at/after the play head is never mis-read as "fully
+            # heard" when its resolved end collapses onto the play head.
+            if start_s >= heard_s:
+                unsaid_parts.append(text)  # not started
+            elif end_s <= heard_s + 1e-6:
+                heard_parts.append(text)  # fully heard
+            else:  # in flight — proportional word-boundary split
+                span = end_s - start_s
+                frac = (heard_s - start_s) / span if span > 1e-9 else 0.0
+                heard_words, unsaid_words = self._split_sentence_at_fraction(
+                    text, frac
+                )
+                if heard_words:
+                    heard_parts.append(heard_words)
+                if unsaid_words:
+                    unsaid_parts.append(unsaid_words)
+        return " ".join(heard_parts), " ".join(unsaid_parts), not unsaid_parts
+
+    def _heard_response_prefix(self) -> tuple[str, bool] | None:
+        """The response prefix the caller actually HEARD this turn, as
+        ``(heard_text, heard_everything)`` — whole heard sentences plus the
+        heard fraction of the sentence in flight (word-accurate, no round-up).
+
+        Returns ``None`` when no segments were tracked (callers fall back to
+        the legacy full-text behaviour). Stable public shape; the richer
+        heard/unsaid split lives in ``_heard_response_split``. Mirrors TS
+        ``heardResponsePrefix``.
+        """
+        split = self._heard_response_split()
+        if split is None:
+            return None
+        heard_text, _unsaid, heard_everything = split
+        return heard_text, heard_everything
 
     def _rewrite_last_assistant_entry(self, text: str) -> None:
         """Replace the text of the most recent assistant entry in the
@@ -8176,11 +8338,22 @@ class PipelineStreamHandler(StreamHandler):
                 self._pending_marks.pop(0)
 
     async def on_mark(self, mark_name: str) -> None:
-        """Handle a Twilio ``mark`` echo and resolve the matching firstMessage
-        waiter (if any). Marks are matched FIFO: an echo for ``fm_3`` also
+        """Handle a Twilio ``mark`` echo.
+
+        ``seg_<n>`` marks (per-sentence heard-position confirmations) advance
+        the monotonic ``_mark_confirmed_s`` cursor and return WITHOUT touching
+        the ``fm_*`` first-message flow-control FIFO. Everything else is a
+        firstMessage waiter and is matched FIFO: an echo for ``fm_3`` also
         resolves ``fm_1`` and ``fm_2`` in case the carrier batches echoes.
         """
         if not mark_name:
+            return
+        if mark_name.startswith("seg_"):
+            end_s = getattr(self, "_seg_mark_end_s", {}).get(mark_name)
+            if end_s is not None:
+                self._mark_confirmed_s = max(
+                    getattr(self, "_mark_confirmed_s", 0.0), end_s
+                )
             return
         idx = -1
         for i, (name, _fut) in enumerate(self._pending_marks):
