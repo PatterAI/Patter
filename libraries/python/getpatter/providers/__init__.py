@@ -90,6 +90,51 @@ def inworld(
     )
 
 
+def soniox_tts(
+    api_key: str,
+    voice: str = "Adrian",
+    *,
+    model: str = "tts-rt-v1",
+    language: str = "en",
+) -> TTSConfig:
+    """Config helper for Soniox TTS (requires the ``soniox`` optional extra).
+
+    Shares the ``SONIOX_API_KEY`` credential family with Soniox STT. ``voice``
+    defaults to ``Adrian`` (a single voice keeps its timbre across 60+
+    languages). For telephony the carrier-native path is ``SonioxTTS.for_twilio``
+    / ``for_telnyx`` (mu-law @ 8 kHz, no resampling).
+    """
+    return TTSConfig(
+        provider="soniox_tts",
+        api_key=api_key,
+        voice=voice,
+        options={"model": model, "language": language},
+    )
+
+
+def sarvam(
+    api_key: str,
+    voice: str = "shubh",
+    *,
+    model: str = "bulbul:v3",
+    language: str = "en-IN",
+) -> TTSConfig:
+    """Config helper for Sarvam AI TTS (requires the ``sarvam`` optional extra).
+
+    Synthesizes 11 Indian languages (Hindi, Bengali, Tamil, Telugu, Kannada,
+    Malayalam, Marathi, Gujarati, Punjabi, Odia, Indian English) plus code-mixed
+    text. ``voice`` is the Sarvam speaker id (default ``shubh``); ``language`` is
+    a BCP-47 code such as ``"hi-IN"``. ``model`` defaults to ``bulbul:v3`` (pass
+    ``bulbul:v2`` for the legacy generation).
+    """
+    return TTSConfig(
+        provider="sarvam",
+        api_key=api_key,
+        voice=voice,
+        options={"model": model, "language": language},
+    )
+
+
 def _load_anthropic_llm():
     from getpatter.providers.anthropic_llm import AnthropicLLMProvider
 
@@ -148,9 +193,31 @@ __all__ = [
     "cartesia",
     "rime",
     "lmnt",
+    "inworld",
+    "soniox_tts",
+    "sarvam",
     "AnthropicLLMProvider",
     "GroqLLMProvider",
     "CerebrasLLMProvider",
     "GoogleLLMProvider",
     "LiteLLMProvider",
 ]
+
+# ``soniox_tts`` (the helper above) shares its name with the ``soniox_tts``
+# submodule. Importing that submodule — which ``_create_tts_from_config`` does
+# lazily — binds the MODULE object onto this package, shadowing the helper and
+# making ``providers.soniox_tts(...)`` uncallable. Force the submodule import
+# now (so the binding happens once) and then restore the helper. Subsequent
+# ``from getpatter.providers.soniox_tts import ...`` calls find the module
+# already cached in ``sys.modules`` and do NOT re-bind the attribute, so the
+# helper stays callable. ``sarvam`` needs no such guard (its submodule is
+# ``sarvam_tts``, a different name).
+import importlib as _importlib  # noqa: E402
+
+_soniox_tts_helper = soniox_tts
+try:  # pragma: no cover - import side-effect guard
+    _importlib.import_module(__name__ + ".soniox_tts")
+except Exception:  # pragma: no cover - defensive (optional dep may be absent)
+    pass
+soniox_tts = _soniox_tts_helper
+del _importlib, _soniox_tts_helper

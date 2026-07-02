@@ -19,4 +19,6 @@ __all__ = [
     "rime",
     "lmnt",
     "inworld",
+    "soniox",
+    "sarvam",
 ]

@@ -76,7 +76,12 @@ export function plivoInboundCustomParams(
   const headers = parsePlivoExtraHeaders(extraHeadersRaw);
   const params: Record<string, string> = { caller, callee };
   for (const [k, v] of Object.entries(headers)) {
-    if (k !== 'X-PH-caller' && k !== 'X-PH-callee') params[k] = v;
+    // Drop internal markers: caller/callee are re-exposed above under canonical
+    // keys, and X-Patter-Stream-Token is the SECURITY (#204) stream-auth token —
+    // it must never leak into prompt template variables.
+    if (k !== 'X-PH-caller' && k !== 'X-PH-callee' && k !== 'X-Patter-Stream-Token') {
+      params[k] = v;
+    }
   }
   return params;
 }

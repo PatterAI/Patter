@@ -55,6 +55,101 @@
   split backs the new re-delivery feature. Telnyx/Plivo (no reliable marks) use
   the pacer/estimate tiers.
 
+## 0.7.1 (2026-06-30)
+
+### Added
+
+- **Soniox v5 real-time STT adopted (both SDKs).** `SonioxModel` gains
+  `STT_RT_V5 = "stt-rt-v5"` and the default model flips `stt-rt-v4` →
+  `stt-rt-v5` (the GA v5 model, released 2026-06-16); `v4`/`v3`/`v2` stay
+  reachable for back-compat. v5 is fully API-compatible (same WS endpoint,
+  in-band `api_key`, request/token-stream shape), so this is a model-id swap
+  plus two new opt-in v5 endpoint controls (`endpoint_sensitivity` /
+  `endpointSensitivity` in `[-1.0, 1.0]`; `endpoint_latency_adjustment_level` /
+  `endpointLatencyAdjustmentLevel` in `0|1|2|3`), omitted from the wire when
+  unset so existing behavior is byte-identical. Real-time rate unchanged at
+  $0.12/hr ≈ $0.002/min (https://soniox.com/pricing).
+- **Soniox TTS provider (both SDKs).** `SonioxTTS` over the REST one-shot
+  `https://tts-rt.soniox.com/tts` bytes endpoint (`tts-rt-v1`, default voice
+  `Adrian`, shares the `SONIOX_API_KEY` credential with Soniox STT).
+  `forTwilio` / `forTelnyx` emit `pcm_mulaw` @ 8 kHz natively for carrier-wire
+  passthrough (no resampling). Wired end-to-end: package-root export
+  (`SonioxTTS`), `providers.soniox_tts()` / `sonioxTts()` config helper,
+  `_create_tts_from_config` `"soniox_tts"` branch, and a pricing entry modeled
+  per-1k-chars from the $0.70/hr headline (~$0.013/1k chars; native billing is
+  token-based — https://soniox.com/pricing). Reuses the existing `[soniox]`
+  extra (aiohttp).
+- **Sarvam AI TTS provider for Indian languages (both SDKs).** `SarvamTTS` over
+  the REST `https://api.sarvam.ai/text-to-speech` endpoint — Bulbul v3 (default)
+  / v2 across 11 Indian languages (Hindi, Bengali, Tamil, Telugu, Kannada,
+  Malayalam, Marathi, Gujarati, Punjabi, Odia, Indian English) plus code-mixed
+  text. `forTwilio` / `forTelnyx` emit `mulaw` @ 8 kHz natively (carrier-wire
+  passthrough). Wired end-to-end: package-root export (`SarvamTTS`),
+  `providers.sarvam()` config helper, `_create_tts_from_config` `"sarvam"`
+  branch, a new `[sarvam]` pyproject extra (aiohttp), and a per-1k-chars pricing
+  entry — Bulbul v3 ≈ $0.036/1k (Rs 30/10k), v2 ≈ $0.018/1k (Rs 15/10k); INR is
+  authoritative, USD indicative (https://www.sarvam.ai/api-pricing).
+- **Engine markers shipped: `GeminiLive`, `GeminiCascade`, and a native
+  `InworldRealtime`.** 0.7.0 exported the Gemini pipeline factory + adapter but
+  not the `GeminiLive` engine marker, so `new GeminiLive({...})` / the engine
+  import failed at runtime; and there was no native Inworld realtime engine.
+  Now `import { GeminiLive, GeminiCascade, InworldRealtime } from "getpatter"`
+  resolves at runtime. The richer `GeminiLiveAdapter` (mulaw8↔PCM telephony
+  transcode, apiVersion auto-detect, `GEMINI_LIVE_3_1_FLASH_PREVIEW`) plus
+  `GeminiSTT`/`GeminiTTS` are integrated; `InworldRealtimeAdapter` subclasses the
+  OpenAI Realtime adapter and overrides only the transport
+  (`wss://api.inworld.ai/v1/realtime`, Bearer/JWT) via Inworld's OpenAI-Realtime
+  migration path. Backward compatible — OpenAIRealtime / OpenAIRealtime2 /
+  Ultravox / ConvAI unchanged.
+
+### Fixed
+
+- **Gemini Live spoke the model's "thinking" before the reply** (native-audio,
+  every turn). The Live setup now always sends `thinkingConfig` with a voice
+  default of `thinkingBudget: 0` (OFF), opt-in via `thinking`/`thinkingBudget`
+  on `GeminiLiveOptions`; and the adapter defensively drops any `thought===true`
+  part from BOTH the audio stream and the text transcript (never logged).
+- **`gemini-3.1-flash-live-preview` dropped the call with a silent "session
+  ready timeout".** It is a native-audio model served only on `v1alpha`, but its
+  id lacks the `native-audio` token so the heuristic chose `v1beta`. New
+  `geminiRequiresV1Alpha()` selects `v1alpha` for native-audio AND
+  `flash-live-preview` (explicit `apiVersion` overrides); connect failures now
+  throw a clear, actionable error (model id + resolved apiVersion + root causes)
+  instead of dead air.
+
+### Changed
+
+- **`@google/genai` peerDependency bumped `^0.3.0` → `>=2.0.0`** (kept optional)
+  for the 2.x unified SDK, so `npm install getpatter` alongside
+  `@google/genai@^2.x` no longer needs `--legacy-peer-deps`.
+- **`create-getpatter` launcher realigned to the SDK version (lockstep).** The
+  launcher pins the `getpatter` version it bootstraps to its own version, so it
+  now tracks the SDK again (`npm create getpatter` provisions the current SDK).
+
+### Security
+
+- **Media-stream WebSockets are now authenticated (both SDKs, all carriers) —
+  fixes #204.** The carrier webhook HTTP routes were signature-validated, but
+  the media-stream WS endpoints (`/ws/stream/…` Twilio, `/ws/telnyx/stream/…`,
+  `/ws/plivo/stream/…`) accepted any peer with an attacker-chosen `call_id`
+  (the only control was a DoS per-IP cap). Anyone who could reach the public
+  host could open the socket, send a `start` frame, and drive a full
+  STT→LLM→TTS session on the operator's provider keys (toll fraud) or converse
+  to extract the agent's system prompt + tool list. Now the signature-validated
+  webhook (which builds the stream URL/TwiML) mints a high-entropy per-call
+  token, delivers it on each carrier's existing custom channel (Twilio
+  `<Parameter>` → `customParameters`, Telnyx URL query, Plivo `extra_headers`),
+  and the WS handler constant-time-validates it **before** opening any provider
+  session — an unauthenticated peer is closed (WS 1008) with no provider connect
+  and no TTS. Fail-closed by default via the new `require_stream_auth` /
+  `requireStreamAuth` option (opt-out for operators serving custom TwiML, which
+  then logs a warning). The token is never logged. The webhook mints only for a
+  legitimate (signed) carrier, so the token is a shared secret an unsigned
+  attacker cannot obtain. Backward compatible for the standard `serve()`
+  inbound + outbound path (the SDK mints/embeds/validates transparently). Also
+  hardened the forgeable-`X-Forwarded-For` per-IP cap with a global concurrent-
+  WS backstop, documented as DoS-cap-only now that auth is enforced separately.
+
 ## 0.7.0 (2026-06-30)
 
 ### Added

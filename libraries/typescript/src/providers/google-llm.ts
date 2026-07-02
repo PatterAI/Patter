@@ -300,7 +300,23 @@ export function sanitizeGeminiSchema(schema: unknown): unknown {
   if (schema !== null && typeof schema === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
-      if (GEMINI_SCHEMA_KEYS.has(k)) out[k] = sanitizeGeminiSchema(v);
+      if (!GEMINI_SCHEMA_KEYS.has(k)) continue;
+      if (k === 'properties' && v !== null && typeof v === 'object' && !Array.isArray(v)) {
+        // `properties` is a map of PROPERTY NAME -> subschema. The names are
+        // arbitrary (query, to, subject, …) — NOT schema keywords — so they
+        // must be preserved; only each subschema VALUE gets sanitized.
+        // Recursing generically here strips the names (they aren't in
+        // GEMINI_SCHEMA_KEYS), leaving `properties: {}` while `required` still
+        // lists them — which makes Gemini Live reject setup with WS close 1007
+        // "required[0]: property is not defined" (prod 2026-06-18 silence).
+        const props: Record<string, unknown> = {};
+        for (const [propName, propSchema] of Object.entries(v as Record<string, unknown>)) {
+          props[propName] = sanitizeGeminiSchema(propSchema);
+        }
+        out[k] = props;
+      } else {
+        out[k] = sanitizeGeminiSchema(v);
+      }
     }
     return out;
   }

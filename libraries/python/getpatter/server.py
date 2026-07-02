@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import logging
 import os
 import re
+import secrets
 import signal
 import time
 import uuid
@@ -26,6 +28,7 @@ from getpatter.services.call_log import (
     resolve_log_root,
 )
 from getpatter.ssrf import is_internal_ip, resolve_literal_ip
+from getpatter.telephony.common import STREAM_TOKEN_PARAM
 from getpatter.utils.log_sanitize import (
     mask_phone_number,
     safe_path_segment,
@@ -50,6 +53,24 @@ _BLOCKED_WEBHOOK_HOSTNAMES = frozenset(
 # Maximum concurrent WebSocket connections allowed from a single client IP.
 # Mirrors libraries/typescript/src/server.ts:1041 (MAX_WS_PER_IP = 10).
 MAX_WS_PER_IP = 10
+
+# Global concurrent media-stream backstop (#204). The per-IP cap above trusts
+# tunnel headers for its rate-limit key (a tunneled deployment legitimately
+# arrives from loopback and must not share one bucket), so a peer forging
+# ``x-forwarded-for`` behind a non-Cloudflare proxy could otherwise mint a fresh
+# per-IP bucket per connection and open unbounded sockets. Per-call token auth
+# already rejects those peers before any provider work, so this is only a
+# connection-flood DoS; this ceiling caps the total simultaneously-open media
+# WebSockets regardless of source IP so a header-forging flood cannot exhaust
+# memory / fds. Generous vs. any single-box call volume. Kept in parity with the
+# TS ``MAX_WS_TOTAL`` (libraries/typescript/src/server.ts).
+MAX_TOTAL_WS = 500
+
+# SECURITY (#204): per-call stream-auth token lifetime and entropy. The mint ->
+# WS handshake is seconds; a short TTL bounds the replay window while still
+# tolerating a legitimate carrier reconnect. 32 bytes -> ~43 url-safe chars.
+_STREAM_TOKEN_TTL_S = 120.0
+_STREAM_TOKEN_NBYTES = 32
 
 # Hosts that are loopback-only (not reachable from another machine). Used by
 # the dashboard auto-token gate to decide whether the server is "exposed".
@@ -519,6 +540,20 @@ class EmbeddedServer:
         # Per-client-IP active WebSocket counter for DoS protection.
         # Mirrors TS server.ts:1042 (wsConnectionsByIp).
         self._ws_conn_counts: defaultdict[str, int] = defaultdict(int)
+        # SECURITY (#204): fail-closed media-stream auth. When True (default),
+        # a media WS must present a token minted by the signed webhook / the
+        # outbound call. Read via ``getattr`` so LocalConfigs constructed before
+        # this field existed (older tests) default to secure.
+        self._require_stream_auth: bool = getattr(config, "require_stream_auth", True)
+        # Per-server short-TTL token map: ``call_key -> (token, expires_at)``
+        # where ``expires_at`` is a ``time.monotonic()`` deadline. Populated by
+        # ``_mint_stream_token`` at the signed-webhook / outbound stream-URL
+        # build; consumed (kept valid within the TTL) by ``_validate_stream_token``
+        # at WS accept / start-frame. NEVER logged.
+        self._stream_tokens: dict[str, tuple[str, float]] = {}
+        # One-shot latch so the "stream auth disabled" opt-out warning is loud
+        # but not spammed on every connection.
+        self._stream_auth_disabled_warned: bool = False
 
     @property
     def effective_dashboard_token(self) -> str:
@@ -532,6 +567,81 @@ class EmbeddedServer:
         ``EmbeddedServer.resolvedDashboardToken`` getter — see sdk-parity.
         """
         return self._effective_dashboard_token
+
+    # === Per-call media-stream authentication (#204) ===
+
+    def _prune_expired_stream_tokens(self) -> None:
+        """Drop expired entries from the token map (opportunistic GC)."""
+        now = time.monotonic()
+        expired = [k for k, (_, exp) in self._stream_tokens.items() if exp <= now]
+        for key in expired:
+            self._stream_tokens.pop(key, None)
+
+    def _mint_stream_token(self, call_key: str) -> str:
+        """Mint + store a high-entropy stream-auth token bound to ``call_key``.
+
+        Called only from SIGNATURE-VALIDATED webhook / outbound stream-URL build
+        sites, so only a legitimate carrier ever receives the returned token.
+        The entry lives ``_STREAM_TOKEN_TTL_S`` seconds (webhook -> WS handshake
+        is seconds). Returns the token to embed in the carrier's custom-param
+        channel. NEVER logged.
+        """
+        self._prune_expired_stream_tokens()
+        token = secrets.token_urlsafe(_STREAM_TOKEN_NBYTES)
+        self._stream_tokens[call_key] = (
+            token,
+            time.monotonic() + _STREAM_TOKEN_TTL_S,
+        )
+        return token
+
+    def _validate_stream_token(self, call_key: str, presented: str) -> bool:
+        """Constant-time check that ``presented`` matches the live token for
+        ``call_key`` and has not expired. Kept valid within the TTL so a
+        legitimate carrier reconnect within the window is NOT single-use
+        rejected. Never raises; never logs the token value.
+        """
+        self._prune_expired_stream_tokens()
+        entry = self._stream_tokens.get(call_key)
+        if entry is None:
+            return False
+        token, expires_at = entry
+        if expires_at <= time.monotonic():
+            self._stream_tokens.pop(call_key, None)
+            return False
+        if not presented:
+            return False
+        # Compare as bytes so an attacker-supplied non-ASCII string can't raise
+        # (``hmac.compare_digest`` rejects non-ASCII str). Still constant-time.
+        return hmac.compare_digest(
+            token.encode("utf-8"), str(presented).encode("utf-8")
+        )
+
+    def _warn_stream_auth_disabled_once(self) -> None:
+        """Emit a single loud WARNING when the auth opt-out is in effect."""
+        if self._stream_auth_disabled_warned:
+            return
+        self._stream_auth_disabled_warned = True
+        logger.warning(
+            "SECURITY: media-stream authentication is DISABLED "
+            "(require_stream_auth=False). Media WebSockets are accepted without "
+            "a per-call token — an unauthenticated peer that reaches this host "
+            "can drive a full STT/LLM/TTS session on your provider keys. Only "
+            "use this for custom TwiML/XML that cannot carry the token."
+        )
+
+    def _check_stream_auth(self, call_key: str, presented: str) -> bool:
+        """Gate a media stream for ``call_key``.
+
+        Fail-closed by default: when ``require_stream_auth`` is True, the
+        presented token must match the minted token and be unexpired. When the
+        operator explicitly opts out (``require_stream_auth=False``), always
+        allow but log a loud one-time warning. Returning False means the caller
+        MUST close the socket (WS 1008) before opening any provider session.
+        """
+        if not self._require_stream_auth:
+            self._warn_stream_auth_disabled_once()
+            return True
+        return self._validate_stream_token(call_key, presented)
 
     # === Carrier-neutral local recording ===
 
@@ -1280,8 +1390,18 @@ class EmbeddedServer:
             # masked. Same for `To` / `Called`.
             caller = form_data.get("From", "") or form_data.get("Caller", "")
             callee = form_data.get("To", "") or form_data.get("Called", "")
+            # SECURITY (#204): this webhook is signature-validated above, so
+            # only a legitimate carrier reaches here. Mint a per-call token
+            # bound to the CallSid (== the WS path ``call_id``) and embed it as
+            # a <Parameter> so the media WS can prove it originated from this
+            # signed webhook before any provider session is opened.
+            stream_token = self._mint_stream_token(call_sid)
             twiml = twilio_webhook_handler(
-                call_sid, caller, callee, self.config.webhook_url
+                call_sid,
+                caller,
+                callee,
+                self.config.webhook_url,
+                stream_token=stream_token,
             )
             return Response(content=twiml, media_type="text/xml")
 
@@ -1441,8 +1561,22 @@ class EmbeddedServer:
 
         @app.websocket("/ws/stream/{call_id}")
         async def twilio_stream_handler(websocket: WebSocket, call_id: str):
-            # Per-IP DoS cap (mirrors TS server.ts:1041-1064).
+            # DoS cap only (mirrors TS server.ts:1041-1064). NOTE: the per-IP
+            # key trusts the tunnel headers (cf-connecting-ip / x-forwarded-for)
+            # via ``_client_ip_for_ws`` — a header-forging peer can therefore
+            # get a fresh bucket. That is acceptable because it is a DoS cap,
+            # not an auth control: media-stream AUTHENTICATION is enforced
+            # separately by the per-call token below (rejected before any
+            # provider work). ``MAX_TOTAL_WS`` is the global backstop so a
+            # header-forging flood cannot open unbounded sockets.
             client_ip = _client_ip_for_ws(websocket)
+            if len(self._active_connections) >= MAX_TOTAL_WS:
+                logger.warning(
+                    "WebSocket upgrade rejected: server at capacity (%d open)",
+                    MAX_TOTAL_WS,
+                )
+                await websocket.close(code=1008, reason="Server at capacity")
+                return
             if self._ws_conn_counts[client_ip] >= MAX_WS_PER_IP:
                 logger.warning(
                     "WebSocket upgrade rejected: too many connections from %s",
@@ -1463,6 +1597,13 @@ class EmbeddedServer:
                     pop_prewarm_audio=self.pop_prewarm_audio,
                     pop_prewarmed_connections=self.pop_prewarmed_connections,
                     openai_key=self.config.openai_key,
+                    # SECURITY (#204): validate the <Parameter>-borne token
+                    # (start.customParameters) against the token minted for this
+                    # call_id BEFORE the provider session opens. Fail-closed by
+                    # default; the opt-out path allows + warns once.
+                    validate_stream_token=(
+                        lambda tok, _ck=call_id: self._check_stream_auth(_ck, tok)
+                    ),
                     on_call_start=_start,
                     on_call_end=_end,
                     on_transcript=_transcript,
@@ -1669,9 +1810,15 @@ class EmbeddedServer:
                     # answer body removes both the ``call.answered`` webhook
                     # round-trip and a second POST (~100-200 ms saved per
                     # inbound call). Incoming legs only — see above.
+                    # SECURITY (#204): mint a per-call token (this webhook is
+                    # Ed25519-verified above) bound to call_control_id (== the
+                    # WS path call_id) and append it to the query string Telnyx
+                    # preserves; the WS handler validates it at accept.
+                    _stream_token = self._mint_stream_token(call_control_id)
                     stream_url = (
                         f"wss://{self.config.webhook_url}/ws/telnyx/stream/{_quote(call_control_id, safe='')}"
                         f"?caller={_quote(caller)}&callee={_quote(callee)}"
+                        f"&{STREAM_TOKEN_PARAM}={_quote(_stream_token, safe='')}"
                     )
                     logger.info(
                         "Telnyx call.initiated %s — answering with inline stream",
@@ -1711,9 +1858,13 @@ class EmbeddedServer:
                         # this POST is the ONLY place outbound audio is wired.
                         out_caller = str(payload.get("from", "") or "")
                         out_callee = str(payload.get("to", "") or "")
+                        # SECURITY (#204): outbound leg minted here (verified
+                        # webhook), keyed to call_control_id == WS path call_id.
+                        _stream_token = self._mint_stream_token(call_control_id)
                         stream_url = (
                             f"wss://{self.config.webhook_url}/ws/telnyx/stream/{_quote(call_control_id, safe='')}"
                             f"?caller={_quote(out_caller)}&callee={_quote(out_callee)}"
+                            f"&{STREAM_TOKEN_PARAM}={_quote(_stream_token, safe='')}"
                         )
                         logger.info(
                             "Telnyx call.answered %s (outgoing) — starting media stream",
@@ -1894,14 +2045,35 @@ class EmbeddedServer:
 
         @app.websocket("/ws/telnyx/stream/{call_id}")
         async def telnyx_stream_handler(websocket: WebSocket, call_id: str):
-            # Per-IP DoS cap (mirrors TS server.ts:1041-1064).
+            # DoS cap only — see the Twilio handler note: the per-IP key trusts
+            # tunnel headers, so auth is enforced separately (the query token
+            # validated below) and MAX_TOTAL_WS is the global flood backstop.
             client_ip = _client_ip_for_ws(websocket)
+            if len(self._active_connections) >= MAX_TOTAL_WS:
+                logger.warning(
+                    "WebSocket upgrade rejected: server at capacity (%d open)",
+                    MAX_TOTAL_WS,
+                )
+                await websocket.close(code=1008, reason="Server at capacity")
+                return
             if self._ws_conn_counts[client_ip] >= MAX_WS_PER_IP:
                 logger.warning(
                     "WebSocket upgrade rejected: too many connections from %s",
                     client_ip,
                 )
                 await websocket.close(code=1008, reason="Too Many Requests")
+                return
+            # SECURITY (#204): Telnyx carries the token on the query string it
+            # preserves, so validate as early as possible — at accept, before
+            # any frame is read and before the provider session is opened. On a
+            # missing/invalid/expired token, close with 1008 and never call the
+            # bridge (no provider connection, no TTS). No PII / no token logged.
+            _presented = websocket.query_params.get(STREAM_TOKEN_PARAM, "")
+            if not self._check_stream_auth(call_id, _presented):
+                logger.warning(
+                    "Telnyx media stream rejected: stream authentication failed"
+                )
+                await websocket.close(code=1008, reason="Stream auth failed")
                 return
             self._ws_conn_counts[client_ip] += 1
             self._active_connections.add(websocket)
@@ -2010,8 +2182,18 @@ class EmbeddedServer:
             request_uuid = form.get("RequestUUID", "")
             if request_uuid and call_uuid:
                 self.alias_call_id(request_uuid, call_uuid)
+            # SECURITY (#204): this route is V3-signature-validated above. Mint a
+            # per-call token keyed to the same call_id used for the WS path
+            # (``call_uuid or "outbound"``) and deliver it via extra_headers so
+            # the media WS can prove provenance before any provider session.
+            _stream_call_key = call_uuid or "outbound"
+            stream_token = self._mint_stream_token(_stream_call_key)
             xml = plivo_webhook_handler(
-                call_uuid or "outbound", caller, callee, self.config.webhook_url
+                _stream_call_key,
+                caller,
+                callee,
+                self.config.webhook_url,
+                stream_token=stream_token,
             )
             return Response(content=xml, media_type="text/xml")
 
@@ -2146,8 +2328,17 @@ class EmbeddedServer:
 
         @app.websocket("/ws/plivo/stream/{call_id}")
         async def plivo_stream_websocket(websocket: WebSocket, call_id: str):
-            # Per-IP DoS cap (mirrors the Twilio / Telnyx handlers).
+            # DoS cap only — see the Twilio handler note: header-trusted per-IP
+            # key, auth enforced separately (the extra-header token validated in
+            # the bridge before handler.start()), MAX_TOTAL_WS as flood backstop.
             client_ip = _client_ip_for_ws(websocket)
+            if len(self._active_connections) >= MAX_TOTAL_WS:
+                logger.warning(
+                    "WebSocket upgrade rejected: server at capacity (%d open)",
+                    MAX_TOTAL_WS,
+                )
+                await websocket.close(code=1008, reason="Server at capacity")
+                return
             if self._ws_conn_counts[client_ip] >= MAX_WS_PER_IP:
                 logger.warning(
                     "WebSocket upgrade rejected: too many connections from %s",
@@ -2167,6 +2358,12 @@ class EmbeddedServer:
                     pop_prewarm_audio=self.pop_prewarm_audio,
                     pop_prewarmed_connections=self.pop_prewarmed_connections,
                     openai_key=self.config.openai_key,
+                    # SECURITY (#204): validate the X-Patter-Stream-Token
+                    # extra-header against the token minted for this call_id
+                    # BEFORE the provider session opens. Fail-closed by default.
+                    validate_stream_token=(
+                        lambda tok, _ck=call_id: self._check_stream_auth(_ck, tok)
+                    ),
                     on_call_start=_start,
                     on_call_end=_end,
                     on_transcript=_transcript,

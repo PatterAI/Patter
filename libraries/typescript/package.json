@@ -1,6 +1,6 @@
 {
   "name": "getpatter",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Open-source voice AI SDK — connect any AI agent to real phone calls in 4 lines of code",
   "license": "MIT",
   "author": {
@@ -78,7 +78,7 @@
     "onnxruntime-node": "~1.18.0"
   },
   "peerDependencies": {
-    "@google/genai": "^0.3.0"
+    "@google/genai": ">=2.0.0"
   },
   "peerDependenciesMeta": {
     "@google/genai": {
@@ -86,6 +86,7 @@
     }
   },
   "devDependencies": {
+    "@google/genai": "^2.8.0",
     "@types/express": "^5.0.6",
     "@types/ws": "^8.5.0",
     "@vitest/coverage-v8": "^3.2.4",
