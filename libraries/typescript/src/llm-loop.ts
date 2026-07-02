@@ -872,6 +872,12 @@ export class LLMLoop {
   // Rolling summary prepended to every prompt (set by the StreamHandler's
   // ContextCompactor when it folds old turns away). '' == no summary.
   private _contextSummary = '';
+  // One-shot re-delivery nudge (opt-in ``AgentOptions.redeliverInterrupted``).
+  // Armed by the StreamHandler on the turn after a barge-in left an un-heard
+  // remainder; ``buildMessages`` injects it as an extra system message and
+  // consumes it (one-shot) so it never re-injects on a later turn. '' == none.
+  // See ``services/redelivery.ts``.
+  private _redeliveryNudge = '';
   // Optional estimated-token budget for the warning (undefined == no warning).
   private readonly _contextTokenBudget?: number;
   // One-shot guard so the over-budget warning logs once per call.
@@ -1028,6 +1034,19 @@ export class LLMLoop {
    */
   setContextSummary(summary: string): void {
     this._contextSummary = summary || '';
+  }
+
+  /**
+   * Arm a ONE-SHOT re-delivery nudge system message for the next prompt. Wired
+   * by the `StreamHandler` on the turn after a confirmed barge-in left a
+   * non-trivial un-heard remainder (opt-in `AgentOptions.redeliverInterrupted`).
+   * `buildMessages` inserts it as an extra system message (after the main
+   * prompt and any rolling compaction summary) and CONSUMES it on that first
+   * build, so it applies to exactly one turn and never re-injects later.
+   * Passing `''` clears it. Mirrors Python `LLMLoop.set_redelivery_nudge`.
+   */
+  setRedeliveryNudge(nudge: string): void {
+    this._redeliveryNudge = nudge || '';
   }
 
   /**
@@ -1371,6 +1390,15 @@ export class LLMLoop {
           'Summary of earlier conversation (older turns have been condensed):\n' +
           this._contextSummary,
       });
+    }
+
+    // One-shot re-delivery nudge (opt-in `AgentOptions.redeliverInterrupted`):
+    // a separate system message — NOT concatenated into the main system prompt
+    // — injected for exactly the turn after a barge-in and consumed here so it
+    // never re-injects on a later turn.
+    if (this._redeliveryNudge) {
+      messages.push({ role: 'system', content: this._redeliveryNudge });
+      this._redeliveryNudge = '';
     }
 
     for (const entry of history) {

@@ -91,6 +91,17 @@ export type {
   EvaluateContext as BargeInEvaluateContext,
   MinWordsStrategyOptions,
 } from "./services/barge-in-strategies";
+export {
+  MinUnsaidWordsPolicy,
+  buildRedeliveryNudge,
+  DEFAULT_MIN_UNSAID_WORDS,
+  DEFAULT_REDELIVERY_POLICY,
+} from "./services/redelivery";
+export type {
+  RedeliveryPolicy,
+  RedeliveryDecisionContext,
+  MinUnsaidWordsPolicyOptions,
+} from "./services/redelivery";
 export type {
   LLMProvider,
   LLMChunk,

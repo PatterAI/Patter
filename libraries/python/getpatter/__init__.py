@@ -63,6 +63,12 @@ from getpatter.services.barge_in_strategies import (
     evaluate_strategies as evaluate_barge_in_strategies,
     reset_strategies as reset_barge_in_strategies,
 )
+from getpatter.services.redelivery import (
+    DEFAULT_MIN_UNSAID_WORDS,
+    MinUnsaidWordsPolicy,
+    RedeliveryPolicy,
+    build_redelivery_nudge,
+)
 from getpatter.exceptions import (
     ErrorCode,
     PatterError,
@@ -477,6 +483,10 @@ __all__ = [
     "MinWordsStrategy",
     "evaluate_barge_in_strategies",
     "reset_barge_in_strategies",
+    "RedeliveryPolicy",
+    "MinUnsaidWordsPolicy",
+    "build_redelivery_nudge",
+    "DEFAULT_MIN_UNSAID_WORDS",
     "ErrorCode",
     "PatterError",
     "PatterConfigError",

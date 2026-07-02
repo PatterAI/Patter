@@ -28,6 +28,8 @@ import {
   pcm16SilenceFrame,
 } from './audio/pacer';
 import { LLMLoop } from './llm-loop';
+import { DEFAULT_REDELIVERY_POLICY, buildRedeliveryNudge } from './services/redelivery';
+import type { RedeliveryPolicy } from './services/redelivery';
 import { RemoteMessageHandler, isRemoteUrl, isWebSocketUrl } from './remote-message';
 import { createHistoryManager } from './handler-utils';
 import { ContextCompactor } from './compaction';
@@ -900,6 +902,21 @@ export class StreamHandler {
    * state is dropped and the agent finishes its sentence.
    */
   private readonly bargeInStrategies: readonly import('./services/barge-in-strategies').BargeInStrategy[];
+  /**
+   * Opt-in barge-in RE-DELIVERY (see ``services/redelivery.ts``). When
+   * ``redeliverInterrupted`` is set, a confirmed barge-in captures the
+   * ``{heard, unsaid}`` split (``maybeArmRedelivery``) and the next user turn
+   * injects a one-shot system nudge on the LLM loop
+   * (``armPendingRedeliveryNudge``). Default off ⇒ no behaviour change.
+   */
+  private readonly redeliverInterrupted: boolean;
+  private readonly redeliveryPolicy: RedeliveryPolicy;
+  /**
+   * Armed ``{heard, unsaid}`` awaiting injection on the NEXT turn, or ``null``
+   * when nothing is pending. Captured BEFORE ``cancelSpeaking`` resets the
+   * turn's playback state.
+   */
+  private pendingRedelivery: { heard: string; unsaid: string } | null = null;
   /** Pending-barge-in confirmation timeout in milliseconds. */
   private readonly bargeInConfirmMs: number;
   /** Wall-clock (ms) when the current pending barge-in started, or
@@ -1541,6 +1558,55 @@ export class StreamHandler {
   }
 
   /**
+   * Capture the ``{heard, unsaid}`` split for opt-in re-delivery. Called from
+   * the top of ``cancelSpeaking`` (after the callers' completed-turn
+   * truncation, before the playback cursor is reset). No-op unless
+   * ``redeliverInterrupted`` is set, no segments were tracked, or the
+   * ``RedeliveryPolicy`` declines. When it arms, ``pendingRedelivery`` holds
+   * ``{heard, unsaid}`` for the next turn. Mirrors Python
+   * ``_maybe_arm_redelivery``.
+   */
+  private maybeArmRedelivery(): void {
+    if (!this.redeliverInterrupted) return;
+    const split = this.heardResponseSplit();
+    if (split === null) return;
+    let should: boolean;
+    try {
+      should = this.redeliveryPolicy.shouldRedeliver({
+        heard: split.heard,
+        unsaid: split.unsaid,
+        heardEverything: split.heardEverything,
+      });
+    } catch (err) {
+      getLogger().warn(
+        `RedeliveryPolicy threw; not arming re-delivery: ${String(err)}`,
+      );
+      return;
+    }
+    if (!should) return;
+    this.pendingRedelivery = { heard: split.heard, unsaid: split.unsaid };
+    const unheard = split.unsaid.trim().split(/\s+/).filter(Boolean).length;
+    getLogger().debug(`Re-delivery armed: ${unheard} word(s) un-heard`);
+  }
+
+  /**
+   * Inject any armed re-delivery as a one-shot LLM system nudge. Called right
+   * before dispatching a user turn to the built-in LLM loop. Disarms
+   * ``pendingRedelivery`` unconditionally (so it can never leak to a later
+   * turn) and, when a loop exists, sets the nudge on it — the loop consumes it
+   * in ``buildMessages`` for exactly this turn. No-op when nothing is armed or
+   * there is no built-in LLM loop (e.g. the ``onMessage`` path). Mirrors Python
+   * ``_arm_pending_redelivery_nudge``.
+   */
+  private armPendingRedeliveryNudge(): void {
+    const pending = this.pendingRedelivery;
+    if (pending === null) return;
+    this.pendingRedelivery = null;
+    if (this.llmLoop === null) return;
+    this.llmLoop.setRedeliveryNudge(buildRedeliveryNudge(pending.heard, pending.unsaid));
+  }
+
+  /**
    * Atomically end speaking AND invalidate any pending grace timer.
    * Use instead of ``this.isSpeaking = false`` at barge-in sites.
    *
@@ -1548,6 +1614,13 @@ export class StreamHandler {
    * billing tokens we will never speak.
    */
   private cancelSpeaking(): void {
+    // Opt-in re-delivery: capture what the caller HEARD vs the un-heard
+    // remainder NOW — the reset below drops ``playbackBufferedUntil`` (the
+    // split's input). The callers run ``maybeTruncateCompletedTurnHistory``
+    // just before this, mirroring Python's ``_do_cancel_for_barge_in`` order.
+    // Armed here, injected as a one-shot nudge on the next user turn. No-op
+    // unless ``redeliverInterrupted`` is set and the policy approves.
+    this.maybeArmRedelivery();
     this.speakingGeneration++; // invalidates pending grace timers
     this.isSpeaking = false;
     this.tailGraceActive = false;
@@ -2101,6 +2174,8 @@ export class StreamHandler {
     }
 
     this.bargeInStrategies = (deps.agent.bargeInStrategies ?? []).slice();
+    this.redeliverInterrupted = deps.agent.redeliverInterrupted ?? false;
+    this.redeliveryPolicy = deps.agent.redeliveryPolicy ?? DEFAULT_REDELIVERY_POLICY;
     const confirmMs = deps.agent.bargeInConfirmMs;
     this.bargeInConfirmMs =
       typeof confirmMs === 'number' && Number.isFinite(confirmMs) && confirmMs > 0
@@ -5628,6 +5703,10 @@ export class StreamHandler {
         { role: 'user', text: filteredText, timestamp: Date.now() },
       ];
       const callCtx = { call_id: this.callId, caller: this.caller, callee: this.callee };
+      // Inject any armed re-delivery nudge as a one-shot system message for
+      // this turn (disarms it either way — never leaks to a later turn).
+      // Opt-in; no-op by default.
+      this.armPendingRedeliveryNudge();
       tokenIter = this.llmLoop!.run(
         filteredText,
         snapshot,
@@ -5915,6 +5994,11 @@ export class StreamHandler {
       await this.synthesizeSentence(sentenceText, hookExecutor, hookCtx, ttsFirstByteSent);
     };
     let firstSentenceEmitted = false;
+
+    // Inject any armed re-delivery nudge as a one-shot system message for this
+    // turn (disarms it either way — never leaks to a later turn). Opt-in;
+    // no-op by default.
+    this.armPendingRedeliveryNudge();
 
     try {
       try {

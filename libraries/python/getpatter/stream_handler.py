@@ -3441,6 +3441,23 @@ class PipelineStreamHandler(StreamHandler):
         self._barge_in_strategies: tuple = tuple(
             getattr(agent, "barge_in_strategies", ()) or ()
         )
+        # Opt-in barge-in RE-DELIVERY (see ``getpatter.services.redelivery``).
+        # When ``redeliver_interrupted`` is set, a confirmed barge-in captures
+        # the ``(heard, unsaid)`` split (``_maybe_arm_redelivery``) and the next
+        # user turn injects a one-shot system nudge on the LLM loop
+        # (``_arm_pending_redelivery_nudge``). Default off ⇒ no behaviour change.
+        self._redeliver_interrupted: bool = bool(
+            getattr(agent, "redeliver_interrupted", False)
+        )
+        from getpatter.services.redelivery import DEFAULT_REDELIVERY_POLICY
+
+        self._redelivery_policy = (
+            getattr(agent, "redelivery_policy", None) or DEFAULT_REDELIVERY_POLICY
+        )
+        # Armed ``(heard, unsaid)`` awaiting injection on the NEXT turn, or
+        # ``None`` when nothing is pending. Captured BEFORE the cancel sequence
+        # resets the turn's playback state.
+        self._pending_redelivery: tuple[str, str] | None = None
         _confirm_ms = getattr(agent, "barge_in_confirm_ms", 1500)
         try:
             self._barge_in_confirm_s: float = max(0.1, float(_confirm_ms) / 1000.0)
@@ -5144,6 +5161,12 @@ class PipelineStreamHandler(StreamHandler):
             # was left unheard (or, for a paused turn, while the frozen
             # pause cursor still does).
             self._maybe_truncate_completed_turn_history()
+            # Opt-in re-delivery: capture what the caller HEARD vs the un-heard
+            # remainder NOW — the cancel sequence below resets
+            # ``_playback_buffered_until`` (the split's input). Armed here,
+            # injected as a one-shot nudge on the next user turn. No-op unless
+            # ``redeliver_interrupted`` is set and the policy approves.
+            self._maybe_arm_redelivery()
             # Pause-and-resume: a kill while paused discards the held
             # buffers (queued sentences + retained audio) and wakes any
             # pause-decision waiter, which then observes the interrupt.
@@ -6432,6 +6455,10 @@ class PipelineStreamHandler(StreamHandler):
                 ),
                 language=getattr(self.agent, "language", "en"),
             )
+            # Inject any armed re-delivery nudge as a one-shot system message
+            # for this turn (disarms it either way — never leaks to a later
+            # turn). Opt-in; no-op by default.
+            self._arm_pending_redelivery_nudge()
             result = self._llm_loop.run(
                 filtered_text,
                 snapshot,
@@ -6782,6 +6809,10 @@ class PipelineStreamHandler(StreamHandler):
             if self.metrics is not None:
                 self.metrics.record_turn_committed()
             _close_endpoint_span()
+            # Inject any armed re-delivery nudge as a one-shot system message
+            # for this turn (disarms it either way — never leaks to a later
+            # turn). Opt-in; no-op by default.
+            self._arm_pending_redelivery_nudge()
             result = self._llm_loop.run(
                 filtered_text,
                 history_snapshot,
@@ -7936,6 +7967,65 @@ class PipelineStreamHandler(StreamHandler):
             if heard_text
             else "[interrupted by caller]"
         )
+
+    def _maybe_arm_redelivery(self) -> None:
+        """Capture the ``(heard, unsaid)`` split for opt-in re-delivery.
+
+        Called from :meth:`_do_cancel_for_barge_in` right after the completed-
+        turn truncation and BEFORE the cancel sequence resets the playback
+        cursor. No-op unless ``agent.redeliver_interrupted`` is set, no segments
+        were tracked, or the :class:`RedeliveryPolicy` declines. When it arms,
+        ``_pending_redelivery`` holds ``(heard, unsaid)`` for the next turn.
+        Mirrors TS ``maybeArmRedelivery``.
+        """
+        if not getattr(self, "_redeliver_interrupted", False):
+            return
+        split = self._heard_response_split()
+        if split is None:
+            return
+        heard, unsaid, heard_everything = split
+        from getpatter.services.redelivery import DEFAULT_REDELIVERY_POLICY
+
+        policy = getattr(self, "_redelivery_policy", None) or DEFAULT_REDELIVERY_POLICY
+        try:
+            should = policy.should_redeliver(
+                heard=heard, unsaid=unsaid, heard_everything=heard_everything
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "RedeliveryPolicy %s raised; not arming re-delivery: %s",
+                type(policy).__name__,
+                exc,
+            )
+            return
+        if not should:
+            return
+        self._pending_redelivery = (heard, unsaid)
+        logger.debug(
+            "Re-delivery armed: %d word(s) un-heard", len(unsaid.split())
+        )
+
+    def _arm_pending_redelivery_nudge(self) -> None:
+        """Inject any armed re-delivery as a one-shot LLM system nudge.
+
+        Called right before dispatching a user turn to the built-in LLM loop.
+        Disarms ``_pending_redelivery`` unconditionally (so it can never leak
+        to a later turn) and, when a loop exists, sets the nudge on it — the
+        loop consumes it in ``_build_messages`` for exactly this turn. No-op
+        when nothing is armed or there is no built-in LLM loop (e.g. the
+        ``on_message`` path). Mirrors TS ``armPendingRedeliveryNudge``.
+        """
+        pending = getattr(self, "_pending_redelivery", None)
+        if pending is None:
+            return
+        self._pending_redelivery = None
+        loop = getattr(self, "_llm_loop", None)
+        if loop is None:
+            return
+        from getpatter.services.redelivery import build_redelivery_nudge
+
+        heard, unsaid = pending
+        loop.set_redelivery_nudge(build_redelivery_nudge(heard, unsaid))
 
     def _can_barge_in(self) -> bool:
         """Whether barge-in is allowed to fire right now.

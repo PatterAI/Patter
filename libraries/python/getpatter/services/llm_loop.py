@@ -962,6 +962,12 @@ class LLMLoop:
         # Rolling summary prepended to every prompt (set by the StreamHandler's
         # ContextCompactor when it folds old turns away). "" == no summary.
         self._context_summary: str = ""
+        # One-shot re-delivery nudge (opt-in ``Agent.redeliver_interrupted``).
+        # Armed by the StreamHandler on the turn after a barge-in left an
+        # un-heard remainder; ``_build_messages`` injects it as an extra system
+        # message and consumes it (one-shot) so it is never re-injected on a
+        # later turn. "" == no nudge. See ``services/redelivery.py``.
+        self._redelivery_nudge: str = ""
         # Optional estimated-token budget for the warning (None == no warning).
         self._context_token_budget = context_token_budget
         # One-shot guard so the over-budget warning logs once per call.
@@ -1051,6 +1057,19 @@ class LLMLoop:
         Mirrors TS ``LLMLoop.setContextSummary``.
         """
         self._context_summary = summary or ""
+
+    def set_redelivery_nudge(self, nudge: str) -> None:
+        """Arm a ONE-SHOT re-delivery nudge system message for the next prompt.
+
+        Wired by :class:`StreamHandler` on the turn after a confirmed barge-in
+        left a non-trivial un-heard remainder (opt-in
+        ``Agent.redeliver_interrupted``). ``_build_messages`` inserts it as an
+        extra system message (after the main prompt and any rolling compaction
+        summary) and CONSUMES it on that first build, so it applies to exactly
+        one turn and never re-injects later. Passing ``""`` clears it. Mirrors
+        TS ``LLMLoop.setRedeliveryNudge``.
+        """
+        self._redelivery_nudge = nudge or ""
 
     async def summarize(
         self, prior_summary: str, old_messages: list[dict], target_tokens: int
@@ -1500,6 +1519,15 @@ class LLMLoop:
                     ),
                 }
             )
+        # One-shot re-delivery nudge (opt-in ``Agent.redeliver_interrupted``):
+        # a separate system message — NOT concatenated into the main system
+        # prompt — injected for exactly the turn after a barge-in and consumed
+        # here so it never re-injects on a later turn. ``getattr`` default keeps
+        # test doubles built via ``__new__`` (bypassing ``__init__``) working.
+        redelivery_nudge = getattr(self, "_redelivery_nudge", "")
+        if redelivery_nudge:
+            messages.append({"role": "system", "content": redelivery_nudge})
+            self._redelivery_nudge = ""
         for entry in history:
             role = entry.get("role", "user")
             text = entry.get("text", "")

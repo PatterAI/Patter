@@ -20,6 +20,7 @@ import type { Tool as ToolInstance } from "./public-api";
 import type { STTAdapter, TTSAdapter } from "./provider-factory";
 import type { LLMProvider } from "./llm-loop";
 import type { BargeInStrategy } from "./services/barge-in-strategies";
+import type { RedeliveryPolicy } from "./services/redelivery";
 import type { CallMetrics, CostBreakdown } from "./metrics";
 
 /** Inbound message handed to a `MessageHandler` per turn (legacy single-turn API). */
@@ -971,6 +972,26 @@ export interface AgentOptions {
    *   (a backchannel — not an interruption — in metrics).
    */
   readonly bargeInMode?: 'cancel' | 'pause_resume';
+  /**
+   * Opt-in barge-in RE-DELIVERY (pipeline mode). When ``true``, a confirmed
+   * barge-in that leaves a non-trivial un-heard remainder captures the
+   * ``{heard, unsaid}`` split and, on the NEXT user turn, injects a one-shot
+   * system nudge asking the LLM to answer the caller's new message first and
+   * then resume the unfinished idea naturally (instead of silently dropping
+   * what the caller never heard). Default ``false`` ⇒ zero behaviour change.
+   * No-op in realtime / ConvAI modes (no heard/unsaid split).
+   *
+   * See ``getpatter`` exports ``RedeliveryPolicy`` / ``MinUnsaidWordsPolicy``
+   * for the decision protocol and the default implementation.
+   */
+  readonly redeliverInterrupted?: boolean;
+  /**
+   * Optional custom policy deciding whether an interrupted turn's un-heard
+   * remainder is worth resuming. When omitted the default
+   * ``MinUnsaidWordsPolicy`` is used. Only consulted when
+   * ``redeliverInterrupted`` is ``true``.
+   */
+  readonly redeliveryPolicy?: RedeliveryPolicy;
   /**
    * When ``true`` (default), ``Patter.call`` warms up the STT, TTS, and
    * LLM provider connections in parallel with the carrier-side

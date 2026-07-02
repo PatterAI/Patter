@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     )
     from getpatter.services.barge_in_strategies import BargeInStrategy
     from getpatter.services.llm_loop import LLMProvider
+    from getpatter.services.redelivery import RedeliveryPolicy
 
 logger = logging.getLogger("getpatter")
 
@@ -785,6 +786,21 @@ class Agent:
     #     re-billing TTS, and the event is recorded as a false interruption
     #     (a backchannel — not an interruption — in metrics).
     barge_in_mode: str = "cancel"
+    # Opt-in barge-in RE-DELIVERY (pipeline mode). When ``True``, a confirmed
+    # barge-in that leaves a non-trivial un-heard remainder captures the
+    # ``(heard, unsaid)`` split and, on the NEXT user turn, injects a one-shot
+    # system nudge asking the LLM to answer the caller's new message first and
+    # then resume the unfinished idea naturally (instead of silently dropping
+    # what the caller never heard). Default ``False`` ⇒ zero behaviour change.
+    # No-op in realtime / ConvAI modes (no heard/unsaid split). See
+    # ``getpatter.services.redelivery`` for the :class:`RedeliveryPolicy`
+    # protocol and the :class:`MinUnsaidWordsPolicy` default.
+    redeliver_interrupted: bool = False
+    # Optional custom policy deciding whether an interrupted turn's un-heard
+    # remainder is worth resuming. ``None`` uses
+    # ``redelivery.DEFAULT_REDELIVERY_POLICY`` (:class:`MinUnsaidWordsPolicy`).
+    # Only consulted when ``redeliver_interrupted`` is ``True``.
+    redelivery_policy: "RedeliveryPolicy | None" = None
     # When ``True`` (default), ``Patter.call`` warms up the STT, TTS, and LLM
     # provider connections in parallel with the carrier-side ``initiate_call``
     # request so DNS, TLS, and HTTP/2 handshakes are already complete by the
