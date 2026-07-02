@@ -1,5 +1,60 @@
 ## Unreleased
 
+### Added
+
+- **Opt-in wall-clock outbound audio pacing (pipeline mode).** `Agent.paced_output`
+  (Py) / `AgentOptions.pacedOutput` (TS) routes outbound carrier audio through a
+  fixed 20 ms / 160-byte (μ-law) frame grid instead of the default event-driven
+  burst send. A precomputed silence frame (μ-law `0xFF`×160 / PCM16 zero) fills
+  gaps so an empty queue never stalls the clock and the first tick pays no encode
+  cost (no cold-start latency), and a drift-corrected monotonic-deadline loop
+  keeps the stream wall-clock-aligned — eliminating post-pause bursts. On a
+  barge-in the pacer's queued backlog is dropped in the same beat as the carrier
+  flush. Default off ⇒ byte-identical to today. New `getpatter/audio/pacer.py` /
+  `src/audio/pacer.ts` (`OutboundFramePacer`), wired in `stream_handler`.
+- **Krisp noise-cancellation denoiser selection (bring-your-own-license).**
+  `Agent.denoiser` (Py) / `AgentOptions.denoiser` (TS) selects a Krisp model by
+  its stable id — `"krisp-viva-tel-v2"` (VIVA telephony, NC session) or
+  `"krisp-bvc-o-pro-v3"` (Background Voice Cancellation, BVC session) — resolved
+  to an `AudioFilter` in the existing pre-STT chain slot. Ships **zero** Krisp
+  binaries/models: it loads the operator's own `krisp_audio` SDK +
+  `KRISP_VIVA_SDK_LICENSE_KEY` + `KRISP_MODELS_DIR`, with clear fail-fast errors
+  when the SDK/license/model is absent. `denoiser` and `audio_filter` are parallel
+  opt-ins (explicit `audio_filter` wins). New `providers/denoiser.py` /
+  `providers/denoiser.ts` registry.
+- **Text-based semantic end-of-turn detector (NAMO Turn Detector v1, Apache-2.0).**
+  New `NamoTurnDetector` (`providers/namo_turn_detector.py` / `.ts`) implements the
+  existing `TurnDetectorProvider` over the rolling conversation transcript (ONNX,
+  runtime-loaded, `onnxruntime` + HF tokenizer as optional deps). The `predict`
+  contract gained a backward-compatible keyword-only `transcript` argument, so the
+  audio-native smart-turn detector is unchanged; the pipeline now assembles the
+  last few turns + in-flight utterance and passes them on each end-of-turn check.
+  Opt-in via `agent.turn_detector`; default behaviour unchanged. The tokenizer
+  loader accepts a `revision=` argument (`PATTER_NAMO_REVISION` env var), so a
+  Hugging Face Hub repo id `tokenizer_path` can be pinned to an immutable
+  commit/tag rather than a mutable branch.
+- **Opt-in barge-in re-delivery of the un-heard remainder (pipeline mode).**
+  `Agent.redeliver_interrupted` (Py) / `AgentOptions.redeliverInterrupted` (TS):
+  when the agent is interrupted mid-answer and the un-heard remainder still
+  matters, the next turn gets a one-shot system nudge so the LLM answers the
+  caller's new message first and then, only if still relevant, resumes the
+  unfinished idea naturally (rather than silently dropping it). The
+  worth-resuming decision is a pluggable `RedeliveryPolicy` (default: gate on a
+  non-trivial un-heard remainder). New `services/redelivery.py` / `.ts`. No-op in
+  realtime mode. Default off ⇒ zero behaviour change.
+
+### Changed
+
+- **Barge-in "heard prefix" is now word-accurate.** On an interruption, the
+  conversation history is truncated to what the caller actually heard down to a
+  word boundary mid-sentence, instead of rounding up to whole sentences from a
+  byte estimate. Per-sentence segments now carry their playout duration, and the
+  played position is taken from the best available source — Twilio
+  carrier-confirmed per-sentence marks, else the wall-clock pacer's emitted
+  position (when `paced_output`), else the byte estimate. An internal heard/unsaid
+  split backs the new re-delivery feature. Telnyx/Plivo (no reliable marks) use
+  the pacer/estimate tiers.
+
 ## 0.7.1 (2026-06-30)
 
 ### Added

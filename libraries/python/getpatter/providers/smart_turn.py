@@ -470,7 +470,9 @@ class SmartTurnDetector(TurnDetectorProvider):
         """End-of-turn probability at/above which the turn is complete."""
         return self._opts.threshold
 
-    async def predict(self, pcm16_16k_window: bytes) -> float:
+    async def predict(
+        self, pcm16_16k_window: bytes, *, transcript: str | None = None
+    ) -> float:
         """End-of-turn probability for the given recent-audio window.
 
         Args:
@@ -480,6 +482,10 @@ class SmartTurnDetector(TurnDetectorProvider):
                 input is truncated to the most recent 8 s; shorter input
                 is left-padded with silence, matching the reference
                 preprocessing exactly.
+            transcript: Ignored. Smart-turn v3 is audio-native — it scores
+                prosody, not text. Accepted only so the detector satisfies
+                the widened :meth:`TurnDetectorProvider.predict` contract
+                shared with text detectors like ``NamoTurnDetector``.
 
         Returns:
             Probability in ``[0, 1]`` that the turn is COMPLETE (the

@@ -239,33 +239,11 @@ describe('[unit] barge-in during the buffered backlog — Hermes/OpenClaw regres
 });
 
 describe('[unit] heardResponsePrefix — what did the caller actually listen to?', () => {
-  it('maps the backlog to a sentence-granular heard prefix', () => {
+  it('(a) a fully played turn returns the full text, everything heard', () => {
     const h = makeHandler() as any;
     h.turnSpokenSegments = [
-      { text: 'Frase uno.', startMs: 0 },
-      { text: 'Frase due.', startMs: 2000 },
-      { text: 'Frase tre.', startMs: 4000 },
-    ];
-    h.turnPlaybackTotalMs = 6000;
-    // 4 s still buffered → only the first 2 s actually played.
-    h.playbackBufferedUntil = Date.now() + 4000;
-
-    const heard = h.heardResponsePrefix();
-
-    expect(heard.text).toBe('Frase uno. Frase due.');
-    expect(heard.heardEverything).toBe(false);
-  });
-
-  it('returns null when no segments were tracked', () => {
-    const h = makeHandler() as any;
-    expect(h.heardResponsePrefix()).toBeNull();
-  });
-
-  it('reports everything heard once the backlog drained', () => {
-    const h = makeHandler() as any;
-    h.turnSpokenSegments = [
-      { text: 'Frase uno.', startMs: 0 },
-      { text: 'Frase due.', startMs: 2000 },
+      { text: 'Frase uno.', startMs: 0, durMs: 2000 },
+      { text: 'Frase due.', startMs: 2000, durMs: 0 },
     ];
     h.turnPlaybackTotalMs = 4000;
     h.playbackBufferedUntil = 0; // long drained
@@ -276,7 +254,92 @@ describe('[unit] heardResponsePrefix — what did the caller actually listen to?
     expect(heard.heardEverything).toBe(true);
   });
 
-  it('synthesizeSentence records a heard-prefix segment per sentence', async () => {
+  it('(b) a mid-sentence interruption splits on a word boundary', () => {
+    const h = makeHandler() as any;
+    h.turnSpokenSegments = [
+      { text: 'Sentence one here.', startMs: 0, durMs: 2000 }, // 0..2 s
+      { text: 'The second sentence goes here.', startMs: 2000, durMs: 2000 }, // 2..4 s
+      { text: 'Third and final sentence.', startMs: 4000, durMs: 0 }, // 4..6 s
+    ];
+    h.turnPlaybackTotalMs = 6000;
+    // 3.0 s played → sentence one full, sentence two half (word boundary).
+    h.playbackBufferedUntil = Date.now() + 3000;
+
+    const heard = h.heardResponsePrefix();
+
+    expect(heard.text).toBe('Sentence one here. The second sentence');
+    expect(heard.heardEverything).toBe(false);
+  });
+
+  it('a sentence whose start sits at the play head is not yet heard', () => {
+    const h = makeHandler() as any;
+    h.turnSpokenSegments = [
+      { text: 'Frase uno.', startMs: 0, durMs: 2000 },
+      { text: 'Frase due.', startMs: 2000, durMs: 2000 },
+      { text: 'Frase tre.', startMs: 4000, durMs: 0 },
+    ];
+    h.turnPlaybackTotalMs = 6000;
+    h.playbackBufferedUntil = Date.now() + 4000; // heard = 2000 ms
+
+    const heard = h.heardResponsePrefix();
+
+    expect(heard.text).toBe('Frase uno.');
+    expect(heard.heardEverything).toBe(false);
+  });
+
+  it('returns null when no segments were tracked', () => {
+    const h = makeHandler() as any;
+    expect(h.heardResponsePrefix()).toBeNull();
+    expect(h.heardResponseSplit()).toBeNull();
+  });
+
+  it('(f) the unsaid remainder is the exact complement of the heard prefix', () => {
+    const h = makeHandler() as any;
+    h.turnSpokenSegments = [
+      { text: 'Sentence one here.', startMs: 0, durMs: 2000 },
+      { text: 'The second sentence goes here.', startMs: 2000, durMs: 2000 },
+      { text: 'Third and final sentence.', startMs: 4000, durMs: 0 },
+    ];
+    h.turnPlaybackTotalMs = 6000;
+    h.playbackBufferedUntil = Date.now() + 3000; // heard = 3000 ms
+
+    const heard = h.heardResponsePrefix().text as string;
+    const unsaid = h.heardResponseSplit().unsaid as string;
+    const full =
+      'Sentence one here. The second sentence goes here. Third and final sentence.';
+
+    expect(heard).toBe('Sentence one here. The second sentence');
+    expect(unsaid).toBe('goes here. Third and final sentence.');
+    expect([heard, unsaid].filter(Boolean).join(' ')).toBe(full);
+  });
+
+  it('(c) a Twilio seg mark echo beats the lagging byte estimate', async () => {
+    const h = makeHandler() as any;
+    h.turnSpokenSegments = [
+      { text: 'Uno.', startMs: 0, durMs: 2000 },
+      { text: 'Due.', startMs: 2000, durMs: 2000 },
+      { text: 'Tre.', startMs: 4000, durMs: 0 },
+    ];
+    h.turnPlaybackTotalMs = 6000;
+    // Byte estimate lags badly: 5.5 s still "buffered" → ~0.5 s "played".
+    h.playbackBufferedUntil = Date.now() + 5500;
+
+    expect(h.heardResponsePrefix().text).toBe(''); // nothing confirmed yet
+
+    // The carrier echoes seg_2 (end of the second sentence at 4000 ms).
+    h.segMarkEndMs = new Map([
+      ['seg_1', 2000],
+      ['seg_2', 4000],
+    ]);
+    await h.onMark('seg_2');
+    expect(h.markConfirmedMs).toBe(4000);
+
+    const heard = h.heardResponsePrefix();
+    expect(heard.text).toBe('Uno. Due.');
+    expect(heard.heardEverything).toBe(false);
+  });
+
+  it('synthesizeSentence records a heard-prefix segment + emits a seg mark', async () => {
     const deps = makeDeps();
     const h = makeHandler(deps) as any;
     h.isSpeaking = true;
@@ -294,10 +357,40 @@ describe('[unit] heardResponsePrefix — what did the caller actually listen to?
       value: true,
     });
 
+    // (text, startMs, durMs): "Frase uno." is finalized to its own 200 ms
+    // playout when "Frase due." stamps; the last sentence keeps durMs=0.
     expect(h.turnSpokenSegments).toEqual([
-      { text: 'Frase uno.', startMs: 0 },
-      { text: 'Frase due.', startMs: 200 },
+      { text: 'Frase uno.', startMs: 0, durMs: 200 },
+      { text: 'Frase due.', startMs: 200, durMs: 0 },
     ]);
+    // A per-sentence carrier mark was emitted (Twilio) with the end position.
+    const markNames = (deps.bridge.sendMark as any).mock.calls.map((c: unknown[]) => c[1]);
+    expect(markNames).toContain('seg_1');
+    expect(h.segMarkEndMs.get('seg_1')).toBeCloseTo(200, 1);
+  });
+
+  it('(e) a seg mark leaves the fm_ first-message flow-control FIFO untouched', async () => {
+    const h = makeHandler() as any;
+    let resolved = false;
+    h.pendingMarks = [
+      {
+        name: 'fm_1',
+        resolve: () => {
+          resolved = true;
+        },
+        promise: Promise.resolve(),
+      },
+    ];
+    h.segMarkEndMs = new Map([['seg_1', 2000]]);
+
+    await h.onMark('seg_1');
+    expect(h.markConfirmedMs).toBe(2000);
+    expect(h.pendingMarks).toHaveLength(1);
+    expect(resolved).toBe(false);
+
+    await h.onMark('fm_1');
+    expect(resolved).toBe(true);
+    expect(h.pendingMarks).toHaveLength(0);
   });
 
   it('filler audio advances the clock without adding a segment', async () => {
@@ -332,12 +425,14 @@ describe('[unit] post-complete barge-in — history rewritten to the heard prefi
     h.isSpeaking = true;
     h.history.push({ role: 'assistant', text: FULL, timestamp: Date.now() });
     h.turnSpokenSegments = [
-      { text: 'Frase uno.', startMs: 0 },
-      { text: 'Frase due.', startMs: 2000 },
-      { text: 'Frase tre.', startMs: 4000 },
+      { text: 'Frase uno.', startMs: 0, durMs: 2000 }, // 0..2 s
+      { text: 'Frase due.', startMs: 2000, durMs: 2000 }, // 2..4 s
+      { text: 'Frase tre.', startMs: 4000, durMs: 0 }, // 4..6 s
     ];
     h.turnPlaybackTotalMs = 6000;
-    h.playbackBufferedUntil = Date.now() + 4000;
+    // 1.8 s still buffered → heard ≈ 4.2 s: sentences one and two in full,
+    // sentence three barely begun (rounds to no words).
+    h.playbackBufferedUntil = Date.now() + 1800;
     return { h, deps };
   }
 

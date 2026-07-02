@@ -63,6 +63,12 @@ from getpatter.services.barge_in_strategies import (
     evaluate_strategies as evaluate_barge_in_strategies,
     reset_strategies as reset_barge_in_strategies,
 )
+from getpatter.services.redelivery import (
+    DEFAULT_MIN_UNSAID_WORDS,
+    MinUnsaidWordsPolicy,
+    RedeliveryPolicy,
+    build_redelivery_nudge,
+)
 from getpatter.exceptions import (
     ErrorCode,
     PatterError,
@@ -161,10 +167,18 @@ def __getattr__(name):
     if name in {
         "KrispSampleRate",
         "KrispFrameDuration",
+        "KrispModelKind",
     }:
         from getpatter.providers import krisp_instance as _krisp_instance
 
         return getattr(_krisp_instance, name)
+    # Bring-your-own-license denoiser registry (string model-id selection for
+    # ``Agent.denoiser``). Parity with the TypeScript ``resolveDenoiser`` /
+    # ``DENOISERS`` exports. Defers the heavy krisp-audio import to resolution.
+    if name in {"resolve_denoiser", "DENOISERS", "DENOISER_IDS"}:
+        from getpatter.providers import denoiser as _denoiser
+
+        return getattr(_denoiser, name)
     # Pre-STT noise-suppression audio filters — opt-in (need the ``krisp`` /
     # ``deepfilternet`` extras). Both modules defer their heavy imports
     # (krisp-audio, torch) until instantiation, so surfacing the class here
@@ -191,6 +205,13 @@ def __getattr__(name):
         from getpatter.providers import smart_turn as _smart_turn
 
         return getattr(_smart_turn, name)
+    # NAMO Turn Detector v1 — text-based end-of-utterance (needs the
+    # ``namo-turn-detector`` extra: numpy + onnxruntime + transformers, plus a
+    # downloaded NAMO v1 ONNX model + tokenizer).
+    if name in {"NamoTurnDetector", "NamoProviderTag"}:
+        from getpatter.providers import namo_turn_detector as _namo
+
+        return getattr(_namo, name)
     raise AttributeError(f"module 'getpatter' has no attribute {name!r}")
 
 
@@ -464,6 +485,10 @@ __all__ = [
     "MinWordsStrategy",
     "evaluate_barge_in_strategies",
     "reset_barge_in_strategies",
+    "RedeliveryPolicy",
+    "MinUnsaidWordsPolicy",
+    "build_redelivery_nudge",
+    "DEFAULT_MIN_UNSAID_WORDS",
     "ErrorCode",
     "PatterError",
     "PatterConfigError",
@@ -524,8 +549,13 @@ __all__ = [
     "TelnyxTTS",
     "SileroVAD",
     "SmartTurnDetector",
+    "NamoTurnDetector",
     "KrispVivaFilter",
+    "KrispModelKind",
     "DeepFilterNetFilter",
+    "resolve_denoiser",
+    "DENOISERS",
+    "DENOISER_IDS",
     "init_tracing",
     "start_span",
     "SPAN_CALL",

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     )
     from getpatter.services.barge_in_strategies import BargeInStrategy
     from getpatter.services.llm_loop import LLMProvider
+    from getpatter.services.redelivery import RedeliveryPolicy
 
 logger = logging.getLogger("getpatter")
 
@@ -605,6 +606,17 @@ class Agent:
     audio_filter: "AudioFilter | None" = (
         None  # Optional pre-STT audio filter (noise cancel) — pipeline mode only
     )
+    # Opt-in noise denoiser selected by stable model-id string (pipeline mode
+    # only). Resolved to a concrete :class:`AudioFilter` via
+    # ``getpatter.providers.denoiser.resolve_denoiser`` at call start. Known
+    # ids: ``"krisp-viva-tel-v2"`` (VIVA telephony NC) and
+    # ``"krisp-bvc-o-pro-v3"`` (Background Voice Cancellation). Krisp models are
+    # bring-your-own-license: Patter ships no Krisp SDK/license/model — the
+    # operator installs ``krisp-audio``, sets ``KRISP_VIVA_SDK_LICENSE_KEY`` and
+    # ``KRISP_MODELS_DIR``. ``denoiser`` and ``audio_filter`` are PARALLEL
+    # opt-ins; when both are set the explicit ``audio_filter`` instance wins.
+    # ``None`` (default) keeps the inbound audio byte-identical.
+    denoiser: str | None = None
     background_audio: "BackgroundAudioPlayer | None" = (
         None  # Optional background audio mixer — pipeline mode only
     )
@@ -774,6 +786,21 @@ class Agent:
     #     re-billing TTS, and the event is recorded as a false interruption
     #     (a backchannel — not an interruption — in metrics).
     barge_in_mode: str = "cancel"
+    # Opt-in barge-in RE-DELIVERY (pipeline mode). When ``True``, a confirmed
+    # barge-in that leaves a non-trivial un-heard remainder captures the
+    # ``(heard, unsaid)`` split and, on the NEXT user turn, injects a one-shot
+    # system nudge asking the LLM to answer the caller's new message first and
+    # then resume the unfinished idea naturally (instead of silently dropping
+    # what the caller never heard). Default ``False`` ⇒ zero behaviour change.
+    # No-op in realtime / ConvAI modes (no heard/unsaid split). See
+    # ``getpatter.services.redelivery`` for the :class:`RedeliveryPolicy`
+    # protocol and the :class:`MinUnsaidWordsPolicy` default.
+    redeliver_interrupted: bool = False
+    # Optional custom policy deciding whether an interrupted turn's un-heard
+    # remainder is worth resuming. ``None`` uses
+    # ``redelivery.DEFAULT_REDELIVERY_POLICY`` (:class:`MinUnsaidWordsPolicy`).
+    # Only consulted when ``redeliver_interrupted`` is ``True``.
+    redelivery_policy: "RedeliveryPolicy | None" = None
     # When ``True`` (default), ``Patter.call`` warms up the STT, TTS, and LLM
     # provider connections in parallel with the carrier-side ``initiate_call``
     # request so DNS, TLS, and HTTP/2 handshakes are already complete by the
@@ -844,6 +871,15 @@ class Agent:
     # The ``context_tokens`` metric is always recorded regardless. ``None``
     # (default) disables the warning. Pipeline mode only.
     context_token_budget: int | None = None
+    # Opt-in wall-clock outbound frame pacing (pipeline mode). Default
+    # ``False`` keeps the event-driven send: each TTS/pipeline chunk is
+    # written to the carrier the instant it is produced (bursty). When
+    # ``True``, outbound audio is re-framed into fixed 20 ms frames and
+    # emitted on a monotonic wall-clock grid (silence fills the gaps), which
+    # keeps the carrier jitter buffer primed and the playback cursor exact.
+    # Byte-identical to prior behaviour when ``False`` — the pacer is never
+    # engaged. See :class:`getpatter.audio.pacer.OutboundFramePacer`.
+    paced_output: bool = False
 
 
 @dataclass(frozen=True)

@@ -271,12 +271,24 @@ class TurnDetectorProvider(ABC):
         """End-of-turn probability at/above which the turn is complete."""
 
     @abstractmethod
-    async def predict(self, pcm16_16k_window: bytes) -> float:
-        """Return the end-of-turn probability in ``[0, 1]`` for the window.
+    async def predict(
+        self, pcm16_16k_window: bytes, *, transcript: str | None = None
+    ) -> float:
+        """Return the end-of-turn probability in ``[0, 1]`` for the turn.
 
         ``pcm16_16k_window`` is mono int16 little-endian PCM at 16 kHz
         covering the most recent seconds of caller audio (the handler
         keeps a rolling ~8 s buffer).
+
+        ``transcript`` is the rolling conversation text the handler
+        assembles from the last few turns plus the caller's current
+        in-flight utterance (see ``PipelineStreamHandler`` — up to
+        ~128 tokens' worth). It is a keyword-only, defaulted extension so
+        the contract stays backward compatible: audio-native detectors
+        (:class:`~getpatter.providers.smart_turn.SmartTurnDetector`) ignore
+        it, while text detectors
+        (:class:`~getpatter.providers.namo_turn_detector.NamoTurnDetector`)
+        read it and may ignore the audio window.
         """
 
     @abstractmethod

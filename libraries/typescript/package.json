@@ -71,6 +71,7 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
+    "@huggingface/transformers": "^3.0.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "cloudflared": "^0.7.1",
     "node-cron": "^4.0.0",

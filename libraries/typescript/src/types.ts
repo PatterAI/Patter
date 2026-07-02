@@ -23,6 +23,7 @@ import type { Tool as ToolInstance } from "./public-api";
 import type { STTAdapter, TTSAdapter } from "./provider-factory";
 import type { LLMProvider } from "./llm-loop";
 import type { BargeInStrategy } from "./services/barge-in-strategies";
+import type { RedeliveryPolicy } from "./services/redelivery";
 import type { CallMetrics, CostBreakdown } from "./metrics";
 
 /** Inbound message handed to a `MessageHandler` per turn (legacy single-turn API). */
@@ -570,12 +571,20 @@ export interface TurnDetectorProvider {
   /** End-of-turn probability at/above which the turn is complete. */
   readonly threshold: number;
   /**
-   * Return the end-of-turn probability in `[0, 1]` for the window.
+   * Return the end-of-turn probability in `[0, 1]` for the turn.
+   *
    * `pcm16Window` is mono int16 little-endian PCM at 16 kHz covering the
    * most recent seconds of caller audio (the handler keeps a rolling
    * ~8 s buffer).
+   *
+   * `transcript` is the rolling conversation text the handler assembles
+   * from the last few turns plus the caller's current in-flight utterance
+   * (up to ~128 tokens' worth). It is an optional, backward-compatible
+   * extension: audio-native detectors (`SmartTurnDetector`) ignore it,
+   * while text detectors (`NamoTurnDetector`) read it and may ignore the
+   * audio window.
    */
-  predict(pcm16Window: Buffer): Promise<number>;
+  predict(pcm16Window: Buffer, transcript?: string): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -900,6 +909,17 @@ export interface AgentOptions {
   readonly maxSemanticHoldMs?: number;
   /** Optional pre-STT audio filter (noise cancellation). Pipeline mode only. */
   readonly audioFilter?: AudioFilter;
+  /**
+   * Opt-in noise denoiser selected by stable model-id string (pipeline mode
+   * only). Resolved to a concrete {@link AudioFilter} via
+   * `resolveDenoiser` at call start. Known ids: `"krisp-viva-tel-v2"` (VIVA
+   * telephony NC) and `"krisp-bvc-o-pro-v3"` (Background Voice Cancellation).
+   * Krisp is bring-your-own-license — the operator supplies the SDK, license,
+   * and `.kef` model. `denoiser` and `audioFilter` are PARALLEL opt-ins: when
+   * both are set the explicit `audioFilter` instance wins. `undefined`
+   * (default) leaves the inbound audio unchanged.
+   */
+  readonly denoiser?: string;
   /** Optional background audio mixer (hold music, thinking cues). Pipeline mode only. */
   readonly backgroundAudio?: BackgroundAudioPlayer;
   /**
@@ -955,6 +975,26 @@ export interface AgentOptions {
    *   (a backchannel — not an interruption — in metrics).
    */
   readonly bargeInMode?: 'cancel' | 'pause_resume';
+  /**
+   * Opt-in barge-in RE-DELIVERY (pipeline mode). When ``true``, a confirmed
+   * barge-in that leaves a non-trivial un-heard remainder captures the
+   * ``{heard, unsaid}`` split and, on the NEXT user turn, injects a one-shot
+   * system nudge asking the LLM to answer the caller's new message first and
+   * then resume the unfinished idea naturally (instead of silently dropping
+   * what the caller never heard). Default ``false`` ⇒ zero behaviour change.
+   * No-op in realtime / ConvAI modes (no heard/unsaid split).
+   *
+   * See ``getpatter`` exports ``RedeliveryPolicy`` / ``MinUnsaidWordsPolicy``
+   * for the decision protocol and the default implementation.
+   */
+  readonly redeliverInterrupted?: boolean;
+  /**
+   * Optional custom policy deciding whether an interrupted turn's un-heard
+   * remainder is worth resuming. When omitted the default
+   * ``MinUnsaidWordsPolicy`` is used. Only consulted when
+   * ``redeliverInterrupted`` is ``true``.
+   */
+  readonly redeliveryPolicy?: RedeliveryPolicy;
   /**
    * When ``true`` (default), ``Patter.call`` warms up the STT, TTS, and
    * LLM provider connections in parallel with the carrier-side
@@ -1045,6 +1085,17 @@ export interface AgentOptions {
    * the warning. Pipeline mode only. Mirrors Python `Agent.context_token_budget`.
    */
   readonly contextTokenBudget?: number;
+  /**
+   * Opt-in wall-clock outbound frame pacing (pipeline mode). Omitted /
+   * `false` (default) keeps the event-driven send: each TTS/pipeline chunk
+   * is written to the carrier the instant it is produced (bursty). When
+   * `true`, outbound audio is re-framed into fixed 20 ms frames and emitted
+   * on a monotonic wall-clock grid (silence fills the gaps), which keeps the
+   * carrier jitter buffer primed and the playback cursor exact. Byte-identical
+   * to prior behaviour when `false` — the pacer is never engaged. Mirrors
+   * Python `Agent.paced_output`. See `OutboundFramePacer`.
+   */
+  readonly pacedOutput?: boolean;
   /**
    * Input noise reduction for speakerphone / conference audio (OpenAI
    * Realtime mode only). `undefined` (default) omits the field entirely
