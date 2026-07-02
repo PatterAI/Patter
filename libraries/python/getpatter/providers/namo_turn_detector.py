@@ -29,6 +29,11 @@ tokenizer files) and point the SDK at the ``.onnx`` file via the
 of :meth:`NamoTurnDetector.load`. The tokenizer is loaded (with
 ``transformers.AutoTokenizer``) from the directory containing the model
 file, or from ``PATTER_NAMO_TOKENIZER`` / the ``tokenizer_path=`` argument.
+If ``tokenizer_path`` resolves to a Hugging Face Hub repo id rather than a
+local directory, pin the download to an immutable commit/tag via the
+``PATTER_NAMO_REVISION`` environment variable or the ``revision=`` argument
+of :meth:`NamoTurnDetector.load` — it is a no-op for the documented local
+default.
 
 NAMO ships per-language models, each with its own recommended decision
 threshold — select the model for your language and set :attr:`threshold`
@@ -82,6 +87,11 @@ logger = logging.getLogger(__name__)
 # explicit ``model_path`` / ``tokenizer_path`` is given.
 NAMO_MODEL_ENV_VAR = "PATTER_NAMO_MODEL"
 NAMO_TOKENIZER_ENV_VAR = "PATTER_NAMO_TOKENIZER"
+
+# Hugging Face Hub revision (commit SHA or tag) to pin the tokenizer download
+# to when ``tokenizer_path`` resolves to a repo id. No effect on the
+# documented default — a local directory shipped alongside the model file.
+NAMO_REVISION_ENV_VAR = "PATTER_NAMO_REVISION"
 
 # Default decision threshold. NAMO ships per-language models, each with its
 # own recommended value — override via ``load(threshold=...)``.
@@ -160,13 +170,36 @@ def resolve_namo_tokenizer_path(
     return str(model_path.parent)
 
 
-def load_namo_tokenizer(tokenizer_path: "Path | str") -> Any:
+def resolve_namo_revision(revision: "str | None") -> "str | None":
+    """Resolve the Hugging Face Hub revision to pin the tokenizer to.
+
+    Resolution order: explicit ``revision`` argument, then the
+    ``PATTER_NAMO_REVISION`` environment variable. Returns ``None`` when
+    neither is set — the documented default (``tokenizer_path`` resolving to
+    a local directory shipped alongside the model) has no revision concept;
+    set this when ``tokenizer_path`` instead resolves to a Hugging Face Hub
+    repo id, so the download is pinned to an immutable commit/tag rather than
+    a mutable branch.
+    """
+    if revision is not None:
+        return revision
+    env_revision = os.environ.get(NAMO_REVISION_ENV_VAR, "").strip()
+    return env_revision or None
+
+
+def load_namo_tokenizer(
+    tokenizer_path: "Path | str", *, revision: "str | None" = None
+) -> Any:
     """Load the Hugging Face tokenizer for NAMO.
 
     Lazy-imports ``transformers`` (the ``namo-turn-detector`` extra) and
     raises a descriptive :class:`ImportError` — naming the install command —
     when it is absent, so a missing optional dep never surfaces as an opaque
     ``ModuleNotFoundError`` deep in a call.
+
+    ``revision`` (see :func:`resolve_namo_revision`) pins the Hugging Face
+    Hub commit/tag when ``tokenizer_path`` is a repo id; it is a no-op when
+    ``tokenizer_path`` is the documented local directory.
     """
     try:
         from transformers import AutoTokenizer  # type: ignore
@@ -176,7 +209,9 @@ def load_namo_tokenizer(tokenizer_path: "Path | str") -> Any:
             "Face tokenizers), which is not installed. Install the optional "
             "extra with `pip install 'getpatter[namo-turn-detector]'`."
         ) from exc
-    return AutoTokenizer.from_pretrained(str(tokenizer_path))
+    return AutoTokenizer.from_pretrained(
+        str(tokenizer_path), revision=revision
+    )  # nosec B615 -- revision is threaded through (PATTER_NAMO_REVISION / NamoTurnDetector.load(revision=...)) for the Hub-repo-id case; the documented default source is a local operator-provided model directory, not an unpinned Hub download.
 
 
 def new_namo_session(
@@ -279,6 +314,7 @@ class NamoTurnDetector(TurnDetectorProvider):
         threshold: float = DEFAULT_NAMO_THRESHOLD,
         model_path: "Path | str | None" = None,
         tokenizer_path: "Path | str | None" = None,
+        revision: "str | None" = None,
         force_cpu: bool = True,
         max_tokens: int = DEFAULT_NAMO_MAX_TOKENS,
     ) -> "NamoTurnDetector":
@@ -296,6 +332,11 @@ class NamoTurnDetector(TurnDetectorProvider):
                 tokenizer. When ``None``, ``PATTER_NAMO_TOKENIZER`` is
                 consulted, falling back to the directory containing the model
                 file.
+            revision: Hugging Face Hub revision (commit SHA or tag) to pin
+                the tokenizer download to when ``tokenizer_path`` resolves to
+                a repo id. When ``None``, ``PATTER_NAMO_REVISION`` is
+                consulted. No effect for the documented default — a local
+                directory shipped alongside the model file.
             force_cpu: Restrict ONNX Runtime to the CPU execution provider.
             max_tokens: Truncate the rolling transcript to this many tokens
                 before inference (default 128).
@@ -306,7 +347,8 @@ class NamoTurnDetector(TurnDetectorProvider):
             raise ValueError("max_tokens must be positive")
         path = resolve_namo_model_path(model_path)
         resolved_tokenizer = resolve_namo_tokenizer_path(tokenizer_path, path)
-        tokenizer = load_namo_tokenizer(resolved_tokenizer)
+        resolved_revision = resolve_namo_revision(revision)
+        tokenizer = load_namo_tokenizer(resolved_tokenizer, revision=resolved_revision)
         session = new_namo_session(force_cpu, model_path=path)
         return cls(
             session=session,
@@ -321,6 +363,7 @@ class NamoTurnDetector(TurnDetectorProvider):
         threshold: float = DEFAULT_NAMO_THRESHOLD,
         model_path: "Path | str | None" = None,
         tokenizer_path: "Path | str | None" = None,
+        revision: "str | None" = None,
         force_cpu: bool = True,
         max_tokens: int = DEFAULT_NAMO_MAX_TOKENS,
     ) -> "NamoTurnDetector | None":
@@ -354,6 +397,7 @@ class NamoTurnDetector(TurnDetectorProvider):
                 threshold=threshold,
                 model_path=model_path,
                 tokenizer_path=tokenizer_path,
+                revision=revision,
                 force_cpu=force_cpu,
                 max_tokens=max_tokens,
             )

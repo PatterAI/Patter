@@ -30,6 +30,12 @@
  * `onnxruntime-node` and `@huggingface/transformers` are loaded lazily as
  * optional dependencies (same pattern as `providers/silero-vad.ts`); a clear
  * "install X" error is thrown when either is absent.
+ *
+ * If `tokenizerPath` resolves to a Hugging Face Hub repo id rather than a
+ * local directory, pin the download to an immutable commit/tag via the
+ * `PATTER_NAMO_REVISION` environment variable or the `revision` option of
+ * {@link NamoTurnDetector.load} — it is a no-op for the documented local
+ * default.
  */
 
 import * as fs from 'node:fs';
@@ -47,6 +53,13 @@ import {
 export const NAMO_MODEL_ENV_VAR = 'PATTER_NAMO_MODEL';
 /** Env var consulted for the tokenizer source when no `tokenizerPath` is given. */
 export const NAMO_TOKENIZER_ENV_VAR = 'PATTER_NAMO_TOKENIZER';
+/**
+ * Env var consulted for the Hugging Face Hub revision (commit SHA or tag) to
+ * pin the tokenizer download to when no `revision` option is given. No
+ * effect on the documented default — a local directory shipped alongside
+ * the model file.
+ */
+export const NAMO_REVISION_ENV_VAR = 'PATTER_NAMO_REVISION';
 
 /**
  * Default decision threshold. NAMO ships per-language models, each with its
@@ -84,6 +97,13 @@ export interface NamoTurnDetectorOptions {
    * `PATTER_NAMO_TOKENIZER`, then the directory containing the model file.
    */
   readonly tokenizerPath?: string;
+  /**
+   * Hugging Face Hub revision (commit SHA or tag) to pin the tokenizer
+   * download to when `tokenizerPath` resolves to a repo id. Falls back to
+   * `PATTER_NAMO_REVISION`. No effect for the documented default — a local
+   * directory shipped alongside the model file.
+   */
+  readonly revision?: string;
   /** Restrict ONNX Runtime to the CPU execution provider (default true). */
   readonly forceCpu?: boolean;
   /** Truncate the rolling transcript to this many tokens (default 128). */
@@ -140,6 +160,22 @@ export function resolveNamoTokenizerPath(tokenizerPath: string | undefined, mode
   return path.dirname(modelPath);
 }
 
+/**
+ * Resolve the Hugging Face Hub revision to pin the tokenizer download to:
+ * explicit option, then `PATTER_NAMO_REVISION`. Returns `undefined` when
+ * neither is set — the documented default (`tokenizerPath` resolving to a
+ * local directory shipped alongside the model) has no revision concept; set
+ * this when `tokenizerPath` instead resolves to a Hugging Face Hub repo id,
+ * so the download is pinned to an immutable commit/tag rather than a mutable
+ * branch.
+ * @internal
+ */
+export function resolveNamoRevision(revision?: string): string | undefined {
+  if (revision) return revision;
+  const env = (process.env[NAMO_REVISION_ENV_VAR] ?? '').trim();
+  return env || undefined;
+}
+
 /** Coerce a transformers.js tensor / typed array / nested array to BigInt64Array. @internal */
 function toBigInt64Array(value: unknown): BigInt64Array {
   if (value instanceof BigInt64Array) return value;
@@ -164,7 +200,9 @@ function toBigInt64Array(value: unknown): BigInt64Array {
 }
 
 /** Lazily import the optional `@huggingface/transformers` package. @internal */
-async function importTransformers(): Promise<{ AutoTokenizer: { from_pretrained(src: string): Promise<unknown> } }> {
+async function importTransformers(): Promise<{
+  AutoTokenizer: { from_pretrained(src: string, options?: { revision?: string }): Promise<unknown> };
+}> {
   try {
     // @ts-ignore — optional peer dep; types may be absent when not installed
     return (await import('@huggingface/transformers')) as never;
@@ -181,11 +219,15 @@ async function importTransformers(): Promise<{ AutoTokenizer: { from_pretrained(
  * Load the Hugging Face tokenizer for NAMO and wrap it in a
  * {@link NamoTokenizer}. Throws a descriptive install error when
  * `@huggingface/transformers` is missing.
+ *
+ * `revision` (see {@link resolveNamoRevision}) pins the Hugging Face Hub
+ * commit/tag when `tokenizerPath` is a repo id; it is a no-op when
+ * `tokenizerPath` is the documented local directory.
  * @internal
  */
-export async function loadNamoTokenizer(tokenizerPath: string): Promise<NamoTokenizer> {
+export async function loadNamoTokenizer(tokenizerPath: string, revision?: string): Promise<NamoTokenizer> {
   const { AutoTokenizer } = await importTransformers();
-  const hf = (await AutoTokenizer.from_pretrained(tokenizerPath)) as (
+  const hf = (await AutoTokenizer.from_pretrained(tokenizerPath, { revision })) as (
     text: string,
     options?: Record<string, unknown>,
   ) => { input_ids: unknown; attention_mask?: unknown };
@@ -281,6 +323,7 @@ export class NamoTurnDetector implements TurnDetectorProvider {
     // surfaces its specific install hint first.
     const modelPath = resolveNamoModelPath(options.modelPath);
     const tokenizerPath = resolveNamoTokenizerPath(options.tokenizerPath, modelPath);
+    const revision = resolveNamoRevision(options.revision);
     const runtime = await loadOnnxRuntime('NamoTurnDetector');
     const session = await runtime.InferenceSession.create(modelPath, {
       interOpNumThreads: 1,
@@ -289,7 +332,7 @@ export class NamoTurnDetector implements TurnDetectorProvider {
       graphOptimizationLevel: 'all',
       executionProviders: options.forceCpu === false ? undefined : ['cpu'],
     });
-    const tokenizer = await loadNamoTokenizer(tokenizerPath);
+    const tokenizer = await loadNamoTokenizer(tokenizerPath, revision);
     return new NamoTurnDetector(runtime, session, tokenizer, threshold, maxTokens);
   }
 

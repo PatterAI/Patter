@@ -39,11 +39,13 @@ import {
   DEFAULT_NAMO_MAX_TOKENS,
   DEFAULT_NAMO_THRESHOLD,
   NAMO_MODEL_ENV_VAR,
+  NAMO_REVISION_ENV_VAR,
   NAMO_TOKENIZER_ENV_VAR,
   NamoTurnDetector,
   completionProbability,
   loadNamoTokenizer,
   resolveNamoModelPath,
+  resolveNamoRevision,
   resolveNamoTokenizerPath,
   type NamoTokenizer,
 } from '../../src/providers/namo-turn-detector';
@@ -184,6 +186,74 @@ describe('NamoTurnDetector — path resolution', () => {
     } finally {
       if (prev !== undefined) process.env[NAMO_TOKENIZER_ENV_VAR] = prev;
       else delete process.env[NAMO_TOKENIZER_ENV_VAR];
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Revision resolution — Hugging Face Hub download pinning
+// ---------------------------------------------------------------------------
+
+describe('NamoTurnDetector — revision resolution', () => {
+  it('defaults to undefined without an option or env var', () => {
+    const prev = process.env[NAMO_REVISION_ENV_VAR];
+    delete process.env[NAMO_REVISION_ENV_VAR];
+    try {
+      expect(resolveNamoRevision(undefined)).toBeUndefined();
+    } finally {
+      if (prev !== undefined) process.env[NAMO_REVISION_ENV_VAR] = prev;
+    }
+  });
+
+  it('reads the env var when no explicit option is given', () => {
+    const prev = process.env[NAMO_REVISION_ENV_VAR];
+    process.env[NAMO_REVISION_ENV_VAR] = 'abc1234';
+    try {
+      expect(resolveNamoRevision(undefined)).toBe('abc1234');
+    } finally {
+      if (prev !== undefined) process.env[NAMO_REVISION_ENV_VAR] = prev;
+      else delete process.env[NAMO_REVISION_ENV_VAR];
+    }
+  });
+
+  it('an explicit option wins over the env var', () => {
+    const prev = process.env[NAMO_REVISION_ENV_VAR];
+    process.env[NAMO_REVISION_ENV_VAR] = 'env-revision';
+    try {
+      expect(resolveNamoRevision('explicit-revision')).toBe('explicit-revision');
+    } finally {
+      if (prev !== undefined) process.env[NAMO_REVISION_ENV_VAR] = prev;
+      else delete process.env[NAMO_REVISION_ENV_VAR];
+    }
+  });
+
+  it('threads the resolved revision into AutoTokenizer.from_pretrained', async () => {
+    // The module-level mock throws to exercise the missing-dependency path
+    // elsewhere in this file; override it for this test only with a fake
+    // that records its call args, then reset back afterwards.
+    const fromPretrained = vi.fn(async () => (_text: string) => ({ input_ids: [1n] }));
+    vi.resetModules();
+    vi.doMock('@huggingface/transformers', () => ({
+      AutoTokenizer: { from_pretrained: fromPretrained },
+    }));
+    try {
+      const fresh = await import('../../src/providers/namo-turn-detector');
+      await fresh.loadNamoTokenizer('org/some-repo', 'deadbeef');
+      expect(fromPretrained).toHaveBeenCalledWith('org/some-repo', { revision: 'deadbeef' });
+
+      await fresh.loadNamoTokenizer('/local/tokenizer/dir');
+      expect(fromPretrained).toHaveBeenLastCalledWith('/local/tokenizer/dir', {
+        revision: undefined,
+      });
+    } finally {
+      // Re-establish the file-level "module missing" mock (rather than
+      // vi.doUnmock, which would leave later dynamic imports resolving the
+      // real, optionally-installed package) so the tests below still
+      // exercise the missing-dependency install-error path deterministically.
+      vi.doMock('@huggingface/transformers', () => {
+        throw new Error("Cannot find module '@huggingface/transformers'");
+      });
+      vi.resetModules();
     }
   });
 });

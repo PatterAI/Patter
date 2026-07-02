@@ -29,7 +29,10 @@
   contract gained a backward-compatible keyword-only `transcript` argument, so the
   audio-native smart-turn detector is unchanged; the pipeline now assembles the
   last few turns + in-flight utterance and passes them on each end-of-turn check.
-  Opt-in via `agent.turn_detector`; default behaviour unchanged.
+  Opt-in via `agent.turn_detector`; default behaviour unchanged. The tokenizer
+  loader accepts a `revision=` argument (`PATTER_NAMO_REVISION` env var), so a
+  Hugging Face Hub repo id `tokenizer_path` can be pinned to an immutable
+  commit/tag rather than a mutable branch.
 - **Opt-in barge-in re-delivery of the un-heard remainder (pipeline mode).**
   `Agent.redeliver_interrupted` (Py) / `AgentOptions.redeliverInterrupted` (TS):
   when the agent is interrupted mid-answer and the un-heard remainder still

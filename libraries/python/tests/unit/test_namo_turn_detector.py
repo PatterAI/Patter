@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import types
 
 import pytest
 
@@ -24,12 +25,14 @@ from getpatter.providers.base import TurnDetectorProvider  # noqa: E402
 from getpatter.providers.namo_turn_detector import (  # noqa: E402
     DEFAULT_NAMO_THRESHOLD,
     NAMO_MODEL_ENV_VAR,
+    NAMO_REVISION_ENV_VAR,
     NAMO_TOKENIZER_ENV_VAR,
     NamoTurnDetector,
     completion_probability,
     load_namo_tokenizer,
     new_namo_session,
     resolve_namo_model_path,
+    resolve_namo_revision,
     resolve_namo_tokenizer_path,
 )
 
@@ -157,6 +160,76 @@ def test_tokenizer_env_overrides_default(tmp_path, monkeypatch) -> None:
     assert resolve_namo_tokenizer_path(None, model_file) == "/some/tokenizer/dir"
     # An explicit argument still wins over the env var.
     assert resolve_namo_tokenizer_path("/explicit", model_file) == "/explicit"
+
+
+# ---------------------------------------------------------------------------
+# Revision resolution — Hugging Face Hub download pinning (Bandit B615)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_revision_defaults_to_none_without_arg_or_env(monkeypatch) -> None:
+    monkeypatch.delenv(NAMO_REVISION_ENV_VAR, raising=False)
+    assert resolve_namo_revision(None) is None
+
+
+def test_resolve_revision_reads_env_var(monkeypatch) -> None:
+    monkeypatch.setenv(NAMO_REVISION_ENV_VAR, "abc1234")
+    assert resolve_namo_revision(None) == "abc1234"
+
+
+def test_resolve_revision_explicit_arg_wins_over_env(monkeypatch) -> None:
+    monkeypatch.setenv(NAMO_REVISION_ENV_VAR, "env-revision")
+    assert resolve_namo_revision("explicit-revision") == "explicit-revision"
+
+
+def test_load_namo_tokenizer_passes_revision_through(monkeypatch) -> None:
+    """The Hugging Face ``from_pretrained`` call must receive whatever
+    revision was resolved, so a repo-id ``tokenizer_path`` can be pinned to
+    an immutable commit/tag (Bandit B615: unsafe unpinned Hub download)."""
+    calls: list[dict] = []
+
+    class _FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(path, revision=None):
+            calls.append({"path": path, "revision": revision})
+            return object()
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoTokenizer = _FakeAutoTokenizer
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    load_namo_tokenizer("org/some-repo", revision="deadbeef")
+    assert calls == [{"path": "org/some-repo", "revision": "deadbeef"}]
+
+    load_namo_tokenizer("/local/tokenizer/dir")
+    assert calls[-1] == {"path": "/local/tokenizer/dir", "revision": None}
+
+
+async def test_load_end_to_end_threads_revision_into_tokenizer(
+    tmp_path, monkeypatch
+) -> None:
+    model_file = tmp_path / "model.onnx"
+    model_file.write_bytes(b"\x00")
+    monkeypatch.setenv(NAMO_MODEL_ENV_VAR, str(model_file))
+    monkeypatch.setenv(NAMO_TOKENIZER_ENV_VAR, "org/some-repo")
+    monkeypatch.delenv(NAMO_REVISION_ENV_VAR, raising=False)
+
+    captured: dict = {}
+
+    def _fake_load_namo_tokenizer(tokenizer_path, *, revision=None):
+        captured["tokenizer_path"] = tokenizer_path
+        captured["revision"] = revision
+        return object()
+
+    monkeypatch.setattr(
+        namo_module, "load_namo_tokenizer", _fake_load_namo_tokenizer
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", None)  # never reached
+
+    with pytest.raises(ImportError, match="onnxruntime"):
+        NamoTurnDetector.load(revision="pinned-sha")
+
+    assert captured == {"tokenizer_path": "org/some-repo", "revision": "pinned-sha"}
 
 
 # ---------------------------------------------------------------------------
