@@ -814,8 +814,8 @@ universal levers below (which work in every release) otherwise.
   ~a minute of delay after the ~5-minute mark). For an after-hours line where calls can run
   long, prefer `server_vad` with a raised `threshold` (≈0.7–0.8) and longer
   `silenceDurationMs` (≈600–800 ms) **alongside** `far_field` reduction — that gives most
-  of the noise robustness without the latency cliff. Pick one of {far-field + semantic_vad}
-  vs {far-field + tuned server_vad}; measure on a real call.
+  of the noise robustness without the latency cliff. Pick one of `{far-field + semantic_vad}`
+  vs `{far-field + tuned server_vad}`; measure on a real call.
 </Warning>
 
 ### Pipeline mode and the universal levers

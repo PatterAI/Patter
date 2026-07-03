@@ -876,6 +876,44 @@ export class Patter {
       }
     }
 
+    // Validate the opt-in transfer destination policy. Mirrors Python
+    // ``Patter.agent`` validation: allowlist numbers must be E.164, prefixes
+    // must be '+' followed by 1-14 digits. Fail fast at agent construction —
+    // a typo'd entry would otherwise silently deny (or worse, allow)
+    // transfers only at call time, mid-conversation.
+    if (working.transferAllowedNumbers !== undefined) {
+      if (!Array.isArray(working.transferAllowedNumbers)) {
+        throw new TypeError(
+          'transferAllowedNumbers must be an array of E.164 strings, got ' +
+            `${typeof working.transferAllowedNumbers}.`,
+        );
+      }
+      for (const entry of working.transferAllowedNumbers) {
+        if (typeof entry !== 'string' || !/^\+[1-9]\d{6,14}$/.test(entry)) {
+          throw new Error(
+            'transferAllowedNumbers entries must be E.164 ' +
+              `(+<country><number>), got ${JSON.stringify(entry)}.`,
+          );
+        }
+      }
+    }
+    if (working.transferAllowedPrefixes !== undefined) {
+      if (!Array.isArray(working.transferAllowedPrefixes)) {
+        throw new TypeError(
+          "transferAllowedPrefixes must be an array of '+<digits>' strings, got " +
+            `${typeof working.transferAllowedPrefixes}.`,
+        );
+      }
+      for (const entry of working.transferAllowedPrefixes) {
+        if (typeof entry !== 'string' || !/^\+\d{1,14}$/.test(entry)) {
+          throw new Error(
+            "transferAllowedPrefixes entries must be '+' followed by 1-14 " +
+              `digits (e.g. '+1', '+4420'), got ${JSON.stringify(entry)}.`,
+          );
+        }
+      }
+    }
+
     // Validate skills (progressive-disclosure use_skill). Mirrors Python
     // ``Patter.agent`` skills validation: a list of Skill objects with a
     // non-empty name + string instructions, whose tools pass schema validation

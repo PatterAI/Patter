@@ -802,6 +802,29 @@ export interface AgentOptions {
    */
   readonly handoffs?: Readonly<Record<string, AgentOptions>>;
   /**
+   * Opt-in DESTINATION POLICY for the built-in `transfer_call` tool —
+   * defense-in-depth against prompt-injected toll fraud. The transfer
+   * destination is chosen by the LLM (caller-steerable), so the E.164
+   * format gate alone cannot stop an attacker directing calls to a
+   * premium-rate number billed to the operator. When this and/or
+   * `transferAllowedPrefixes` is set, the destination must be an exact
+   * member of this list OR start with one of the prefixes (union);
+   * anything else is rejected with the standard tool error envelope BEFORE
+   * any carrier REST call. Enforced in every mode (OpenAI Realtime
+   * `function_call`, Pipeline built-in handler, ElevenLabs ConvAI client
+   * tool). `undefined` for both (default) keeps today's format-only gate;
+   * an empty array denies ALL transfers (explicit lockdown). Mirrors
+   * Python `transfer_allowed_numbers`.
+   */
+  readonly transferAllowedNumbers?: readonly string[];
+  /**
+   * Allowed E.164 prefixes for `transfer_call`, e.g. `['+1', '+4420']` —
+   * each entry is `'+'` followed by 1-14 digits. Union with
+   * `transferAllowedNumbers`; see it for full semantics. Mirrors Python
+   * `transfer_allowed_prefixes`.
+   */
+  readonly transferAllowedPrefixes?: readonly string[];
+  /**
    * On-demand SKILLS the PRIMARY agent can activate mid-call (progressive
    * disclosure — the Anthropic Agent Skills pattern). When set, Patter
    * auto-injects a built-in ``use_skill`` tool (Realtime + Pipeline modes)

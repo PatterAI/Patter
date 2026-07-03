@@ -55,6 +55,7 @@ from getpatter.telephony.common import (
     _create_tts_from_config,
     _resolve_variables,
     _sanitize_variable_value,
+    _transfer_destination_allowed,
     _validate_e164,
 )
 from getpatter.utils.log_sanitize import mask_phone_number, sanitize_log_value
@@ -488,6 +489,8 @@ def _augment_with_builtin_handoff_tools(
     *,
     transfer_fn: Any | None,
     hangup_fn: Any | None,
+    transfer_allowed_numbers: tuple[str, ...] | None = None,
+    transfer_allowed_prefixes: tuple[str, ...] | None = None,
 ) -> list[dict]:
     """Return ``user_tools`` with the built-in ``transfer_call`` and
     ``end_call`` tools appended, each wired with a handler closure that
@@ -531,6 +534,23 @@ def _augment_with_builtin_handoff_tools(
                 )
                 return json.dumps(
                     {"error": "Invalid phone number format", "status": "rejected"}
+                )
+            # Destination policy AFTER the format gate: the number is
+            # LLM-chosen (caller-steerable via prompt injection), so a
+            # well-formed premium-rate number must still be refused here —
+            # before either mode's carrier REST call.
+            if not _transfer_destination_allowed(
+                number, transfer_allowed_numbers, transfer_allowed_prefixes
+            ):
+                logger.warning(
+                    "transfer_call rejected: destination not allowed by policy %s",
+                    mask_phone_number(number),
+                )
+                return json.dumps(
+                    {
+                        "error": "Transfer destination not allowed by policy",
+                        "status": "rejected",
+                    }
                 )
             if mode == "warm":
                 outcome = await _invoke_transfer_fn(
@@ -2477,6 +2497,35 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
                                 "transfer_call", args, rejection
                             )
                             continue
+                        # Destination policy AFTER the format gate: the
+                        # number is LLM-chosen (caller-steerable via prompt
+                        # injection), so a well-formed premium-rate number
+                        # must still be refused before the carrier call.
+                        if not _transfer_destination_allowed(
+                            transfer_number,
+                            getattr(self.agent, "transfer_allowed_numbers", None),
+                            getattr(self.agent, "transfer_allowed_prefixes", None),
+                        ):
+                            logger.warning(
+                                "transfer_call rejected: destination not "
+                                "allowed by policy %s",
+                                mask_phone_number(transfer_number),
+                            )
+                            rejection = json.dumps(
+                                {
+                                    "error": (
+                                        "Transfer destination not allowed by policy"
+                                    ),
+                                    "status": "rejected",
+                                }
+                            )
+                            await self._adapter.send_function_result(
+                                func_data["call_id"], rejection
+                            )
+                            await self._emit_tool_event(
+                                "transfer_call", args, rejection
+                            )
+                            continue
                         if transfer_mode == "warm":
                             # Warm transfer: run the carrier sequence FIRST so
                             # an unsupported carrier / REST failure surfaces an
@@ -3097,6 +3146,29 @@ class ElevenLabsConvAIStreamHandler(StreamHandler):
                 await _respond(
                     json.dumps(
                         {"error": "Invalid phone number format", "status": "rejected"}
+                    ),
+                    is_error=True,
+                )
+                return
+            # Destination policy AFTER the format gate: the number is
+            # LLM-chosen (caller-steerable via prompt injection), so a
+            # well-formed premium-rate number must still be refused before
+            # the carrier call.
+            if not _transfer_destination_allowed(
+                number,
+                getattr(self.agent, "transfer_allowed_numbers", None),
+                getattr(self.agent, "transfer_allowed_prefixes", None),
+            ):
+                logger.warning(
+                    "transfer_call rejected: destination not allowed by policy %s",
+                    mask_phone_number(number),
+                )
+                await _respond(
+                    json.dumps(
+                        {
+                            "error": "Transfer destination not allowed by policy",
+                            "status": "rejected",
+                        }
                     ),
                     is_error=True,
                 )
@@ -4156,6 +4228,12 @@ class PipelineStreamHandler(StreamHandler):
             self.agent.tools,
             transfer_fn=self._transfer_fn,
             hangup_fn=self._hangup_fn,
+            transfer_allowed_numbers=getattr(
+                self.agent, "transfer_allowed_numbers", None
+            ),
+            transfer_allowed_prefixes=getattr(
+                self.agent, "transfer_allowed_prefixes", None
+            ),
         )
         if getattr(self.agent, "handoffs", None):
             combined.append(
