@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 0.7.1 (2026-07-03)
+
 ### Added
 
 - **Opt-in destination policy for the built-in `transfer_call` tool**
@@ -59,23 +61,6 @@
   worth-resuming decision is a pluggable `RedeliveryPolicy` (default: gate on a
   non-trivial un-heard remainder). New `services/redelivery.py` / `.ts`. No-op in
   realtime mode. Default off ⇒ zero behaviour change.
-
-### Changed
-
-- **Barge-in "heard prefix" is now word-accurate.** On an interruption, the
-  conversation history is truncated to what the caller actually heard down to a
-  word boundary mid-sentence, instead of rounding up to whole sentences from a
-  byte estimate. Per-sentence segments now carry their playout duration, and the
-  played position is taken from the best available source — Twilio
-  carrier-confirmed per-sentence marks, else the wall-clock pacer's emitted
-  position (when `paced_output`), else the byte estimate. An internal heard/unsaid
-  split backs the new re-delivery feature. Telnyx/Plivo (no reliable marks) use
-  the pacer/estimate tiers.
-
-## 0.7.1 (2026-06-30)
-
-### Added
-
 - **Soniox v5 real-time STT adopted (both SDKs).** `SonioxModel` gains
   `STT_RT_V5 = "stt-rt-v5"` and the default model flips `stt-rt-v4` →
   `stt-rt-v5` (the GA v5 model, released 2026-06-16); `v4`/`v3`/`v2` stay
@@ -136,6 +121,15 @@
 
 ### Changed
 
+- **Barge-in "heard prefix" is now word-accurate.** On an interruption, the
+  conversation history is truncated to what the caller actually heard down to a
+  word boundary mid-sentence, instead of rounding up to whole sentences from a
+  byte estimate. Per-sentence segments now carry their playout duration, and the
+  played position is taken from the best available source — Twilio
+  carrier-confirmed per-sentence marks, else the wall-clock pacer's emitted
+  position (when `paced_output`), else the byte estimate. An internal heard/unsaid
+  split backs the new re-delivery feature. Telnyx/Plivo (no reliable marks) use
+  the pacer/estimate tiers.
 - **`@google/genai` peerDependency bumped `^0.3.0` → `>=2.0.0`** (kept optional)
   for the 2.x unified SDK, so `npm install getpatter` alongside
   `@google/genai@^2.x` no longer needs `--legacy-peer-deps`.
