@@ -1,5 +1,19 @@
 ## Unreleased
 
+### Fixed
+
+- **`gemini-3.1-flash-live-preview` is now actually usable** (field-debugged on
+  the Pillar demo line; TS only, Python parity pending):
+  - Setup: `enableAffectiveDialog`/`proactivity` are dated-2.5-native-audio-only
+    knobs — on the flash-live family the server never sends `setupComplete`
+    ("session ready timeout"). Dropped with a warning on flash-live models.
+  - Tool calls: in the default BLOCKING function-call mode 3.1 halts audio at
+    the `toolCall` and never resumes after the response (silent stall until the
+    caller hangs up; hit on real calls where the model tools mid-conversation).
+    flash-live now opts into the async mode (`behavior: NON_BLOCKING` +
+    `scheduling: INTERRUPT`), and the tool round-trip is logged at info.
+  `libraries/typescript/src/providers/gemini-live.ts`.
+
 ## 0.7.1 (2026-07-03)
 
 ### Added
