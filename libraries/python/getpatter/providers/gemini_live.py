@@ -28,6 +28,7 @@ class GeminiLiveModel(StrEnum):
     """Known Gemini Live (v1alpha) realtime models."""
 
     NATIVE_AUDIO_PREVIEW_09_2025 = "gemini-2.5-flash-native-audio-preview-09-2025"
+    LIVE_3_1_FLASH_PREVIEW = "gemini-3.1-flash-live-preview"
     LIVE_2_5_FLASH_PREVIEW = "gemini-live-2.5-flash-preview"
     LIVE_2_0_FLASH_EXP = "gemini-2.0-flash-exp"
 
@@ -145,6 +146,17 @@ class GeminiLiveAdapter:
             f"language={self.language!r})"
         )
 
+    @property
+    def _is_flash_live(self) -> bool:
+        """True for the ``gemini-*-flash-live*`` family (3.1+).
+
+        The two async-mode tool-call knobs key off this single predicate.
+        Kept deliberately permissive (substring, mirrors the TS adapter): the
+        retired ``*-flash-live-NNN`` ids also match but never connect, so it
+        is harmless.
+        """
+        return "flash-live" in str(self.model)
+
     async def connect(self) -> None:
         """Open a Live session with Gemini.
 
@@ -204,6 +216,16 @@ class GeminiLiveAdapter:
                             "parameters": _sanitize_gemini_schema(
                                 t.get("parameters", {})
                             ),
+                            # flash-live (3.1+) wedges in the default BLOCKING
+                            # function-call mode: the model halts audio at the
+                            # toolCall and never resumes after the response (no
+                            # error, just silence). Opt into the Live API's
+                            # async mode. Mirrors the TS adapter.
+                            **(
+                                {"behavior": "NON_BLOCKING"}
+                                if self._is_flash_live
+                                else {}
+                            ),
                         }
                         for t in self.tools
                     ],
@@ -245,15 +267,29 @@ class GeminiLiveAdapter:
         # call_id. Look it up from the map populated when the tool call was
         # emitted; fall back to ``call_id`` if we never saw this id (defensive).
         name = self._pending_tool_calls.pop(call_id, call_id)
-        await self._session.send_tool_response(
-            function_responses=[
-                {
-                    "id": call_id,
-                    "name": name,
-                    "response": {"result": result},
-                }
-            ],
-        )
+        function_response: dict[str, Any] = {
+            "id": call_id,
+            "name": name,
+            "response": {"result": result},
+        }
+        # Pair of the NON_BLOCKING declaration above: tell the model to pick
+        # the result up immediately instead of the WHEN_IDLE default, so 3.1
+        # resumes speaking after the tool round-trip. Mirrors the TS adapter.
+        if self._is_flash_live:
+            function_response["scheduling"] = "INTERRUPT"
+        try:
+            await self._session.send_tool_response(
+                function_responses=[function_response],
+            )
+            logger.info("Gemini Live toolResponse sent id=%s name=%s", call_id, name)
+        except Exception as exc:
+            logger.error(
+                "Gemini Live send_tool_response FAILED id=%s name=%s: %s",
+                call_id,
+                name,
+                exc,
+            )
+            raise
 
     async def cancel_response(self) -> None:
         """Interrupt the current model turn (barge-in)."""
