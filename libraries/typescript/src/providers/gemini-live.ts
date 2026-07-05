@@ -245,6 +245,17 @@ export class GeminiLiveAdapter {
   }
 
   /** Lazily import @google/genai, open a Live session, and start the receive loop. */
+  /**
+   * True for the `gemini-*-flash-live*` family (3.1+). The two async-mode
+   * tool-call knobs below key off this single predicate. Kept deliberately
+   * permissive (substring, not the stricter {@link geminiRequiresV1Alpha}
+   * regex): the retired `*-flash-live-NNN` ids also match but never connect,
+   * so it is harmless.
+   */
+  private get isFlashLive(): boolean {
+    return this.model.includes('flash-live');
+  }
+
   async connect(): Promise<void> {
     let genaiModule: { GoogleGenAI: new (args: { apiKey: string; httpOptions?: Record<string, unknown> }) => unknown };
     try {
@@ -301,11 +312,22 @@ export class GeminiLiveAdapter {
     };
     // Native-audio humanization knobs (opt-in). enableAffectiveDialog makes the
     // model adapt prosody to the caller's emotion; proactivity lets it choose
-    // when to speak. Both are v1alpha native-audio features.
-    if (this.affectiveDialog) {
+    // when to speak. Both are v1alpha native-audio features — of the DATED
+    // 2.5 previews only: on the *-flash-live-preview family the server never
+    // sends setupComplete when a setup includes them (connect dies with
+    // "session ready timeout"), so they are dropped there with a warning.
+    if (this.affectiveDialog && this.isFlashLive) {
+      getLogger().warn(
+        `Gemini Live: affectiveDialog is not supported on ${this.model} — ignoring (2.5 native-audio only)`,
+      );
+    } else if (this.affectiveDialog) {
       config.enableAffectiveDialog = true;
     }
-    if (this.proactiveAudio) {
+    if (this.proactiveAudio && this.isFlashLive) {
+      getLogger().warn(
+        `Gemini Live: proactiveAudio is not supported on ${this.model} — ignoring (2.5 native-audio only)`,
+      );
+    } else if (this.proactiveAudio) {
       config.proactivity = { proactiveAudio: true };
     }
     // Tune turn-taking: LOW start sensitivity ignores background noise/breathing
@@ -332,6 +354,11 @@ export class GeminiLiveAdapter {
             // ($schema, additionalProperties — strict-mode and zod-derived
             // MCP tools): one such tool 400'd the whole session.
             parameters: sanitizeGeminiSchema(t.parameters),
+            // flash-live (3.1+) wedges in the default BLOCKING function-call
+            // mode: the model halts audio at the toolCall and never resumes
+            // after the response (no error, just silence — seen 2/2 on the
+            // first call after long idle). Opt into the Live API's async mode.
+            ...(this.isFlashLive ? { behavior: 'NON_BLOCKING' } : {}),
           })),
         },
       ];
@@ -529,11 +556,24 @@ export class GeminiLiveAdapter {
     // emitted; fall back to callId if we never saw this id (defensive).
     const name = this.pendingToolCalls.get(callId) ?? callId;
     this.pendingToolCalls.delete(callId);
-    await sess.sendToolResponse?.({
-      functionResponses: [
-        { id: callId, name, response: { result } },
-      ],
-    });
+    try {
+      await sess.sendToolResponse?.({
+        functionResponses: [
+          {
+            id: callId,
+            name,
+            response: { result },
+            // Pair of the NON_BLOCKING declaration above: tell the model to
+            // pick the result up immediately instead of the WHEN_IDLE default.
+            ...(this.isFlashLive ? { scheduling: 'INTERRUPT' } : {}),
+          },
+        ],
+      });
+      getLogger().info(`Gemini Live toolResponse sent id=${callId} name=${name}`);
+    } catch (err) {
+      getLogger().error(`Gemini Live sendToolResponse FAILED id=${callId} name=${name}: ${String(err)}`);
+      throw err;
+    }
   }
 
   /** No-op — Gemini Live barge-in is VAD-driven, not client-cancelled. */
