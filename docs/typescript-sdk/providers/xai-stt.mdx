@@ -1,0 +1,142 @@
+---
+title: "xAI STT"
+description: "xAI (Grok) streaming speech-to-text for Patter pipeline mode."
+icon: "waveform"
+---
+
+# xAI STT
+
+`XAISTT` streams raw audio to the [xAI streaming STT WebSocket](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text) (`wss://api.x.ai/v1/stt`). Uses the `ws` package — no vendor SDK required. Audio goes up as binary frames (no base64); JSON transcript events come back with three-state `is_final` / `speech_final` semantics — interim, chunk final, utterance final.
+
+Highlights: word-level timestamps, keyterm biasing (up to 100 terms), speaker diarization, Inverse Text Normalization ("one hundred dollars" → "$100"), and **Smart Turn** — an ML end-of-turn detector that stops mid-sentence pauses from cutting the caller off.
+
+## Install
+
+```bash
+npm install getpatter
+```
+
+Set `XAI_API_KEY` in your environment.
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter/stt/xai`) or the flat re-export
+  (`XAISTT`). Both auto-resolve `XAI_API_KEY` from the environment when
+  `apiKey` is omitted.
+</Note>
+
+<CodeGroup>
+```typescript TypeScript
+// Namespaced import
+import * as xai from "getpatter/stt/xai";
+
+const stt = new xai.STT();                              // reads XAI_API_KEY
+const stt2 = new xai.STT({ apiKey: "xai-...", keyterms: ["Patter"], smartTurn: 0.7 });
+
+// Flat alias (equivalent)
+import { XAISTT } from "getpatter";
+
+const stt3 = new XAISTT();
+```
+
+```python Python
+# See python-sdk/providers/xai-stt for the Python twin.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```typescript
+// npx tsx example.ts
+import { Patter, Twilio, XAISTT, XAITTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new XAISTT(),                                    // XAI_API_KEY from env
+  tts: new XAITTS({ voice: "eve" }),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+## Rates
+
+xAI bills STT per hour of audio. Default rate from `getpatter/pricing` (`xai_stt`):
+
+| Endpoint | Rate |
+|---|---|
+| Streaming WebSocket (this adapter) | $0.20/hr = $0.003333/min |
+| REST batch (`POST /v1/stt`) | $0.10/hr = $0.001667/min |
+
+Override via `new Patter({ pricing: { xai_stt: { price: ... } } })`.
+
+## Languages
+
+The model transcribes 25 languages regardless of configuration. The `language` option (default `"en"`) additionally enables text formatting — numbers, currencies, and units rendered in written form. Pass `language: null` to disable formatting. Supported codes: `ar cs da nl en fil fr de hi id it ja ko mk ms fa pl pt ro ru es sv th tr vi`.
+
+## Smart Turn
+
+Smart Turn replaces silence-only endpointing with an ML end-of-turn prediction. Below the confidence threshold a pause is demoted to a chunk final (text locked, utterance continues) instead of an utterance final:
+
+```typescript
+const stt = new xai.STT({ smartTurn: 0.7, smartTurnTimeoutMs: 3000 });
+```
+
+| Threshold | Behavior |
+|---|---|
+| `0.5` | Balanced — catches most natural turn endings |
+| `0.7` | Conservative — better for dictation and number sequences |
+| `0.9` | Very conservative — only highly confident turn completions |
+
+`smartTurnTimeoutMs` (1–5000) is the safety net: `speech_final` fires anyway after that much silence. When Smart Turn is enabled, transcripts carry `endOfTurnConfidence`, which the adapter also surfaces as `confidence`.
+
+## Telephony optimization
+
+For Twilio (mulaw 8 kHz upstream — xAI accepts G.711 natively):
+
+```typescript
+import { XAISTT } from "getpatter";
+
+const stt = new XAISTT({ encoding: "mulaw", sampleRate: 8000 });
+```
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `apiKey` | — | Reads from `XAI_API_KEY` when omitted. |
+| `language` | `"en"` | Enables text formatting; `null` disables. |
+| `encoding` | `"pcm"` | `"pcm"`, `"mulaw"`, `"alaw"`. |
+| `sampleRate` | `16000` | 8000–48000 Hz; 16 kHz is the model's native rate. |
+| `interimResults` | `true` | Partial transcripts every ~500 ms. |
+| `endpointingMs` | server: 10 | Silence before utterance final, 0–5000 ms. |
+| `keyterms` | — | Bias terms, max 100 × 50 chars. |
+| `diarize` | `false` | Words carry a `speaker` field. |
+| `fillerWords` | `false` | Keep "uh"/"um" in the transcript. |
+| `smartTurn` | — | End-of-turn confidence threshold 0.0–1.0. |
+| `smartTurnTimeoutMs` | — | Max silence (1–5000 ms) before forced final. |
+
+## Low-level usage
+
+```typescript
+import { XAISTT } from "getpatter";
+
+const stt = new XAISTT({ keyterms: ["Patter"] });
+await stt.connect();                          // waits for transcript.created
+stt.onTranscript((t) => console.log(t.text, t.isFinal, t.speechFinal));
+stt.sendAudio(pcmChunk);                      // raw binary, 16 kHz PCM s16le
+await stt.finalize();                         // force utterance-final (PTT / VAD edge)
+await stt.closeAsync();                       // finalize + audio.done + drain
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="xAI TTS" icon="waveform-lines" href="/typescript-sdk/providers/xai-tts">The Grok TTS twin.</Card>
+  <Card title="xAI Voice Agent" icon="bolt" href="/typescript-sdk/providers/xai-realtime">All-in-one Grok speech-to-speech.</Card>
+  <Card title="STT overview" icon="waveform" href="/typescript-sdk/stt">All STT providers side by side.</Card>
+  <Card title="Metrics" icon="chart-line" href="/typescript-sdk/metrics">Per-call cost accounting.</Card>
+</CardGroup>

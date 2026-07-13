@@ -199,9 +199,31 @@ def _create_stt_from_config(config, for_twilio: bool = False):
             )
         return AssemblyAISTT(api_key=config.api_key, language=config.language, **kwargs)
 
+    if provider == "xai":
+        from getpatter.providers.xai_stt import XAISTT  # type: ignore[import]
+
+        allowed = {
+            "encoding",
+            "sample_rate",
+            "interim_results",
+            "endpointing_ms",
+            "keyterms",
+            "diarize",
+            "filler_words",
+            "smart_turn",
+            "smart_turn_timeout_ms",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        if for_twilio:
+            return XAISTT.for_twilio(
+                api_key=config.api_key, language=config.language, **kwargs
+            )
+        return XAISTT(api_key=config.api_key, language=config.language, **kwargs)
+
     raise ValueError(
         f"Unknown STT provider '{provider}'. "
-        "Supported: deepgram, whisper, cartesia, soniox, speechmatics, assemblyai."
+        "Supported: deepgram, whisper, cartesia, soniox, speechmatics, "
+        "assemblyai, xai."
     )
 
 
@@ -324,8 +346,24 @@ def _create_tts_from_config(config):
         # The Sarvam adapter calls the user-facing ``voice`` a ``speaker``.
         return SarvamTTS(api_key=config.api_key, speaker=config.voice, **kwargs)
 
+    if provider == "xai":
+        from getpatter.providers.xai_tts import XAITTS  # type: ignore[import]
+
+        allowed = {
+            "language",
+            "codec",
+            "sample_rate",
+            "bit_rate",
+            "speed",
+            "text_normalization",
+            "optimize_streaming_latency",
+            "transport",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        return XAITTS(api_key=config.api_key, voice=config.voice, **kwargs)
+
     raise ValueError(
         f"Unknown TTS provider '{provider}'. "
         "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld, "
-        "soniox_tts, sarvam."
+        "soniox_tts, sarvam, xai."
     )

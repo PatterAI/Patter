@@ -112,6 +112,7 @@
                       "python-sdk/providers/openai-realtime-2",
                       "python-sdk/providers/gemini-live",
                       "python-sdk/providers/ultravox-realtime",
+                      "python-sdk/providers/xai-realtime",
                       "python-sdk/providers/elevenlabs-convai"
                     ]
                   },
@@ -126,7 +127,8 @@
                       "python-sdk/providers/whisper",
                       "python-sdk/providers/soniox",
                       "python-sdk/providers/speechmatics",
-                      "python-sdk/providers/telnyx-stt"
+                      "python-sdk/providers/telnyx-stt",
+                      "python-sdk/providers/xai-stt"
                     ]
                   },
                   {
@@ -152,7 +154,8 @@
                       "python-sdk/providers/openai-tts",
                       "python-sdk/providers/cartesia-tts",
                       "python-sdk/providers/inworld",
-                      "python-sdk/providers/telnyx-tts"
+                      "python-sdk/providers/telnyx-tts",
+                      "python-sdk/providers/xai-tts"
                     ]
                   },
                   {
@@ -247,6 +250,7 @@
                       "typescript-sdk/providers/openai-realtime-2",
                       "typescript-sdk/providers/gemini-live",
                       "typescript-sdk/providers/ultravox-realtime",
+                      "typescript-sdk/providers/xai-realtime",
                       "typescript-sdk/providers/elevenlabs-convai"
                     ]
                   },
@@ -261,7 +265,8 @@
                       "typescript-sdk/providers/whisper",
                       "typescript-sdk/providers/soniox",
                       "typescript-sdk/providers/speechmatics",
-                      "typescript-sdk/providers/telnyx-stt"
+                      "typescript-sdk/providers/telnyx-stt",
+                      "typescript-sdk/providers/xai-stt"
                     ]
                   },
                   {
@@ -287,7 +292,8 @@
                       "typescript-sdk/providers/openai-tts",
                       "typescript-sdk/providers/cartesia-tts",
                       "typescript-sdk/providers/inworld",
-                      "typescript-sdk/providers/telnyx-tts"
+                      "typescript-sdk/providers/telnyx-tts",
+                      "typescript-sdk/providers/xai-tts"
                     ]
                   },
                   {

@@ -68,11 +68,13 @@ export {
   inworld,
   sonioxTts,
   sarvam,
+  xaiStt,
+  xaiTts,
   ultravox,
   geminiLive,
 } from "./providers";
 export type { RealtimeConfig } from "./providers";
-export { DEFAULT_PRICING, mergePricing, calculateSttCost, calculateTtsCost, calculateRealtimeCost, calculateTelephonyCost } from "./pricing";
+export { DEFAULT_PRICING, mergePricing, calculateSttCost, calculateTtsCost, calculateRealtimeCost, calculateRealtimeMinuteCost, calculateTelephonyCost } from "./pricing";
 export type { ProviderPricing } from "./pricing";
 export { CallMetricsAccumulator } from "./metrics";
 export type { LatencyBreakdown, CostBreakdown, TurnMetrics, CallMetrics, CallControl } from "./metrics";
@@ -136,6 +138,16 @@ export {
   INWORLD_REALTIME_DEFAULT_VOICE,
 } from "./providers/inworld-realtime";
 export type { InworldRealtimeAdapterOptions } from "./providers/inworld-realtime";
+export {
+  XAIRealtimeAdapter,
+  XAIRealtimeModel,
+  XAIRealtimeAudioFormat,
+  XAIRealtimeSampleRate,
+  XAIRealtimeToolType,
+  XAI_REALTIME_URL,
+  XAI_CLIENT_SECRETS_URL,
+} from "./providers/xai-realtime";
+export type { XAIRealtimeOptions, XAIRealtimeEventCallback } from "./providers/xai-realtime";
 export { scheduleCron, scheduleOnce, scheduleInterval } from "./scheduler";
 export type { ScheduleHandle, JobCallback } from "./scheduler";
 // Provider adapter types (re-exported for advanced users who build custom
@@ -180,6 +192,14 @@ export { STT as SpeechmaticsSTT } from "./stt/speechmatics";
 export type { SpeechmaticsSTTOptions } from "./stt/speechmatics";
 export { STT as GeminiSTT } from "./stt/gemini";
 export type { GeminiSTTOptions } from "./stt/gemini";
+export { STT as XAISTT } from "./stt/xai";
+export type { XAISTTOptions } from "./stt/xai";
+export {
+  XAISTTEncoding,
+  XAISTTSampleRate,
+  XAISTTServerEvent,
+  XAISTTClientFrame,
+} from "./providers/xai-stt";
 export {
   TurnDetectionMode as SpeechmaticsTurnDetectionMode,
   SpeechmaticsSampleRate,
@@ -213,6 +233,16 @@ export { TTS as SonioxTTS } from "./tts/soniox";
 export type { SonioxTTSOptions, SonioxCarrierOptions } from "./tts/soniox";
 export { TTS as SarvamTTS } from "./tts/sarvam";
 export type { SarvamTTSOptions, SarvamCarrierOptions } from "./tts/sarvam";
+export { TTS as XAITTS } from "./tts/xai";
+export type { XAITTSOptions, XAICarrierOptions } from "./tts/xai";
+export {
+  XAIVoice,
+  XAITTSCodec,
+  XAITTSSampleRate,
+  createCustomVoice as createXAICustomVoice,
+  listCustomVoices as listXAICustomVoices,
+} from "./providers/xai-tts";
+export type { XAIVoiceInfo } from "./providers/xai-tts";
 
 // New namespaced LLM classes (Phase 2 of the v0.5.x API refactor).
 export { LLM as OpenAILLM } from "./llm/openai";

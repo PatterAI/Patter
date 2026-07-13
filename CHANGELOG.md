@@ -1,5 +1,55 @@
 ## Unreleased
 
+### Added
+
+- **xAI (Grok) voice providers — STT, TTS, and Realtime in both SDKs.**
+  Full integration of the xAI Voice APIs
+  (https://docs.x.ai/developers/model-capabilities/audio/voice):
+  - **`XAISTT`** (`getpatter.stt.xai.STT` / `getpatter/stt/xai`) — streaming
+    speech-to-text over `wss://api.x.ai/v1/stt`: raw binary audio frames,
+    interim/chunk-final/utterance-final transcripts, word-level timestamps,
+    keyterm biasing (max 100 terms), speaker diarization, Inverse Text
+    Normalization, filler-word control, and **Smart Turn** ML end-of-turn
+    detection (`smart_turn` / `smart_turn_timeout_ms`). `finalize()` maps to
+    the VAD fast-path like Deepgram's `Finalize`; `for_twilio()` pins
+    carrier-native mulaw @ 8 kHz.
+  - **`XAITTS`** (`getpatter.tts.xai.TTS` / `getpatter/tts/xai`) —
+    text-to-speech with the bidirectional streaming WebSocket
+    (`wss://api.x.ai/v1/tts`, `text.delta` → `audio.delta`) as the default
+    transport and the unary `POST /v1/tts` behind `transport="http"`. 26
+    built-in voices (`eve` default; roster via `XAITTS.list_voices()` /
+    `listVoices()`), inline speech tags, 20 languages + `auto`, MP3 / WAV /
+    PCM / μ-law / A-law output, `speed`, `text_normalization`, and
+    `optimize_streaming_latency`. `for_twilio()` / `for_telnyx()` emit G.711
+    μ-law @ 8 kHz natively (bit-clean passthrough). Custom-voice cloning
+    helpers `create_custom_voice` / `list_custom_voices`
+    (`createXAICustomVoice` / `listXAICustomVoices`) wrap
+    `POST|GET /v1/custom-voices`; a cloned `voice_id` works everywhere a
+    built-in voice does.
+  - **`XAIRealtimeAdapter`** — the Grok Voice Agent API
+    (`wss://api.x.ai/v1/realtime`, `grok-voice-latest` /
+    `grok-voice-think-fast-1.0`): all-in-one speech-to-speech with server
+    VAD, barge-in truncation bounded by wall-clock playback (same semantics
+    as the OpenAI adapter), function tools plus xAI server-side tools
+    (`web_search`, `x_search`, `file_search`, `mcp`), `reasoning.effort`,
+    ASR `language_hint` / `keyterms` biasing, pronunciation `replace` maps,
+    output-speed control, and mid-session `update_session`. Ephemeral
+    client secrets for browser clients via
+    `XAIRealtimeAdapter.create_ephemeral_token()`
+    (`POST /v1/realtime/client_secrets`). Same
+    `connect / send_audio / receive_events / close` surface as
+    `OpenAIRealtimeAdapter` / `UltravoxRealtimeAdapter`.
+  - **Pricing** (verified against https://docs.x.ai/developers/pricing,
+    2026-07-13): `xai_stt` $0.20/hr streaming ($0.10/hr REST batch noted),
+    `xai_tts` $15.00/1M characters, `xai_realtime` $0.05/min plus
+    $0.004 per client text message. New
+    `calculate_realtime_minute_cost` / `calculateRealtimeMinuteCost`
+    helper covers per-minute realtime billing (the OpenAI helper is
+    token-based). All credentials resolve from `XAI_API_KEY`.
+  `libraries/python/getpatter/providers/xai_{stt,tts,realtime}.py`,
+  `libraries/typescript/src/providers/xai-{stt,tts,realtime}.ts`, docs pages
+  under `docs/{python,typescript}-sdk/providers/xai-*.mdx`.
+
 ### Fixed
 
 - **`gemini-3.1-flash-live-preview` is now actually usable** (field-debugged on

@@ -21,4 +21,5 @@ __all__ = [
     "inworld",
     "soniox",
     "sarvam",
+    "xai",
 ]

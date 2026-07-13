@@ -48,6 +48,32 @@ def speechmatics(api_key: str, language: str = "en") -> STTConfig:
     return STTConfig(provider="speechmatics", api_key=api_key, language=language)
 
 
+def xai_stt(
+    api_key: str,
+    language: str = "en",
+    *,
+    keyterms: list[str] | None = None,
+    smart_turn: float | None = None,
+    smart_turn_timeout_ms: int | None = None,
+) -> STTConfig:
+    """xAI (Grok) streaming STT config (``wss://api.x.ai/v1/stt``).
+
+    ``keyterms`` biases transcription toward domain vocabulary (max 100
+    terms). ``smart_turn`` (0.0–1.0) enables xAI's ML end-of-turn detection —
+    pair with ``smart_turn_timeout_ms`` so extended silence still finalizes.
+    """
+    options: dict = {}
+    if keyterms is not None:
+        options["keyterms"] = keyterms
+    if smart_turn is not None:
+        options["smart_turn"] = smart_turn
+    if smart_turn_timeout_ms is not None:
+        options["smart_turn_timeout_ms"] = smart_turn_timeout_ms
+    return STTConfig(
+        provider="xai", api_key=api_key, language=language, options=options
+    )
+
+
 def elevenlabs(api_key: str, voice: str = "rachel") -> TTSConfig:
     """Config helper for ElevenLabs TTS."""
     return TTSConfig(provider="elevenlabs", api_key=api_key, voice=voice)
@@ -135,6 +161,22 @@ def sarvam(
     )
 
 
+def xai_tts(
+    api_key: str,
+    voice: str = "eve",
+    *,
+    language: str = "en",
+) -> TTSConfig:
+    """xAI (Grok) TTS config (streaming WebSocket, ``eve`` voice by default).
+
+    ``voice`` accepts any built-in xAI voice or a custom ``voice_id`` cloned
+    via the Custom Voices API. ``language`` is a BCP-47 code or ``"auto"``.
+    """
+    return TTSConfig(
+        provider="xai", api_key=api_key, voice=voice, options={"language": language}
+    )
+
+
 def _load_anthropic_llm():
     from getpatter.providers.anthropic_llm import AnthropicLLMProvider
 
@@ -196,6 +238,8 @@ __all__ = [
     "inworld",
     "soniox_tts",
     "sarvam",
+    "xai_stt",
+    "xai_tts",
     "AnthropicLLMProvider",
     "GroqLLMProvider",
     "CerebrasLLMProvider",
@@ -203,21 +247,23 @@ __all__ = [
     "LiteLLMProvider",
 ]
 
-# ``soniox_tts`` (the helper above) shares its name with the ``soniox_tts``
-# submodule. Importing that submodule — which ``_create_tts_from_config`` does
-# lazily — binds the MODULE object onto this package, shadowing the helper and
-# making ``providers.soniox_tts(...)`` uncallable. Force the submodule import
-# now (so the binding happens once) and then restore the helper. Subsequent
-# ``from getpatter.providers.soniox_tts import ...`` calls find the module
-# already cached in ``sys.modules`` and do NOT re-bind the attribute, so the
-# helper stays callable. ``sarvam`` needs no such guard (its submodule is
+# ``soniox_tts`` / ``xai_stt`` / ``xai_tts`` (the helpers above) share their
+# names with same-named submodules. Importing a submodule — which
+# ``_create_stt_from_config`` / ``_create_tts_from_config`` do lazily — binds
+# the MODULE object onto this package, shadowing the helper and making
+# ``providers.soniox_tts(...)`` uncallable. Force the submodule imports now
+# (so the binding happens once) and then restore the helpers. Subsequent
+# ``from getpatter.providers.<name> import ...`` calls find the module already
+# cached in ``sys.modules`` and do NOT re-bind the attribute, so the helpers
+# stay callable. ``sarvam`` needs no such guard (its submodule is
 # ``sarvam_tts``, a different name).
 import importlib as _importlib  # noqa: E402
 
-_soniox_tts_helper = soniox_tts
-try:  # pragma: no cover - import side-effect guard
-    _importlib.import_module(__name__ + ".soniox_tts")
-except Exception:  # pragma: no cover - defensive (optional dep may be absent)
-    pass
-soniox_tts = _soniox_tts_helper
-del _importlib, _soniox_tts_helper
+for _shadowed_name in ("soniox_tts", "xai_stt", "xai_tts"):
+    _helper = globals()[_shadowed_name]
+    try:  # pragma: no cover - import side-effect guard
+        _importlib.import_module(__name__ + "." + _shadowed_name)
+    except Exception:  # pragma: no cover - defensive (optional dep may be absent)
+        pass
+    globals()[_shadowed_name] = _helper
+del _importlib, _helper, _shadowed_name

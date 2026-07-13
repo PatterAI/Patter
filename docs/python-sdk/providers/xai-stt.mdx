@@ -1,0 +1,143 @@
+---
+title: "xAI STT"
+description: "xAI (Grok) streaming speech-to-text for Patter pipeline mode."
+icon: "waveform"
+---
+
+# xAI STT
+
+`XAISTT` streams raw audio to the [xAI streaming STT WebSocket](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text) (`wss://api.x.ai/v1/stt`). Pure `websockets` transport, no vendor SDK required. Audio goes up as binary frames (no base64); JSON transcript events come back with the three-state `is_final` / `speech_final` semantics Patter already models — interim, chunk final, utterance final.
+
+Highlights: word-level timestamps, keyterm biasing (up to 100 terms), speaker diarization, Inverse Text Normalization ("one hundred dollars" → "$100"), and **Smart Turn** — an ML end-of-turn detector that stops mid-sentence pauses from cutting the caller off.
+
+## Install
+
+```bash
+pip install getpatter
+```
+
+No extra — `websockets` is a base dependency. Set `XAI_API_KEY` in your environment.
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.stt.xai`) or the flat alias
+  (`getpatter.XAISTT`). Both auto-resolve `XAI_API_KEY` from the
+  environment when `api_key=` is omitted.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import
+from getpatter.stt import xai
+
+stt = xai.STT()                                           # reads XAI_API_KEY
+stt = xai.STT(api_key="xai-...", keyterms=["Patter"], smart_turn=0.7)
+
+# Flat alias (equivalent)
+from getpatter import XAISTT
+
+stt = XAISTT()
+```
+
+```typescript TypeScript
+// See typescript-sdk/providers/xai-stt for the TS twin.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, XAISTT, XAITTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=XAISTT(),                                         # XAI_API_KEY from env
+    tts=XAITTS(voice="eve"),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Rates
+
+xAI bills STT per hour of audio. Default rate from `getpatter.pricing` (`xai_stt`):
+
+| Endpoint | Rate |
+|---|---|
+| Streaming WebSocket (this adapter) | $0.20/hr = $0.003333/min |
+| REST batch (`POST /v1/stt`) | $0.10/hr = $0.001667/min |
+
+Override via `Patter(pricing={"xai_stt": {"price": ...}})`.
+
+## Languages
+
+The model transcribes 25 languages regardless of configuration. The `language` parameter (default `"en"`) additionally enables text formatting — numbers, currencies, and units rendered in written form. Pass `language=None` to disable formatting. Supported codes: `ar cs da nl en fil fr de hi id it ja ko mk ms fa pl pt ro ru es sv th tr vi`.
+
+## Smart Turn
+
+Smart Turn replaces silence-only endpointing with an ML end-of-turn prediction. Below the confidence threshold a pause is demoted to a chunk final (text locked, utterance continues) instead of an utterance final:
+
+```python
+stt = xai.STT(smart_turn=0.7, smart_turn_timeout_ms=3000)
+```
+
+| Threshold | Behavior |
+|---|---|
+| `0.5` | Balanced — catches most natural turn endings |
+| `0.7` | Conservative — better for dictation and number sequences |
+| `0.9` | Very conservative — only highly confident turn completions |
+
+`smart_turn_timeout_ms` (1–5000) is the safety net: `speech_final` fires anyway after that much silence. When Smart Turn is enabled, every transcript carries an `end_of_turn_confidence`, which the adapter surfaces as `Transcript.confidence`.
+
+## Telephony optimization
+
+For Twilio (mulaw 8 kHz upstream — xAI accepts G.711 natively, so no client transcode):
+
+```python
+from getpatter.providers.xai_stt import XAISTT
+
+stt = XAISTT.for_twilio(api_key="xai-...")   # mulaw @ 8 kHz native
+```
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` | `None` | Reads from `XAI_API_KEY` when omitted. |
+| `language` | `"en"` | Enables text formatting; `None` disables. |
+| `encoding` | `"pcm"` | `"pcm"`, `"mulaw"`, `"alaw"`. |
+| `sample_rate` | `16000` | 8000–48000 Hz; 16 kHz is the model's native rate. |
+| `interim_results` | `True` | Partial transcripts every ~500 ms. |
+| `endpointing_ms` | `None` (server: 10) | Silence before utterance final, 0–5000 ms. |
+| `keyterms` | `None` | Bias terms, max 100 × 50 chars. |
+| `diarize` | `False` | Words carry a `speaker` field. |
+| `filler_words` | `False` | Keep "uh"/"um" in the transcript. |
+| `smart_turn` | `None` | End-of-turn confidence threshold 0.0–1.0. |
+| `smart_turn_timeout_ms` | `None` | Max silence (1–5000 ms) before forced final. |
+
+## Low-level usage
+
+```python
+from getpatter.providers.xai_stt import XAISTT
+
+stt = XAISTT(api_key="xai-...", keyterms=["Patter"])
+await stt.connect()                          # waits for transcript.created
+await stt.send_audio(pcm_chunk)              # raw binary, 16 kHz PCM s16le
+async for t in stt.receive_transcripts():
+    print(t.text, t.is_final, t.speech_final)
+await stt.finalize()                         # force utterance-final (PTT / VAD edge)
+await stt.close()                            # finalize + audio.done + close
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="xAI TTS" icon="waveform-lines" href="/python-sdk/providers/xai-tts">The Grok TTS twin.</Card>
+  <Card title="xAI Voice Agent" icon="bolt" href="/python-sdk/providers/xai-realtime">All-in-one Grok speech-to-speech.</Card>
+  <Card title="STT overview" icon="waveform" href="/python-sdk/stt">All STT providers side by side.</Card>
+  <Card title="Metrics" icon="chart-line" href="/python-sdk/metrics">Per-call cost accounting.</Card>
+</CardGroup>

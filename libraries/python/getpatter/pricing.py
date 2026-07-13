@@ -28,8 +28,8 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-PRICING_VERSION: str = "2026.3"
-PRICING_LAST_UPDATED: str = "2026-05-08"
+PRICING_VERSION: str = "2026.4"
+PRICING_LAST_UPDATED: str = "2026-07-13"
 
 
 def _resolve_provider_rates(provider_config: dict, model: str | None) -> dict:
@@ -145,6 +145,13 @@ DEFAULT_PRICING: dict[str, dict] = {
     # Previous $0.0173 reflected a retired Standard tier; users were
     # being over-billed ~4.3x.
     "speechmatics": {"unit": PricingUnit.MINUTE, "price": 0.004},
+    # xAI (Grok) streaming STT: $0.20/hr = $0.003333/min. The REST batch
+    # endpoint (POST /v1/stt) is $0.10/hr = $0.001667/min — the Patter
+    # adapter uses the streaming WebSocket, so the streaming rate is the
+    # default. Source: https://docs.x.ai/developers/pricing (verified
+    # 2026-07-13). Override for batch usage via
+    # ``Patter(pricing={"xai_stt": {"price": 0.10 / 60}})``.
+    "xai_stt": {"unit": PricingUnit.MINUTE, "price": 0.20 / 60},
     # TTS — per 1,000 characters synthesized.
     # Source: https://elevenlabs.io/pricing/api (verified 2026-05-11). The
     # per-1K-character API/overage rate is flat across all plan tiers (Free
@@ -231,6 +238,11 @@ DEFAULT_PRICING: dict[str, dict] = {
             "inworld-tts-1.5-mini": {"price": 0.015},
         },
     },
+    # xAI (Grok) TTS: $15.00 per 1M input characters = $0.015/1k chars,
+    # flat across all voices (built-in and custom) and both the unary
+    # POST /v1/tts and streaming wss://api.x.ai/v1/tts transports.
+    # Source: https://docs.x.ai/developers/pricing (verified 2026-07-13).
+    "xai_tts": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.015},
     # Soniox real-time TTS. Soniox publishes a $0.70/hr headline for generated
     # speech (native billing is token-based: input text $4/1M + output audio
     # $21.50/1M). Patter's TTS cost model is per-character, so we express the
@@ -325,6 +337,18 @@ DEFAULT_PRICING: dict[str, dict] = {
                 "cached_text_input_per_token": 0.0000025,
             },
         },
+    },
+    # xAI (Grok) Voice Agent (speech-to-speech realtime) — per minute of
+    # session time, NOT per token: $0.05/min ($3.00/hr). Client text inputs
+    # (every ``conversation.item.create``) are billed separately at
+    # $0.004/message — tracked by the adapter as
+    # ``patter.cost.realtime_text_messages`` and exposed here as
+    # ``text_input_per_message`` for callers that reconcile it. Source:
+    # https://docs.x.ai/developers/pricing (verified 2026-07-13).
+    "xai_realtime": {
+        "unit": PricingUnit.MINUTE,
+        "price": 0.05,
+        "text_input_per_message": 0.004,
     },
     # Telephony — per minute of call duration.
     # twilio default = US inbound local (the 99% case for voice agents
@@ -510,6 +534,27 @@ def calculate_realtime_cost(
     )
     cost += output_details.get("text_tokens", 0) * rates.get("text_output_per_token", 0)
     # Clamp ≥0 — mis-configured cached rates can never produce negative bill.
+    return max(0.0, cost)
+
+
+def calculate_realtime_minute_cost(
+    provider: str,
+    duration_seconds: float,
+    pricing: dict,
+    text_input_messages: int = 0,
+) -> float:
+    """Calculate cost for realtime providers billed per minute of session
+    time (e.g. ``xai_realtime`` at $0.05/min) rather than per token.
+
+    ``text_input_messages`` covers providers that bill client text inputs
+    separately — xAI charges $0.004 per ``conversation.item.create`` on top
+    of the per-minute rate (``text_input_per_message`` in the pricing entry).
+    """
+    config = pricing.get(provider, {})
+    if config.get("unit") != "minute":
+        return 0.0
+    cost = (duration_seconds / 60.0) * config.get("price", 0.0)
+    cost += text_input_messages * config.get("text_input_per_message", 0.0)
     return max(0.0, cost)
 
 

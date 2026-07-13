@@ -1,0 +1,159 @@
+---
+title: "xAI TTS"
+description: "xAI (Grok) text-to-speech — WebSocket streaming, 25+ voices, speech tags, custom voice cloning."
+icon: "waveform-lines"
+---
+
+# xAI TTS
+
+`XAITTS` synthesizes speech with the [xAI TTS API](https://docs.x.ai/developers/model-capabilities/audio/text-to-speech). The default transport is the bidirectional streaming WebSocket (`wss://api.x.ai/v1/tts`) — one connection per utterance, `text.delta` up, base64 `audio.delta` chunks back — for the lowest time-to-first-audio. `transport="http"` switches to the unary `POST /v1/tts` endpoint.
+
+Highlights: 25+ expressive built-in voices (`eve` is the default), inline speech tags (`[pause]`, `[laugh]`, `<whisper>…</whisper>`), 20 languages plus `auto` detection, MP3 / WAV / PCM / μ-law / A-law output, and custom voice cloning.
+
+## Install
+
+```bash
+pip install getpatter
+```
+
+No extra — `websockets` and `httpx` are base dependencies. Set `XAI_API_KEY` in your environment.
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.tts.xai`) or the flat alias
+  (`getpatter.XAITTS`). Both auto-resolve `XAI_API_KEY` from the
+  environment when `api_key=` is omitted.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import
+from getpatter.tts import xai
+
+tts = xai.TTS()                                           # reads XAI_API_KEY
+tts = xai.TTS(api_key="xai-...", voice="ara", language="auto")
+
+# Flat alias (equivalent)
+from getpatter import XAITTS
+
+tts = XAITTS()
+```
+
+```typescript TypeScript
+// See typescript-sdk/providers/xai-tts for the TS twin.
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, XAISTT, XAITTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=XAISTT(),
+    tts=XAITTS(voice="eve"),                              # XAI_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+## Rates
+
+xAI bills TTS per input character — $15.00 / 1M characters = **$0.015 / 1k chars**, flat across all voices and both transports (`xai_tts` in `getpatter.pricing`).
+
+## Voices
+
+26 built-in voices, usable interchangeably here and on the Voice Agent API: `ara eve leo rex sal altair atlas carina castor celeste cosmo helios helix iris kepler lumen luna lux naksh orion perseus rigel sirius ursa zagan zenith` (case-insensitive; `eve` default). List them programmatically:
+
+```python
+voices = await XAITTS.list_voices(api_key="xai-...")      # GET /v1/tts/voices
+```
+
+### Custom voices
+
+Clone a voice from a reference clip (max 120 s; 90+ s recommended) and use the returned `voice_id` anywhere a built-in voice works — including the streaming WebSocket and the Voice Agent API:
+
+```python
+from getpatter.providers.xai_tts import create_custom_voice, list_custom_voices
+
+voice = await create_custom_voice(
+    api_key="xai-...",
+    file=open("reference.wav", "rb").read(),
+    name="Friendly Narrator",
+    language="en",
+)
+tts = XAITTS(api_key="xai-...", voice=voice["voice_id"])
+```
+
+<Note>
+  The `POST /v1/custom-voices` API endpoint is gated to xAI Enterprise
+  plans; voices can also be created for free in the xAI console.
+</Note>
+
+## Speech tags
+
+Inline tags pass straight through in the text:
+
+```python
+async for chunk in tts.synthesize(
+    "So I walked in and [pause] there it was. [laugh] "
+    "<whisper>It was a secret the whole time.</whisper>"
+):
+    ...
+```
+
+Inline: `[pause] [long-pause] [laugh] [chuckle] [giggle] [cry] [sigh] [breath] [inhale] [exhale] [tsk] [tongue-click] [lip-smack] [hum-tune]`. Wrapping tags control delivery style (whisper, singing, pitch, volume) around complete phrases.
+
+## Telephony optimization
+
+xAI emits G.711 natively, so phone calls take the bit-clean passthrough path (no resampling, no client-side μ-law encode):
+
+```python
+from getpatter.providers.xai_tts import XAITTS
+
+tts = XAITTS.for_twilio(api_key="xai-...")   # mulaw @ 8 kHz
+tts = XAITTS.for_telnyx(api_key="xai-...")   # mulaw @ 8 kHz (PCMU wire)
+```
+
+Unpinned instances are flipped to the carrier-native format automatically by the stream handler (`set_telephony_carrier`).
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` | `None` | Reads from `XAI_API_KEY` when omitted. |
+| `voice` | `"eve"` | Built-in voice ID or custom `voice_id`. |
+| `language` | `"en"` | BCP-47 code or `"auto"`. Required by the API. |
+| `codec` | `"pcm"` | `mp3`, `wav`, `pcm`, `mulaw`, `alaw`. |
+| `sample_rate` | `16000` | 8000–48000 Hz (API default is 24000). |
+| `bit_rate` | `None` | MP3 only: 32000–192000 bps. |
+| `speed` | `None` | 0.7–1.5 speech-speed multiplier. |
+| `text_normalization` | `False` | Written form → spoken form before synthesis. |
+| `optimize_streaming_latency` | `1` | `0` = best quality, `1` = lowest TTFA. |
+| `transport` | `"websocket"` | `"http"` uses the unary `POST /v1/tts`. |
+
+## Low-level usage
+
+```python
+from getpatter.providers.xai_tts import XAITTS
+
+tts = XAITTS(api_key="xai-...", voice="ara", codec="mp3", sample_rate=44100)
+async for audio in tts.synthesize("Hello from Grok!"):
+    ...
+```
+
+Max 15,000 characters per request. On barge-in the stream handler calls `cancel_active_stream()` to force-close the in-flight synthesis socket.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="xAI STT" icon="waveform" href="/python-sdk/providers/xai-stt">The Grok STT twin.</Card>
+  <Card title="xAI Voice Agent" icon="bolt" href="/python-sdk/providers/xai-realtime">All-in-one Grok speech-to-speech.</Card>
+  <Card title="TTS overview" icon="waveform-lines" href="/python-sdk/tts">All TTS providers side by side.</Card>
+  <Card title="Metrics" icon="chart-line" href="/python-sdk/metrics">Per-call cost accounting.</Card>
+</CardGroup>

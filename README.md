@@ -39,14 +39,14 @@
 
 Patter is the **full voice stack** between your application and the phone network — not just glue between an LLM and a carrier. It runs the agent loop and owns every layer of the call, and **you pick the provider for each one**. Compose them in **Realtime**, **Pipeline**, or **Hybrid** mode.
 
-> **27+ provider integrations across the voice stack · 3 voice modes · 2 SDKs (Python & TypeScript) at parity.**
+> **30+ provider integrations across the voice stack · 3 voice modes · 2 SDKs (Python & TypeScript) at parity.**
 
 | Layer | Choose from |
 |---|---|
 | **LLM** — text generation | OpenAI · Anthropic · Google Gemini · Groq · Cerebras |
-| **STT** — speech-to-text | Deepgram · AssemblyAI · Cartesia · Soniox · Speechmatics · Whisper |
-| **TTS** — text-to-speech | ElevenLabs · OpenAI · Cartesia · LMNT · Rime · Telnyx |
-| **Realtime** — all-in-one voice | OpenAI Realtime · Gemini Live · Ultravox · ElevenLabs ConvAI |
+| **STT** — speech-to-text | Deepgram · AssemblyAI · Cartesia · Soniox · Speechmatics · Whisper · xAI Grok |
+| **TTS** — text-to-speech | ElevenLabs · OpenAI · Cartesia · LMNT · Rime · Telnyx · xAI Grok |
+| **Realtime** — all-in-one voice | OpenAI Realtime · Gemini Live · Ultravox · ElevenLabs ConvAI · xAI Grok Voice |
 | **Telephony** — phone carriers | Twilio · Telnyx · Plivo |
 | **Audio** — VAD & suppression | Silero VAD · Krisp · DeepFilterNet |
 

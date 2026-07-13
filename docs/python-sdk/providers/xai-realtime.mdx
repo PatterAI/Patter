@@ -1,0 +1,158 @@
+---
+title: "xAI Voice Agent"
+description: "Grok speech-to-speech realtime engine over WebSocket — tools, server VAD, custom voices."
+icon: "bolt"
+---
+
+# xAI Voice Agent (Grok Realtime)
+
+`XAIRealtimeAdapter` bridges a bidirectional audio stream to the [xAI Voice Agent API](https://docs.x.ai/developers/model-capabilities/audio/voice-agent) (`wss://api.x.ai/v1/realtime`) — an all-in-one STT + LLM + TTS loop powered by Grok, with sub-second latency, server-side VAD, tool use, and the full 25+ voice roster.
+
+The wire protocol is OpenAI-Realtime-shaped, and the adapter speaks the same `connect / send_audio / receive_events / close` surface as `OpenAIRealtimeAdapter`, so you can swap engines without touching the call handler.
+
+## Install
+
+```bash
+pip install getpatter
+```
+
+No extra — `websockets` is a base dependency. Set `XAI_API_KEY` in your environment.
+
+## Models
+
+| Model | Notes |
+|---|---|
+| `grok-voice-latest` (default) | Alias — always the newest voice model. |
+| `grok-voice-think-fast-1.0` | Flagship; supports `reasoning.effort` (`"high"` / `"none"`). |
+| `grok-voice-fast-1.0` | Legacy, deprecated. |
+
+## Constructor
+
+<CodeGroup>
+```python Python
+from getpatter.providers.xai_realtime import (
+    XAIRealtimeAdapter,
+    XAIRealtimeAudioFormat,
+    XAIRealtimeModel,
+)
+
+adapter = XAIRealtimeAdapter(
+    api_key="xai-...",
+    model=XAIRealtimeModel.GROK_VOICE_LATEST,      # default
+    voice="eve",                                   # or any custom voice_id
+    instructions="You are a helpful customer support agent.",
+    audio_format=XAIRealtimeAudioFormat.AUDIO_PCMU,  # G.711 μ-law @ 8 kHz (default)
+    reasoning_effort="none",                       # skip thinking for min latency
+    language_hint="it",                            # bias ASR toward a language
+    keyterms=["Patter"],                           # bias ASR toward key terms
+    replace={"Acme Mobile": "Acme Mobull"},        # pronunciation fixes (audio only)
+)
+```
+
+```typescript TypeScript
+import { XAIRealtimeAdapter } from "getpatter";
+
+const adapter = new XAIRealtimeAdapter(process.env.XAI_API_KEY!, {
+  voice: "eve",
+  instructions: "You are a helpful customer support agent.",
+  reasoningEffort: "none",
+  languageHint: "it",
+  keyterms: ["Patter"],
+  replace: { "Acme Mobile": "Acme Mobull" },
+});
+```
+</CodeGroup>
+
+## Audio formats
+
+| Format | Encoding | Sample rate |
+|---|---|---|
+| `audio/pcmu` (default) | G.711 μ-law | 8 kHz fixed — Twilio/Telnyx/Plivo wire-native, zero transcode |
+| `audio/pcma` | G.711 A-law | 8 kHz fixed |
+| `audio/pcm` | Linear16 LE | 8000–48000 Hz via `sample_rate` (API default 24000) |
+
+Input and output share the configured format. Audio is sent as base64 `input_audio_buffer.append` events and received as `response.output_audio.delta`.
+
+## Tools
+
+Patter `Tool` definitions are wrapped in the `function` envelope automatically. xAI's server-side tools pass through by `type`:
+
+```python
+adapter = XAIRealtimeAdapter(
+    api_key="xai-...",
+    tools=[
+        {"name": "lookup_order", "description": "...", "parameters": {...}},  # function
+        {"type": "web_search"},                                               # server-side
+        {"type": "x_search"},
+        {"type": "file_search", "vector_store_ids": ["collection-id"]},
+        {"type": "mcp", "server_url": "https://..."},
+    ],
+)
+```
+
+Function calls surface as `("function_call", {"call_id", "name", "arguments"})` from `receive_events()`; return results with `send_function_result(call_id, result)`.
+
+## Event loop
+
+```python
+await adapter.connect()                    # session.created → session.update → session.updated
+await adapter.send_audio(mulaw_chunk)      # base64'd automatically
+async for event_type, payload in adapter.receive_events():
+    if event_type == "audio":              # bytes in the configured format
+        ...
+    elif event_type == "transcript_input":   # what the caller said (final)
+        ...
+    elif event_type == "transcript_output":  # agent transcript delta
+        ...
+    elif event_type == "function_call":
+        await adapter.send_function_result(payload["call_id"], "42")
+    elif event_type == "speech_started":     # barge-in
+        await adapter.truncate_playback()
+await adapter.close()
+```
+
+Mid-session updates (multi-agent handoff, ASR biasing) go through `update_session(instructions=..., tools=..., language_hint=..., keyterms=..., replace=...)` — the server merges partial updates.
+
+## Ephemeral tokens (browser clients)
+
+Browsers can't set WebSocket headers. Mint a short-lived client secret server-side and hand it to the client, which passes it in the subprotocol as `xai-client-secret.<token>`:
+
+```python
+token = await XAIRealtimeAdapter.create_ephemeral_token(
+    api_key="xai-...",
+    expires_seconds=300,                    # max 3600
+)
+# → {"value": "xai-...", "expires_at": 1750000000}
+```
+
+## Pricing
+
+xAI bills the Voice Agent per **minute of session time**, not per token (`xai_realtime` in `getpatter.pricing`):
+
+| Item | Rate |
+|---|---|
+| Session time | $0.05/min ($3.00/hr) |
+| Client text input (each `conversation.item.create`) | $0.004/message |
+
+The adapter tracks both — elapsed minutes are emitted on `close()` and text messages are counted per `send_text` / `send_first_message`. Compute totals with `calculate_realtime_minute_cost("xai_realtime", seconds, pricing, text_input_messages=n)`.
+
+## When to use Grok Voice vs alternatives
+
+| Use xAI Voice Agent when… | Use [OpenAI Realtime](/python-sdk/providers/openai-realtime) when… | Use [Ultravox](/python-sdk/providers/ultravox-realtime) when… |
+|---|---|---|
+| You want flat per-minute pricing, built-in web/X search, and Grok reasoning with sub-second latency. | You need the broadest tool-calling ecosystem and fine-grained token accounting. | You want a managed agent with its own voice library. |
+
+## Notes
+
+- On barge-in the adapter sends `conversation.item.truncate` bounded by wall-clock playback time, so the transcript never keeps unheard "ghost text" (same semantics as the OpenAI adapter).
+- Custom voices cloned via the [Custom Voices API](/python-sdk/providers/xai-tts#custom-voices) work as the `voice` parameter.
+- `input_transcription_model="grok-transcribe"` enables streaming input-transcription updates (live captions) in addition to the final transcript.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Engines" icon="bolt" href="/python-sdk/engines">All engines side by side.</Card>
+  <Card title="xAI TTS" icon="waveform-lines" href="/python-sdk/providers/xai-tts">Standalone Grok TTS for pipeline mode.</Card>
+  <Card title="xAI STT" icon="waveform" href="/python-sdk/providers/xai-stt">Standalone Grok STT for pipeline mode.</Card>
+  <Card title="Tools" icon="screwdriver-wrench" href="/python-sdk/tools">Function calling inside a realtime session.</Card>
+</CardGroup>

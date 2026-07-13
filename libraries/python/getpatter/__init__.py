@@ -113,6 +113,7 @@ from getpatter.stt.cartesia import STT as CartesiaSTT
 from getpatter.stt.soniox import STT as SonioxSTT
 from getpatter.stt.speechmatics import STT as SpeechmaticsSTT
 from getpatter.stt.assemblyai import STT as AssemblyAISTT
+from getpatter.stt.xai import STT as XAISTT
 
 # TTS flat aliases. As of 0.6.1, ``ElevenLabsTTS`` (the canonical facade)
 # defaults to the WebSocket streaming transport. ``ElevenLabsWebSocketTTS``
@@ -129,6 +130,11 @@ from getpatter.tts.lmnt import TTS as LMNTTTS
 from getpatter.tts.inworld import TTS as InworldTTS
 from getpatter.tts.soniox import TTS as SonioxTTS
 from getpatter.tts.sarvam import TTS as SarvamTTS
+from getpatter.tts.xai import TTS as XAITTS
+
+# xAI (Grok) Voice Agent realtime adapter — standalone adapter with the same
+# surface as OpenAIRealtimeAdapter / UltravoxRealtimeAdapter.
+from getpatter.providers.xai_realtime import XAIRealtimeAdapter
 
 # LLM flat aliases — parity with libraries/typescript/src/index.ts and mirror of STT/TTS layout.
 from getpatter.llm.openai import LLM as OpenAILLM
@@ -335,6 +341,7 @@ from getpatter.pricing import (
     PRICING_VERSION,
     PricingUnit,
     calculate_realtime_cost,
+    calculate_realtime_minute_cost,
     calculate_stt_cost,
     calculate_telephony_cost,
     calculate_tts_cost,
@@ -445,6 +452,23 @@ from getpatter.providers.ultravox_realtime import (  # noqa: E402
     UltravoxServerEvent,
     UltravoxState,
 )
+from getpatter.providers.xai_stt import (  # noqa: E402
+    XAISTTClientFrame,
+    XAISTTEncoding,
+    XAISTTSampleRate,
+    XAISTTServerEvent,
+)
+from getpatter.providers.xai_tts import (  # noqa: E402
+    XAITTSCodec,
+    XAITTSSampleRate,
+    XAIVoice,
+)
+from getpatter.providers.xai_realtime import (  # noqa: E402
+    XAIRealtimeAudioFormat,
+    XAIRealtimeModel,
+    XAIRealtimeSampleRate,
+    XAIRealtimeToolType,
+)
 # OnnxExecutionProvider, SileroOnnxSampleRate exposed lazily via __getattr__
 # above (requires the optional ``silero`` extra: numpy + onnxruntime).
 
@@ -520,6 +544,7 @@ __all__ = [
     "SonioxSTT",
     "SpeechmaticsSTT",
     "AssemblyAISTT",
+    "XAISTT",
     "ElevenLabsTTS",
     "ElevenLabsWebSocketTTS",
     "ElevenLabsRestTTS",
@@ -530,6 +555,8 @@ __all__ = [
     "InworldTTS",
     "SonioxTTS",
     "SarvamTTS",
+    "XAITTS",
+    "XAIRealtimeAdapter",
     "OpenAILLM",
     "AnthropicLLM",
     "GroqLLM",
@@ -631,6 +658,7 @@ __all__ = [
     "calculate_stt_cost",
     "calculate_tts_cost",
     "calculate_realtime_cost",
+    "calculate_realtime_minute_cost",
     "calculate_telephony_cost",
     # Per-call metrics.
     "CallMetricsAccumulator",
@@ -696,4 +724,15 @@ __all__ = [
     "UltravoxState",
     "WhisperModel",
     "WhisperResponseFormat",
+    "XAIRealtimeAudioFormat",
+    "XAIRealtimeModel",
+    "XAIRealtimeSampleRate",
+    "XAIRealtimeToolType",
+    "XAISTTClientFrame",
+    "XAISTTEncoding",
+    "XAISTTSampleRate",
+    "XAISTTServerEvent",
+    "XAITTSCodec",
+    "XAITTSSampleRate",
+    "XAIVoice",
 ]

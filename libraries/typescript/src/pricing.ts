@@ -17,9 +17,9 @@
  */
 
 /** Pricing table version identifier, updated in lockstep with the Python SDK. */
-export const PRICING_VERSION = '2026.3';
+export const PRICING_VERSION = '2026.4';
 /** ISO date the pricing table was last refreshed against public provider rates. */
-export const PRICING_LAST_UPDATED = '2026-05-08';
+export const PRICING_LAST_UPDATED = '2026-07-13';
 
 /**
  * Billing units used by ``DEFAULT_PRICING`` entries. String values keep the
@@ -62,6 +62,12 @@ export interface ProviderPricing {
   text_output_per_token?: number;
   cached_audio_input_per_token?: number;
   cached_text_input_per_token?: number;
+  /**
+   * Realtime-only (xAI Voice Agent): flat fee per client
+   * ``conversation.item.create`` text message, billed on top of the
+   * per-minute session rate. See {@link calculateRealtimeMinuteCost}.
+   */
+  text_input_per_message?: number;
   /**
    * Per-model rate overrides keyed by model identifier. When the cost-calc
    * function receives a ``model`` arg, the matching entry overlays the
@@ -175,6 +181,12 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // ~$0.30/1M tokens at ~32 tokens/sec ≈ $0.00058/min; round to a small flat
   // per-minute estimate. Preview pricing — verify before GA.
   gemini_stt: { unit: PricingUnit.MINUTE, price: 0.001 },
+  // xAI (Grok) streaming STT — $0.20/hr = $0.003333/min. The REST batch
+  // endpoint (POST /v1/stt) is $0.10/hr = $0.001667/min — the Patter adapter
+  // uses the streaming WebSocket, so the streaming rate is the default.
+  // Source: https://docs.x.ai/developers/pricing (verified 2026-07-13).
+  // Override for batch usage via `pricing: { xai_stt: { price: 0.10 / 60 } }`.
+  xai_stt: { unit: PricingUnit.MINUTE, price: 0.20 / 60 },
   // TTS — per 1,000 characters synthesized.
   // Source: https://elevenlabs.io/pricing/api (verified 2026-05-11). The
   // per-1K-character API/overage rate is flat across all plan tiers (Free
@@ -270,6 +282,11 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
       'gemini-3.1-flash-tts-preview': { price: 0.034 },
     },
   },
+  // xAI (Grok) TTS — $15.00 per 1M input characters = $0.015/1k chars, flat
+  // across all voices (built-in and custom) and both the unary POST /v1/tts
+  // and streaming wss://api.x.ai/v1/tts transports.
+  // Source: https://docs.x.ai/developers/pricing (verified 2026-07-13).
+  xai_tts: { unit: PricingUnit.THOUSAND_CHARS, price: 0.015 },
   // Soniox real-time TTS. Soniox publishes a $0.70/hr headline for generated
   // speech (native billing is token-based: input text $4/1M + output audio
   // $21.50/1M). Patter's TTS cost model is per-character, so we express the rate
@@ -381,6 +398,17 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
         audio_output_per_token: 0.000020,   // $20.00 per 1M audio output tokens
       },
     },
+  },
+  // xAI (Grok) Voice Agent (speech-to-speech realtime) — per minute of
+  // session time, NOT per token: $0.05/min ($3.00/hr). Client text inputs
+  // (every `conversation.item.create`) are billed separately at
+  // $0.004/message — exposed as `text_input_per_message` and applied by
+  // `calculateRealtimeMinuteCost`. Source:
+  // https://docs.x.ai/developers/pricing (verified 2026-07-13).
+  xai_realtime: {
+    unit: PricingUnit.MINUTE,
+    price: 0.05,
+    text_input_per_message: 0.004,
   },
   // Telephony — per minute of call duration.
   // twilio default = US inbound local (the 99% case for voice agents receiving
@@ -581,6 +609,27 @@ export function calculateRealtimeCost(
   cost += (output.text_tokens ?? 0) * (rates.text_output_per_token ?? 0);
   // Clamp ≥0 so mis-configured cached rates (higher than full) can never
   // produce negative billing on the dashboard.
+  return Math.max(0, cost);
+}
+
+/**
+ * Calculate cost for realtime providers billed per minute of session time
+ * (e.g. `xai_realtime` at $0.05/min) rather than per token.
+ *
+ * `textInputMessages` covers providers that bill client text inputs
+ * separately — xAI charges $0.004 per `conversation.item.create` on top of
+ * the per-minute rate (`text_input_per_message` in the pricing entry).
+ */
+export function calculateRealtimeMinuteCost(
+  provider: string,
+  durationSeconds: number,
+  pricing: Record<string, ProviderPricing>,
+  textInputMessages = 0,
+): number {
+  const config = pricing[provider];
+  if (!config || config.unit !== 'minute') return 0;
+  let cost = (durationSeconds / 60) * (config.price ?? 0);
+  cost += textInputMessages * (config.text_input_per_message ?? 0);
   return Math.max(0, cost);
 }
 

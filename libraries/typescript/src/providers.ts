@@ -115,6 +115,27 @@ export function assemblyai(opts: { apiKey: string; language?: string }): STTConf
   return new STTConfigImpl("assemblyai", opts.apiKey, opts.language ?? "en");
 }
 
+/**
+ * xAI (Grok) streaming STT config helper (parity with Python
+ * ``getpatter.providers.xai_stt``). For pipeline use the documented path is
+ * the direct adapter ``new XAISTT({...})`` from ``getpatter``.
+ */
+export function xaiStt(opts: {
+  apiKey: string;
+  language?: string;
+  keyterms?: string[];
+  smartTurn?: number;
+  smartTurnTimeoutMs?: number;
+}): STTConfig {
+  const options: Record<string, unknown> = {};
+  if (opts.keyterms !== undefined) options.keyterms = opts.keyterms;
+  if (opts.smartTurn !== undefined) options.smart_turn = opts.smartTurn;
+  if (opts.smartTurnTimeoutMs !== undefined) {
+    options.smart_turn_timeout_ms = opts.smartTurnTimeoutMs;
+  }
+  return new STTConfigImpl("xai", opts.apiKey, opts.language ?? "en", options);
+}
+
 // ---------------------------------------------------------------------------
 // Additional TTS helpers
 // ---------------------------------------------------------------------------
@@ -165,6 +186,17 @@ export function sonioxTts(opts: { apiKey: string; voice?: string }): TTSConfig {
  */
 export function sarvam(opts: { apiKey: string; voice?: string }): TTSConfig {
   return new TTSConfigImpl("sarvam", opts.apiKey, opts.voice ?? "shubh");
+}
+
+/**
+ * xAI (Grok) TTS config helper (parity with Python
+ * ``getpatter.providers.xai_tts``). ``voice`` is a built-in xAI voice or a
+ * custom cloned ``voice_id`` (default ``eve``). For pipeline use the
+ * documented path is the direct adapter ``new XAITTS({...})`` from
+ * ``getpatter``.
+ */
+export function xaiTts(opts: { apiKey: string; voice?: string }): TTSConfig {
+  return new TTSConfigImpl("xai", opts.apiKey, opts.voice ?? "eve");
 }
 
 // ---------------------------------------------------------------------------
