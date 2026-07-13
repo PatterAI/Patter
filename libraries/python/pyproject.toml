@@ -54,6 +54,11 @@ local = []
 soniox = [
     "aiohttp>=3.10",
 ]
+# xAI voice providers (STT / TTS use pure-aiohttp REST + WS; realtime uses the
+# core ``websockets`` dep).
+xai = [
+    "aiohttp>=3.10",
+]
 speechmatics = [
     "speechmatics-voice[smart]>=0.2.8",
 ]

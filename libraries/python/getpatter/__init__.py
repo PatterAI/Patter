@@ -103,7 +103,9 @@ from getpatter.carriers.plivo import Carrier as Plivo
 from getpatter.engines.openai import Realtime as OpenAIRealtime
 from getpatter.engines.openai_realtime_2 import Realtime2 as OpenAIRealtime2
 from getpatter.engines.elevenlabs import ConvAI as ElevenLabsConvAI
+from getpatter.engines.xai import XaiRealtime
 from getpatter.providers.openai_realtime_2 import OpenAIRealtime2Adapter
+from getpatter.providers.xai_realtime import XaiRealtimeAdapter
 
 # STT flat aliases — parity with libraries/typescript/src/index.ts.
 from getpatter.stt.deepgram import STT as DeepgramSTT
@@ -113,6 +115,12 @@ from getpatter.stt.cartesia import STT as CartesiaSTT
 from getpatter.stt.soniox import STT as SonioxSTT
 from getpatter.stt.speechmatics import STT as SpeechmaticsSTT
 from getpatter.stt.assemblyai import STT as AssemblyAISTT
+from getpatter.stt.xai import STT as XaiSTT
+from getpatter.providers.xai_stt import (
+    XaiTranscription,
+    XaiWord,
+    transcribe as xai_transcribe,
+)
 
 # TTS flat aliases. As of 0.6.1, ``ElevenLabsTTS`` (the canonical facade)
 # defaults to the WebSocket streaming transport. ``ElevenLabsWebSocketTTS``
@@ -129,6 +137,8 @@ from getpatter.tts.lmnt import TTS as LMNTTTS
 from getpatter.tts.inworld import TTS as InworldTTS
 from getpatter.tts.soniox import TTS as SonioxTTS
 from getpatter.tts.sarvam import TTS as SarvamTTS
+from getpatter.tts.xai import TTS as XaiTTS
+from getpatter.providers.xai_tts import create_custom_voice as xai_create_custom_voice
 
 # LLM flat aliases — parity with libraries/typescript/src/index.ts and mirror of STT/TTS layout.
 from getpatter.llm.openai import LLM as OpenAILLM
@@ -512,6 +522,8 @@ __all__ = [
     "OpenAIRealtime",
     "OpenAIRealtime2",
     "OpenAIRealtime2Adapter",
+    "XaiRealtime",
+    "XaiRealtimeAdapter",
     "ElevenLabsConvAI",
     "DeepgramSTT",
     "WhisperSTT",
@@ -520,6 +532,10 @@ __all__ = [
     "SonioxSTT",
     "SpeechmaticsSTT",
     "AssemblyAISTT",
+    "XaiSTT",
+    "XaiTranscription",
+    "XaiWord",
+    "xai_transcribe",
     "ElevenLabsTTS",
     "ElevenLabsWebSocketTTS",
     "ElevenLabsRestTTS",
@@ -530,6 +546,8 @@ __all__ = [
     "InworldTTS",
     "SonioxTTS",
     "SarvamTTS",
+    "XaiTTS",
+    "xai_create_custom_voice",
     "OpenAILLM",
     "AnthropicLLM",
     "GroqLLM",

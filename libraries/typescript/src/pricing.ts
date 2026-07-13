@@ -63,6 +63,13 @@ export interface ProviderPricing {
   cached_audio_input_per_token?: number;
   cached_text_input_per_token?: number;
   /**
+   * Per-message cost for realtime text-input items (`conversation.item.create`).
+   * Documented constant for MINUTE-unit realtime providers (e.g. xAI bills
+   * $0.004/message) — NOT metered in v1 (no per-message counter in the metrics
+   * accumulator); recorded so the rate is discoverable and can be wired later.
+   */
+  text_input_per_message?: number;
+  /**
    * Per-model rate overrides keyed by model identifier. When the cost-calc
    * function receives a ``model`` arg, the matching entry overlays the
    * provider defaults; missing models fall back to the surrounding rates
@@ -167,6 +174,11 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   cartesia_stt: { unit: PricingUnit.MINUTE, price: 0.0025 },
   // Soniox real-time STT — $0.12/hr = $0.002/min
   soniox: { unit: PricingUnit.MINUTE, price: 0.002 },
+  // xAI streaming STT — $0.20/hr = $0.20/60 per min. (Batch/REST is cheaper at
+  // $0.10/hr ≈ $0.10/60 per min; the pipeline meters the STREAMING rate, so
+  // this is the default. Full-precision expression matches the Python SDK.
+  // Source: docs.x.ai/developers/pricing.)
+  xai: { unit: PricingUnit.MINUTE, price: 0.2 / 60 },
   // Speechmatics Pro tier — $0.24/hr = $0.0040/min (new users land here).
   // Previous $0.0173 default reflected a legacy Standard tier that was
   // retired; users were being over-billed ~4.3x.
@@ -277,6 +289,9 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // chars/hr, $0.70/hr ÷ 54 ≈ $0.013 / 1k chars. Source:
   // https://soniox.com/pricing (also https://soniox.com/text-to-speech).
   soniox_tts: { unit: PricingUnit.THOUSAND_CHARS, price: 0.013 },
+  // xAI TTS — $15.00 / 1M chars = $0.000015/char = $0.015 / 1k chars.
+  // Source: docs.x.ai/developers/pricing.
+  xai_tts: { unit: PricingUnit.THOUSAND_CHARS, price: 0.015 },
   // Sarvam AI Bulbul TTS — per 1,000 characters. INR is authoritative; USD is an
   // indicative FX conversion (~Rs 83-84/USD). Bulbul v3 (default): Rs 30 / 10k
   // chars ≈ $0.036/1k; Bulbul v2: Rs 15 / 10k ≈ $0.018/1k. Billed per character,
@@ -357,6 +372,18 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
         cached_text_input_per_token: 0.0000025,
       },
     },
+  },
+  // xAI Realtime (Grok Voice Agent) — per MINUTE of session audio: $3.00/hr =
+  // $0.05/min. Unlike OpenAI Realtime (token-based), xAI bills per minute, so
+  // ``calculateRealtimeCost`` takes the MINUTE branch when resolved against this
+  // entry (pass ``durationSeconds`` + ``provider: 'xai_realtime'``).
+  // ``text_input_per_message`` ($0.004 per ``conversation.item.create``) is a
+  // documented constant — NOT metered in v1 (no per-message counter).
+  // Source: docs.x.ai/developers/pricing.
+  xai_realtime: {
+    unit: PricingUnit.MINUTE,
+    price: 0.05,
+    text_input_per_message: 0.004,
   },
   // Gemini Cascade — two-leg architecture: Live leg (text in/out per token)
   // and TTS leg (text-in / audio-out per token). Rates per 1M tokens (USD).
@@ -515,14 +542,28 @@ export function calculateTtsCost(
 }
 
 /**
- * Calculate OpenAI Realtime cost from token usage.
+ * Calculate realtime session cost.
  *
- * OpenAI bills the cached portion of ``input_token_details.audio_tokens`` and
- * ``.text_tokens`` at the reduced cached rate (typically ~3% of full for audio,
- * ~10% of full for text on the mini model). ``cached_tokens_details`` is a
- * nested breakdown of the same ``input_token_details`` totals — the cached
- * counts are already INCLUDED in the top-level totals, so we subtract them
- * out before applying the full rate and add them back at the cached rate.
+ * Two billing shapes are supported, selected by the resolved provider entry's
+ * ``unit``:
+ *
+ *  - **TOKEN** (OpenAI Realtime, the default provider): billed from the token
+ *    ``usage`` payload. OpenAI bills the cached portion of
+ *    ``input_token_details.audio_tokens`` / ``.text_tokens`` at the reduced
+ *    cached rate (~3% of full for audio, ~10% for text on the mini model).
+ *    ``cached_tokens_details`` is a nested breakdown of the same
+ *    ``input_token_details`` totals — already INCLUDED in the top-level totals
+ *    — so we subtract them out before applying the full rate and add them back
+ *    at the cached rate. ``durationSeconds`` is ignored on this path.
+ *  - **MINUTE** (xAI Grok Voice Agent): billed from ``durationSeconds`` at the
+ *    entry's per-minute ``price`` (``price * durationSeconds / 60``); ``0`` when
+ *    ``durationSeconds`` is omitted. The token ``usage`` is ignored here.
+ *
+ * ``provider`` selects which ``pricing`` entry to resolve. It defaults to
+ * ``"openai_realtime"`` so existing callers are unaffected; pass
+ * ``"xai_realtime"`` (with ``durationSeconds``) for the per-minute path. The
+ * parameter order (``provider`` before ``durationSeconds``) mirrors the Python
+ * ``calculate_realtime_cost`` keyword-only args.
  */
 export function calculateRealtimeCost(
   usage: {
@@ -535,8 +576,15 @@ export function calculateRealtimeCost(
   },
   pricing: Record<string, ProviderPricing>,
   model?: string | null,
+  provider: string = 'openai_realtime',
+  durationSeconds?: number,
 ): number {
-  const rates = resolveProviderRates(pricing.openai_realtime, model);
+  const rates = resolveProviderRates(pricing[provider], model);
+  // Per-minute realtime providers (e.g. xAI) bill on session audio duration,
+  // not tokens. 0.0 when the caller has no duration yet.
+  if (rates.unit === 'minute') {
+    return ((rates.price ?? 0) * (durationSeconds ?? 0)) / 60;
+  }
   if (rates.unit !== 'token') return 0;
 
   const input = (usage.input_token_details ?? {}) as {

@@ -2015,6 +2015,10 @@ class Patter:
         # --- Engine dispatch ---
         openai_engine_key: str = ""
         elevenlabs_engine_key: str = ""
+        xai_engine_key: str = ""
+        # Engine-supplied xAI Grok Voice Agent session tuning (dict of only the
+        # set knobs), forwarded to ``XaiRealtimeAdapter`` by the stream-handler.
+        xai_realtime_config: dict | None = None
         # Engine-supplied OpenAI Realtime extras propagated to Agent so the
         # stream-handler can forward them to ``OpenAIRealtimeAdapter``.
         openai_realtime_reasoning_effort: str | None = None
@@ -2057,6 +2061,15 @@ class Patter:
                     realtime_gate_response_on_transcript = engine_fields.get(
                         "gate_response_on_transcript"
                     )
+            elif engine_kind == "xai_realtime":
+                xai_engine_key = engine_fields.get("api_key", "")
+                # Carry only the SET xAI session knobs (drop None) — voice/model
+                # are already applied to the top-level slots above.
+                xai_realtime_config = {
+                    k: v
+                    for k, v in engine_fields.items()
+                    if k not in ("api_key", "voice", "model") and v is not None
+                }
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
         elif provider is not None:
@@ -2085,6 +2098,8 @@ class Patter:
             self._local_config = replace(
                 self._local_config, elevenlabs_key=elevenlabs_engine_key
             )
+        if xai_engine_key and not self._local_config.xai_key:
+            self._local_config = replace(self._local_config, xai_key=xai_engine_key)
 
         if (
             provider in ("openai_realtime", "openai_realtime_2")
@@ -2322,6 +2337,7 @@ class Patter:
             openai_realtime_noise_reduction=openai_realtime_noise_reduction,
             realtime_turn_detection=realtime_turn_detection,
             realtime_gate_response_on_transcript=realtime_gate_response_on_transcript,
+            xai_realtime=xai_realtime_config,
             tool_call_preambles=tool_call_preambles,
             preemptive_generation=preemptive_generation,
             preemptive_min_stable_ms=preemptive_min_stable_ms,
@@ -2336,7 +2352,25 @@ class Patter:
         from getpatter.engines.elevenlabs import ConvAI as _ConvAI
         from getpatter.engines.openai import Realtime as _Realtime
         from getpatter.engines.openai_realtime_2 import Realtime2 as _Realtime2
+        from getpatter.engines.xai import XaiRealtime as _XaiRealtime
 
+        if isinstance(engine, _XaiRealtime):
+            return "xai_realtime", {
+                "api_key": engine.api_key,
+                "voice": engine.voice,
+                "model": engine.model,
+                "reasoning_effort": engine.reasoning_effort,
+                "vad_threshold": engine.vad_threshold,
+                "silence_duration_ms": engine.silence_duration_ms,
+                "prefix_padding_ms": engine.prefix_padding_ms,
+                "idle_timeout_ms": engine.idle_timeout_ms,
+                "language_hint": engine.language_hint,
+                "keyterms": engine.keyterms,
+                "speed": engine.speed,
+                "replace": engine.replace,
+                "resumption": engine.resumption,
+                "server_tools": engine.server_tools,
+            }
         if isinstance(engine, _Realtime2):
             return "openai_realtime_2", {
                 "api_key": engine.api_key,
@@ -2368,8 +2402,9 @@ class Patter:
                 "voice": engine.voice,
             }
         raise TypeError(
-            "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), or "
-            f"ElevenLabsConvAI(...) instance, got {type(engine).__name__}"
+            "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), "
+            "XaiRealtime(...), or ElevenLabsConvAI(...) instance, got "
+            f"{type(engine).__name__}"
         )
 
     @staticmethod

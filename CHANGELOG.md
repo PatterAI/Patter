@@ -1,5 +1,38 @@
 ## Unreleased
 
+### Added
+
+- **xAI (Grok) voice provider suite** — all three xAI Voice APIs land in both
+  SDKs, wired end-to-end with real pricing:
+  - **`XaiRealtime` engine (Grok Voice Agent API)**: real-time speech-to-speech
+    over `wss://api.x.ai/v1/realtime` (default model `grok-voice-latest`, voice
+    `eve`). The protocol is OpenAI-Realtime-GA-compatible, so the adapter
+    subclasses the GA adapter and inherits audio streaming, barge-in, and the
+    full tool-calling bridge (`transfer_call`/`end_call` included). xAI-specific
+    session knobs are exposed opt-in: `reasoning_effort` (`"high"`/`"none"`),
+    VAD `threshold`/`prefix_padding_ms`/`idle_timeout_ms`, ASR
+    `language_hint`/`keyterms`, output `speed`, pronunciation `replace` map,
+    session `resumption`, and raw `server_tools` passthrough for xAI
+    server-side tools (`web_search`, `x_search`, `mcp`, `file_search`).
+  - **`XaiSTT`**: streaming speech-to-text over `wss://api.x.ai/v1/stt`
+    (binary frames, `transcript.created` handshake, chunk/utterance finals,
+    Smart Turn end-of-turn detection, keyterm biasing, diarization) plus a
+    batch `transcribe()` helper for `POST /v1/stt` (word timestamps, ITN
+    formatting, 25 languages).
+  - **`XaiTTS`**: one-shot streaming synthesis via `POST /v1/tts` with the
+    26-voice Grok roster, `for_twilio()` (native G.711 µ-law 8 kHz) /
+    `for_telnyx()` (PCM16 16 kHz) carrier presets, and a
+    `create_custom_voice()` helper for `POST /v1/custom-voices` voice cloning.
+  - **Pricing** (official, docs.x.ai): Realtime $0.05/min, TTS $15.00/1M chars,
+    STT $0.20/hr streaming ($0.10/hr batch). `calculate_realtime_cost` /
+    `calculateRealtimeCost` gain an optional duration argument to support
+    per-minute realtime billing (token-based path unchanged).
+  `libraries/python/getpatter/providers/xai_{stt,tts,realtime}.py`,
+  `libraries/typescript/src/providers/xai-{stt,tts,realtime}.ts`,
+  `engines/xai.*`, `pricing.*`, docs pages under
+  `docs/{python,typescript}-sdk/providers/xai-*.mdx`. Beta: validated against
+  the xAI API spec and mocked protocol tests; not yet exercised on a live call.
+
 ### Fixed
 
 - **`gemini-3.1-flash-live-preview` is now actually usable** (field-debugged on

@@ -136,6 +136,23 @@ export {
   INWORLD_REALTIME_DEFAULT_VOICE,
 } from "./providers/inworld-realtime";
 export type { InworldRealtimeAdapterOptions } from "./providers/inworld-realtime";
+export {
+  XaiRealtimeAdapter,
+  XAI_REALTIME_WS_URL,
+  XAI_REALTIME_DEFAULT_MODEL,
+  XAI_REALTIME_DEFAULT_VOICE,
+} from "./providers/xai-realtime";
+export type { XaiRealtimeAdapterOptions } from "./providers/xai-realtime";
+// xAI STT batch helper + streaming encoding enum + result shapes.
+export { xaiTranscribe, XaiSTTEncoding } from "./providers/xai-stt";
+export type {
+  XaiTranscription,
+  XaiWord,
+  XaiTranscribeOptions,
+} from "./providers/xai-stt";
+// xAI TTS custom-voice helper + codec enum.
+export { xaiCreateCustomVoice, XaiTTSCodec } from "./providers/xai-tts";
+export type { XaiCreateCustomVoiceOptions } from "./providers/xai-tts";
 export { scheduleCron, scheduleOnce, scheduleInterval } from "./scheduler";
 export type { ScheduleHandle, JobCallback } from "./scheduler";
 // Provider adapter types (re-exported for advanced users who build custom
@@ -174,6 +191,8 @@ export type { OpenAITranscribeSTTOptions } from "./stt/openai-transcribe";
 export { STT as CartesiaSTT } from "./stt/cartesia";
 export type { CartesiaSTTOptions } from "./stt/cartesia";
 export { STT as SonioxSTT } from "./stt/soniox";
+export { STT as XaiSTT } from "./stt/xai";
+export type { XaiSTTOptions } from "./stt/xai";
 export { STT as AssemblyAISTT } from "./stt/assemblyai";
 export type { AssemblyAISTTOptions } from "./stt/assemblyai";
 export { STT as SpeechmaticsSTT } from "./stt/speechmatics";
@@ -213,6 +232,8 @@ export { TTS as SonioxTTS } from "./tts/soniox";
 export type { SonioxTTSOptions, SonioxCarrierOptions } from "./tts/soniox";
 export { TTS as SarvamTTS } from "./tts/sarvam";
 export type { SarvamTTSOptions, SarvamCarrierOptions } from "./tts/sarvam";
+export { TTS as XaiTTS } from "./tts/xai";
+export type { XaiTTSOptions, XaiCarrierOptions } from "./tts/xai";
 
 // New namespaced LLM classes (Phase 2 of the v0.5.x API refactor).
 export { LLM as OpenAILLM } from "./llm/openai";
@@ -329,6 +350,8 @@ export { GeminiCascade } from "./engines/gemini-cascade";
 export type { GeminiCascadeOptions } from "./engines/gemini-cascade";
 export { InworldRealtime } from "./engines/inworld";
 export type { InworldRealtimeOptions } from "./engines/inworld";
+export { XaiRealtime } from "./engines/xai";
+export type { XaiRealtimeOptions } from "./engines/xai";
 
 // Tunnel markers.
 export { CloudflareTunnel, Ngrok, Static as StaticTunnel } from "./tunnels";

@@ -35,6 +35,7 @@ export const STACK_VENDORS: ReadonlySet<string> = new Set([
   'rime',
   'inworld',
   'sarvam',
+  'xai',
   'telnyx',
   'other',
 ]);
@@ -47,6 +48,8 @@ const VENDOR_ALIASES: Record<string, string> = {
   openai_transcribe: 'openai',
   elevenlabs_ws: 'elevenlabs',
   soniox_tts: 'soniox',
+  xai_tts: 'xai',
+  xai_realtime: 'xai',
   telnyx_stt: 'telnyx',
   telnyx_tts: 'telnyx',
 };

@@ -53,6 +53,7 @@ agent = phone.agent(
 | `CartesiaTTS` | `getpatter.tts.cartesia.TTS` | `CARTESIA_API_KEY` | `getpatter[cartesia]` |
 | `RimeTTS` | `getpatter.tts.rime.TTS` | `RIME_API_KEY` | `getpatter[rime]` |
 | `LMNTTTS` | `getpatter.tts.lmnt.TTS` | `LMNT_API_KEY` | `getpatter[lmnt]` |
+| `XaiTTS` | `getpatter.tts.xai.TTS` | `XAI_API_KEY` | `getpatter[xai]` |
 
 ### Model / voice / format enums
 
@@ -178,6 +179,18 @@ from getpatter import LMNTTTS
 
 tts = LMNTTTS()                              # reads LMNT_API_KEY
 tts = LMNTTTS(model="blizzard", voice="leah")
+```
+
+## xAI
+
+Grok text-to-speech (default voice `eve`) with 26 built-in voices, inline speech tags, custom voice cloning, and telephony-native output. See [xAI TTS setup](/python-sdk/providers/xai-tts).
+
+```python
+from getpatter import XaiTTS
+
+tts = XaiTTS()                              # reads XAI_API_KEY
+tts = XaiTTS(voice="leo", language="en")
+tts = XaiTTS.for_twilio(voice="eve")        # μ-law @ 8 kHz native
 ```
 
 ## Missing credentials

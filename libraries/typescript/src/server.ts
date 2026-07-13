@@ -16,6 +16,7 @@ import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { GeminiLiveAdapter } from './providers/gemini-live';
 import { GeminiCascadeAdapter } from './providers/gemini-cascade';
 import { InworldRealtimeAdapter } from './providers/inworld-realtime';
+import { XaiRealtimeAdapter } from './providers/xai-realtime';
 import { PlivoAdapter, dropPlivoVoicemail, plivoInboundCustomParams, parsePlivoExtraHeaders } from './providers/plivo-adapter';
 import { TwilioAdapter } from './providers/twilio-adapter';
 import { PlivoBridge, classifyPlivoAmd, validatePlivoSignature } from './telephony/plivo';
@@ -726,6 +727,48 @@ export function buildAIAdapter(config: LocalConfig, agent: AgentOptions, resolve
       ...(engine.transcriptionLanguage !== undefined
         ? { transcriptionLanguage: engine.transcriptionLanguage }
         : {}),
+      ...((agentOpts.realtimeTurnDetection ?? engine.turnDetection) !== undefined
+        ? { turnDetection: agentOpts.realtimeTurnDetection ?? engine.turnDetection }
+        : {}),
+      ...((agentOpts.openaiRealtimeGateResponseOnTranscript ?? engine.gateResponseOnTranscript) !== undefined
+        ? {
+            gateResponseOnTranscript:
+              agentOpts.openaiRealtimeGateResponseOnTranscript ?? engine.gateResponseOnTranscript,
+          }
+        : {}),
+      instructions: resolvedPrompt ?? agent.systemPrompt,
+      tools,
+    });
+  }
+  // xAI Realtime (Grok Voice Agent) mode: construct XaiRealtimeAdapter from the
+  // engine marker. xAI's Voice Agent API is OpenAI-Realtime-GA-compatible, so
+  // the adapter subclasses OpenAIRealtime2Adapter and advertises the SAME tool
+  // list (agent tools + transfer_call/end_call/handoff/use_skill) built above.
+  if (agent.provider === 'xai_realtime') {
+    if (!engine || engine.kind !== 'xai_realtime') {
+      throw new Error(
+        "xAI Realtime mode requires `agent.engine = new XaiRealtime({...})`.",
+      );
+    }
+    const agentOpts = agent as {
+      realtimeTurnDetection?: import('./types').RealtimeTurnDetection;
+      openaiRealtimeGateResponseOnTranscript?: boolean;
+    };
+    return new XaiRealtimeAdapter(engine.apiKey, {
+      ...(agent.model ?? engine.model ? { model: agent.model ?? engine.model } : {}),
+      ...(agent.voice ?? engine.voice ? { voice: agent.voice ?? engine.voice } : {}),
+      ...(engine.baseUrl ? { baseUrl: engine.baseUrl } : {}),
+      ...(engine.reasoningEffort !== undefined ? { reasoningEffort: engine.reasoningEffort } : {}),
+      ...(engine.languageHint !== undefined ? { languageHint: engine.languageHint } : {}),
+      ...(engine.keyterms !== undefined ? { keyterms: engine.keyterms } : {}),
+      ...(engine.speed !== undefined ? { speed: engine.speed } : {}),
+      ...(engine.vadThreshold !== undefined ? { vadThreshold: engine.vadThreshold } : {}),
+      ...(engine.silenceDurationMs !== undefined ? { silenceDurationMs: engine.silenceDurationMs } : {}),
+      ...(engine.prefixPaddingMs !== undefined ? { prefixPaddingMs: engine.prefixPaddingMs } : {}),
+      ...(engine.idleTimeoutMs !== undefined ? { idleTimeoutMs: engine.idleTimeoutMs } : {}),
+      ...(engine.replace !== undefined ? { replace: engine.replace } : {}),
+      ...(engine.resumption !== undefined ? { resumption: engine.resumption } : {}),
+      ...(engine.serverTools !== undefined ? { serverTools: engine.serverTools } : {}),
       ...((agentOpts.realtimeTurnDetection ?? engine.turnDetection) !== undefined
         ? { turnDetection: agentOpts.realtimeTurnDetection ?? engine.turnDetection }
         : {}),

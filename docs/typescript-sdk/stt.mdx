@@ -39,6 +39,7 @@ await phone.serve({ agent });
 | `AssemblyAISTT` | `getpatter/stt/assemblyai` | `ASSEMBLYAI_API_KEY` |
 | `SonioxSTT` | `getpatter/stt/soniox` | `SONIOX_API_KEY` |
 | `SpeechmaticsSTT` | `getpatter/stt/speechmatics` | `SPEECHMATICS_API_KEY` |
+| `XaiSTT` | `getpatter/stt/xai` | `XAI_API_KEY` |
 
 <Note>
 `SpeechmaticsSTT` is being ported to TypeScript in the upcoming release — see the `## Unreleased` section in `CHANGELOG.md`. Use Python or wait for the next minor version.
@@ -147,6 +148,17 @@ Real-time STT via Soniox.
 import { SonioxSTT } from "getpatter";
 
 const stt = new SonioxSTT();                                      // reads SONIOX_API_KEY
+```
+
+## xAI
+
+Real-time streaming STT via xAI (Grok), plus a one-shot batch transcription helper. Supports Smart Turn end-of-turn detection, keyterm biasing, and speaker diarization. See [xAI STT setup](/typescript-sdk/providers/xai-stt).
+
+```typescript
+import { XaiSTT } from "getpatter";
+
+const stt = new XaiSTT();                                         // reads XAI_API_KEY
+const stt2 = new XaiSTT({ smartTurn: 0.7, language: "en" });
 ```
 
 ## Missing credentials

@@ -734,6 +734,12 @@ class CallMetricsAccumulator:
         time (``self.realtime_model``); pass an explicit value to override
         per-call (the ``response.done`` payload carries the model used).
         """
+        # Per-minute realtime engines (e.g. xAI Grok Voice Agent) are billed on
+        # session duration in ``_compute_cost``, NOT on token usage — skip the
+        # token accounting so no bogus per-token cost / cached-savings figure
+        # is attributed to them.
+        if self.provider_mode == "xai_realtime":
+            return
         resolved_model = model or self.realtime_model or None
         self._total_realtime_cost += calculate_realtime_cost(
             usage, self._pricing, model=resolved_model
@@ -1111,6 +1117,18 @@ class CallMetricsAccumulator:
             stt_cost = 0.0
             tts_cost = 0.0
             llm_cost = self._total_realtime_cost
+        elif self.provider_mode == "xai_realtime":
+            # xAI Grok Voice Agent: billed per MINUTE of session audio, not per
+            # token. Bill the call duration through the MINUTE-unit path of
+            # ``calculate_realtime_cost`` (``_total_realtime_cost`` stays 0 here).
+            stt_cost = 0.0
+            tts_cost = 0.0
+            llm_cost = calculate_realtime_cost(
+                {},
+                self._pricing,
+                provider="xai_realtime",
+                duration_seconds=duration_seconds,
+            )
         elif self.provider_mode == "elevenlabs_convai":
             # ElevenLabs ConvAI: bundled pricing, estimate from duration
             stt_cost = 0.0

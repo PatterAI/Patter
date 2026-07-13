@@ -37,6 +37,7 @@ await phone.serve({ agent });
 | `CartesiaTTS` | `CARTESIA_API_KEY` |
 | `RimeTTS` | `RIME_API_KEY` |
 | `LMNTTTS` | `LMNT_API_KEY` |
+| `XaiTTS` | `XAI_API_KEY` |
 
 ### Model / voice / format enums
 
@@ -150,6 +151,18 @@ import { LMNTTTS } from "getpatter";
 
 const tts = new LMNTTTS();                                        // reads LMNT_API_KEY
 const tts = new LMNTTTS({ model: "blizzard", voice: "leah" });
+```
+
+## xAI
+
+Grok text-to-speech (default voice `eve`) with 26 built-in voices, inline speech tags, custom voice cloning, and telephony-native output. See [xAI TTS setup](/typescript-sdk/providers/xai-tts).
+
+```typescript
+import { XaiTTS } from "getpatter";
+
+const tts = new XaiTTS();                                         // reads XAI_API_KEY
+const tts2 = new XaiTTS({ voice: "leo", language: "en" });
+const tts3 = XaiTTS.forTwilio({ voice: "eve" });                 // μ-law @ 8 kHz native
 ```
 
 ## Missing credentials

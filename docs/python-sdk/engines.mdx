@@ -8,11 +8,12 @@ icon: "bolt"
 
 An **engine** is an end-to-end speech-to-speech runtime. Pass an engine instance to `phone.agent(engine=...)` and Patter wires the audio stream straight through to the provider — no separate STT or TTS is needed.
 
-Patter ships with three engine classes today:
+Patter ships several engine classes:
 
 - [`OpenAIRealtime`](#openairealtime) — OpenAI's Realtime API (v1-beta family, `gpt-realtime-mini` / `gpt-realtime` / `gpt-4o-*-realtime-preview`)
 - [`OpenAIRealtime2`](#openairealtime2) — OpenAI's GA Realtime API (`gpt-realtime-2`), separate marker because the GA endpoint speaks a different `session.update` wire shape
 - [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
+- [`XaiRealtime`](#xairealtime) — xAI Grok Voice Agent (OpenAI-GA-compatible)
 
 Each class ships as both a **flat alias** (`from getpatter import OpenAIRealtime`) and a **namespaced** class (`from getpatter.engines import openai` → `openai.Realtime()`). They are equivalent.
 
@@ -158,6 +159,50 @@ from getpatter.engines import elevenlabs as elevenlabs_engine
 engine = elevenlabs_engine.ConvAI()                   # reads env
 engine = elevenlabs_engine.ConvAI(agent_id="agent_abc123", voice="rachel")
 ```
+
+## XaiRealtime
+
+xAI's **Grok Voice Agent** — an OpenAI-Realtime-GA-compatible speech-to-speech engine with on-by-default reasoning and server-side tools (`web_search`, `x_search`, `mcp`, `file_search`).
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, XaiRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+
+agent = phone.agent(
+    engine=XaiRealtime(voice="eve"),                            # XAI_API_KEY from env
+    system_prompt="You are a friendly receptionist.",
+    first_message="Hello! How can I help?",
+)
+
+async def main():
+    await phone.serve(agent)
+
+asyncio.run(main())
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | xAI API key. Reads from `XAI_API_KEY` when empty. |
+| `model` | `str` | `"grok-voice-latest"` | Grok voice model. `grok-voice-latest` tracks the flagship (`grok-voice-think-fast-1.0`). |
+| `voice` | `str` | `"eve"` | Built-in or custom voice ID. |
+| `reasoning_effort` | `"high" \| "none" \| None` | `None` | `"high"` (xAI server default) enables reasoning; `"none"` disables it for lower latency. |
+
+Namespaced form:
+
+```python
+from getpatter.engines import xai
+
+engine = xai.XaiRealtime()                            # reads XAI_API_KEY
+engine = xai.XaiRealtime(voice="eve", reasoning_effort="none")
+```
+
+For the full session-option surface — VAD tuning, language hint, keyterms, pronunciation replacements, session resumption, and server-side tools — see [xAI Realtime — full reference](/python-sdk/providers/xai-realtime).
+
+<Note>
+**Beta** — spec-validated, not yet live-call-validated.
+</Note>
 
 ## What's Next
 

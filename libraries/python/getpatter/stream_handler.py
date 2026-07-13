@@ -1427,6 +1427,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         metrics,
         *,
         openai_key: str,
+        xai_key: str = "",
         transfer_fn=None,
         hangup_fn=None,
         on_transcript=None,
@@ -1455,6 +1456,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             speech_events=speech_events,
         )
         self._openai_key = openai_key
+        # xAI Grok Voice Agent key (used when ``agent.provider == "xai_realtime"``).
+        self._xai_key = xai_key
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._audio_format = audio_format
@@ -1871,7 +1874,17 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             OpenAIRealtime2Adapter,
         )
 
-        _adapter_cls = OpenAIRealtime2Adapter
+        # xAI's Grok Voice Agent is OpenAI-Realtime-GA-compatible, so its adapter
+        # subclasses the GA one; select it (and its key) when the engine is xAI.
+        _is_xai = getattr(self.agent, "provider", None) == "xai_realtime"
+        if _is_xai:
+            from getpatter.providers.xai_realtime import (  # type: ignore[import]
+                XaiRealtimeAdapter,
+            )
+
+            _adapter_cls = XaiRealtimeAdapter
+        else:
+            _adapter_cls = OpenAIRealtime2Adapter
 
         # Resolve MCP servers BEFORE the adapter is built so the
         # discovered tools are visible in the first ``session.update``.
@@ -1967,6 +1980,14 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         )
         if gate_response is not None:
             adapter_kwargs["gate_response_on_transcript"] = gate_response
+        if _is_xai:
+            # xAI uses its own key and its own session-tuning knobs (carried on
+            # ``agent.xai_realtime``); forward only the keys that were set so the
+            # adapter's defaults stay authoritative otherwise.
+            adapter_kwargs["api_key"] = self._xai_key or self._openai_key
+            for _k, _v in (getattr(self.agent, "xai_realtime", None) or {}).items():
+                if _v is not None:
+                    adapter_kwargs[_k] = _v
         self._adapter = _adapter_cls(**adapter_kwargs)
 
         # Try to adopt a Realtime WebSocket parked during the ringing

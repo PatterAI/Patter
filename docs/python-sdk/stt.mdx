@@ -55,6 +55,7 @@ agent = phone.agent(
 | `AssemblyAISTT` | `getpatter.stt.assemblyai.STT` | `ASSEMBLYAI_API_KEY` | `getpatter[assemblyai]` |
 | `SonioxSTT` | `getpatter.stt.soniox.STT` | `SONIOX_API_KEY` | `getpatter[soniox]` |
 | `SpeechmaticsSTT` | `getpatter.stt.speechmatics.STT` | `SPEECHMATICS_API_KEY` | `getpatter[speechmatics]` |
+| `XaiSTT` | `getpatter.stt.xai.STT` | `XAI_API_KEY` | `getpatter[xai]` |
 
 ### Model enums
 
@@ -173,6 +174,17 @@ Real-time STT via Speechmatics (Python SDK only — not yet ported to TypeScript
 from getpatter.stt import speechmatics
 
 stt = speechmatics.STT()                     # reads SPEECHMATICS_API_KEY
+```
+
+## xAI
+
+Real-time streaming STT via xAI (Grok), plus a one-shot batch transcription helper. Supports Smart Turn end-of-turn detection, keyterm biasing, and speaker diarization. See [xAI STT setup](/python-sdk/providers/xai-stt).
+
+```python
+from getpatter import XaiSTT
+
+stt = XaiSTT()                               # reads XAI_API_KEY
+stt = XaiSTT(smart_turn=0.7, language="en")
 ```
 
 ## Missing credentials

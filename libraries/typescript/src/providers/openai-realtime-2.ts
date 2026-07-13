@@ -108,8 +108,21 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
    *  threshold. */
   private inbound8kCarry: number | null = null;
 
+  /**
+   * Base Realtime WebSocket URL (no query string). Extracted so
+   * OpenAI-GA-compatible subclasses that speak the SAME wire protocol against
+   * a different host — e.g. `XaiRealtimeAdapter` (`wss://api.x.ai/v1/realtime`)
+   * — can override just the endpoint while inheriting `connect()` /
+   * `openParkedConnection()` / the GA event-translation shim unchanged. The
+   * default returns OpenAI's GA endpoint, so behaviour for this class is
+   * byte-identical to the previous hardcoded literal.
+   */
+  protected realtimeBaseUrl(): string {
+    return 'wss://api.openai.com/v1/realtime';
+  }
+
   /** GA-shape `session.update` payload. See module-level docstring. */
-  private buildGASessionConfig(): Record<string, unknown> {
+  protected buildGASessionConfig(): Record<string, unknown> {
     const opts = this.options;
     // The GA endpoint requires audio/pcm with rate >= 24000 for both
     // directions. mulaw / pcma are not honoured by the audio engine
@@ -228,7 +241,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
    * output}` + `output_modalities` + `session.type === "realtime"`.
    */
   async connect(): Promise<void> {
-    const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.model)}`;
+    const url = `${this.realtimeBaseUrl()}?model=${encodeURIComponent(this.model)}`;
     this.ws = new WebSocket(url, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
     });
@@ -399,7 +412,7 @@ export class OpenAIRealtime2Adapter extends OpenAIRealtimeAdapter {
    * tokens. An idle parked socket costs $0.
    */
   override async openParkedConnection(): Promise<WebSocket> {
-    const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.model)}`;
+    const url = `${this.realtimeBaseUrl()}?model=${encodeURIComponent(this.model)}`;
     const ws = new WebSocket(url, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
     });

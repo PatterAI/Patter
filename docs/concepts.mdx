@@ -81,6 +81,7 @@ agent = phone.agent(
 |---|---|---|
 | `OpenAIRealtime()` | Speech-to-speech via OpenAI's Realtime API | Lowest latency, general-purpose |
 | `ElevenLabsConvAI()` | Managed conversational agent on ElevenLabs | Premium voice quality |
+| `XaiRealtime()` | Speech-to-speech via xAI's Grok Voice Agent | Reasoning + built-in web / X search |
 
 **Pipeline mode (full control)** — you pick each stage:
 
@@ -100,9 +101,9 @@ Want fully custom LLM logic (multi-model routing, local models, an internal gate
 
 Three independent stages — swap any of them for a different vendor or local model:
 
-- **STT (Speech-to-Text)** — transcribes caller audio in real time. Providers: `DeepgramSTT`, `WhisperSTT`, `CartesiaSTT`, `SonioxSTT`, `SpeechmaticsSTT` (Python-only), `AssemblyAISTT`. See [STT](/python-sdk/stt).
+- **STT (Speech-to-Text)** — transcribes caller audio in real time. Providers: `DeepgramSTT`, `WhisperSTT`, `CartesiaSTT`, `SonioxSTT`, `SpeechmaticsSTT` (Python-only), `AssemblyAISTT`, `XaiSTT`. See [STT](/python-sdk/stt).
 - **LLM (Large Language Model)** — generates the reply. Pass a class instance via `llm=`: `OpenAILLM`, `AnthropicLLM`, `GroqLLM`, `CerebrasLLM`, `GoogleLLM`. Tool calling works across all five. For anything else, use `on_message`. See [LLM](/python-sdk/llm).
-- **TTS (Text-to-Speech)** — synthesizes the reply audio. Providers: `ElevenLabsTTS`, `OpenAITTS`, `CartesiaTTS`, `RimeTTS`, `LMNTTTS`. See [TTS](/python-sdk/tts).
+- **TTS (Text-to-Speech)** — synthesizes the reply audio. Providers: `ElevenLabsTTS`, `OpenAITTS`, `CartesiaTTS`, `RimeTTS`, `LMNTTTS`, `XaiTTS`. See [TTS](/python-sdk/tts).
 
 Pick engine mode when you want minimum code. Pick pipeline mode when you need a specific LLM, a custom voice, or fine-grained control over latency / costs.
 

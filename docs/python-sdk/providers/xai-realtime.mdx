@@ -1,0 +1,216 @@
+---
+title: "xAI Realtime"
+description: "xAI Grok Voice Agent — OpenAI-Realtime-GA-compatible speech-to-speech engine with reasoning, server-side tools, and pronunciation control."
+icon: "bolt"
+---
+
+# xAI Realtime
+
+`XaiRealtime` selects xAI's [Grok Voice Agent API](https://docs.x.ai/) (`wss://api.x.ai/v1/realtime`) as an end-to-end speech-to-speech engine. Pass it as the `engine` on `phone.agent(...)` and Patter wires the audio stream straight through — no separate STT or TTS.
+
+xAI's Voice Agent API is OpenAI-Realtime-GA-compatible: the same `session.update` / `response.create` / streaming-event flow works after swapping the base URL, the API key, and the model. Under the hood `XaiRealtime` reuses Patter's GA realtime adapter and grafts on the xAI-specific session knobs (reasoning effort, language hint, keyterms, output speed, pronunciation replacements, session resumption, and server-side tools), so every feature gate in the call handler — barge-in, tool calling, heartbeat, transcode — fires for xAI with no per-provider branches.
+
+<Note>
+**Beta.** The engine is validated against the xAI Voice Agent API spec; it has
+not yet been exercised against a live phone call.
+</Note>
+
+## Install
+
+<CodeGroup>
+```bash Python
+pip install "getpatter[xai]"
+```
+
+```bash TypeScript
+npm install getpatter
+```
+</CodeGroup>
+
+Set `XAI_API_KEY` in your environment (or pass `api_key`).
+
+## Constructor
+
+<CodeGroup>
+```python Python
+from getpatter import XaiRealtime
+
+engine = XaiRealtime(
+    model="grok-voice-latest",       # default — always the newest voice model
+    voice="eve",                     # default
+    reasoning_effort="none",         # "high" (default) enables reasoning; "none" disables it
+    language_hint="en",              # bias input transcription (BCP-47)
+    speed=1.0,                       # assistant playback speed [0.7, 1.5]
+)
+```
+
+```typescript TypeScript
+import { XaiRealtime } from "getpatter";
+
+const engine = new XaiRealtime({
+  model: "grok-voice-latest",       // default — always the newest voice model
+  voice: "eve",                     // default
+  reasoningEffort: "none",          // "high" (default) enables reasoning; "none" disables it
+  languageHint: "en",               // bias input transcription (BCP-47)
+  speed: 1.0,                       // assistant playback speed [0.7, 1.5]
+});
+```
+</CodeGroup>
+
+## Usage
+
+Pass the engine as the `engine` on `phone.agent(...)`:
+
+<CodeGroup>
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, XaiRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    engine=XaiRealtime(voice="eve"),                       # XAI_API_KEY from env
+    system_prompt="You are a friendly receptionist.",
+    first_message="Hello! How can I help?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, XaiRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new XaiRealtime({ voice: "eve" }),               // XAI_API_KEY from env
+  systemPrompt: "You are a friendly receptionist.",
+  firstMessage: "Hello! How can I help?",
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+## Models
+
+Pass a versioned name to pin a specific release; `grok-voice-latest` always points at the newest voice model.
+
+| Model | Notes |
+|---|---|
+| `grok-voice-latest` (default) | Alias — currently resolves to `grok-voice-think-fast-1.0`. Use it so your app tracks the recommended model. |
+| `grok-voice-think-fast-1.0` | Flagship voice model. Reasoning is on by default (`reasoning_effort="high"`). |
+| `grok-voice-fast-1.0` | Legacy model — **deprecated**. Available for existing integrations; new apps should use `grok-voice-latest`. |
+
+## Session options
+
+All optional with safe defaults; unset knobs are omitted from the wire so xAI applies its own server defaults.
+
+| Python | TypeScript | Default | Notes |
+|---|---|---|---|
+| `api_key` | `apiKey` | — | Reads `XAI_API_KEY` when omitted. |
+| `model` | `model` | `"grok-voice-latest"` | See [Models](#models). |
+| `voice` | `voice` | `"eve"` | Built-in or custom voice ID. |
+| `reasoning_effort` | `reasoningEffort` | `None` | `"high"` enables reasoning (xAI server default); `"none"` disables it for lower latency. |
+| `vad_threshold` | `vadThreshold` | `None` | Server VAD activation threshold `[0.1, 0.9]` (xAI default `0.85`). Higher requires louder audio to trigger. |
+| `silence_duration_ms` | `silenceDurationMs` | `None` | Trailing silence (ms) the VAD waits for before ending the user's turn. |
+| `prefix_padding_ms` | `prefixPaddingMs` | `None` | Audio (ms) captured before detected speech start (xAI default `333`). |
+| `idle_timeout_ms` | `idleTimeoutMs` | `None` | When set, the server re-engages the user after this many ms of silence following an assistant turn. |
+| `language_hint` | `languageHint` | `None` | BCP-47 code biasing input transcription toward one language (e.g. `"es-MX"`). |
+| `keyterms` | `keyterms` | `()` / `[]` | Up to 100 bias terms (≤50 chars each) for transcription. |
+| `speed` | `speed` | `None` | Assistant playback speed multiplier `[0.7, 1.5]`. |
+| `replace` | `replace` | `None` | Pronunciation map applied before TTS, e.g. `{"Acme Mobile": "Acme Mobull"}`. Only the spoken audio changes; the transcript keeps the original. |
+| `resumption` | `resumption` | `False` | Opt in to session resumption — the server caches conversation turns and replays them on reconnect. |
+| `server_tools` | `serverTools` | `()` / `[]` | Raw xAI server-side tool objects — see [Server-side tools](#server-side-tools). |
+
+## Tool calling
+
+Function tools declared on `phone.agent(tools=[...])` work exactly as they do on OpenAI Realtime — Patter's tool bridge forwards the model's function calls and returns your results. The built-in `transfer_call` and `end_call` tools are auto-injected into every agent, so a Grok voice agent can hand off or hang up out of the box.
+
+### Server-side tools
+
+`server_tools` / `serverTools` passes raw xAI tool objects through to `session.tools` verbatim — `web_search`, `x_search`, `mcp`, and `file_search`. These execute **server-side at xAI**; the client never handles their results, and **xAI bills them separately** from Patter's per-minute metering.
+
+<CodeGroup>
+```python Python
+engine = XaiRealtime(
+    server_tools=(
+        {"type": "web_search"},
+        {"type": "x_search"},
+        {"type": "mcp", "server_url": "https://mcp.example.com/mcp", "server_label": "my-tools"},
+    ),
+)
+```
+
+```typescript TypeScript
+const engine = new XaiRealtime({
+  serverTools: [
+    { type: "web_search" },
+    { type: "x_search" },
+    { type: "mcp", server_url: "https://mcp.example.com/mcp", server_label: "my-tools" },
+  ],
+});
+```
+</CodeGroup>
+
+## Pronunciation replacements
+
+Fix how the model pronounces brand names or domain terms with `replace` — matched case-insensitively in the model's output and swapped **before** TTS, so only the spoken audio changes:
+
+<CodeGroup>
+```python Python
+engine = XaiRealtime(
+    replace={"Acme Mobile": "Acme Mobull"},
+)
+```
+
+```typescript TypeScript
+const engine = new XaiRealtime({
+  replace: { "Acme Mobile": "Acme Mobull" },
+});
+```
+</CodeGroup>
+
+## Telephony audio
+
+Over Twilio / Telnyx the engine inherits Patter's GA-compatible audio path: it negotiates PCM-16-LE @ 24 kHz with xAI and transcodes to / from the carrier's μ-law 8 kHz internally — you don't configure any of this.
+
+<Note>
+xAI also supports native G.711 (`audio/pcmu` @ 8 kHz), which would let telephony
+calls skip the transcode entirely. That is a flagged **future optimization**, not
+yet wired into this engine.
+</Note>
+
+## When to use xAI Realtime vs alternatives
+
+| Use xAI Realtime when… | Use [OpenAI Realtime](/python-sdk/providers/openai-realtime) when… | Use [Pipeline mode](/python-sdk/agents) when… |
+|---|---|---|
+| You want Grok voices, on-by-default reasoning, and built-in server-side `web_search` / `x_search`. | You need the broadest tool-calling ecosystem and OpenAI's GA reasoning tiers. | You need provider-by-provider control (e.g. `DeepgramSTT` + `AnthropicLLM` + `XaiTTS`). |
+
+## Rates
+
+xAI bills the Grok Voice Agent **per minute of session audio** (provider key `xai_realtime`), not per token:
+
+| Item | Rate |
+|---|---|
+| Voice Agent session audio | $0.05 / min ($3.00 / hr) |
+| Text input messages | $0.004 per `conversation.item.create` — **documented, not metered by Patter metrics v1** |
+
+Override the metered rate per-project via `Patter(pricing={"xai_realtime": {"price": ...}})`. See [Metrics](/python-sdk/metrics) for the full rate table.
+
+## Notes
+
+- **Beta** — the engine is spec-validated, not yet live-call-validated. Pin a versioned model (`grok-voice-think-fast-1.0`) in production for stability.
+- **Caller transcript display (known Beta limitation).** The adapter sets xAI's input-transcription model (`grok-transcribe`), and xAI emits `conversation.item.input_audio_transcription.updated` events rather than OpenAI's `.completed`. This first Beta release does not yet consume the `.updated` variant, so the **caller-side** transcript does not populate the transcript display. Audio, model responses, barge-in, and tool calling are unaffected — and the **assistant-side** transcript still flows; full caller-transcript support is a follow-up.
+- Reasoning is enabled by default. Set `reasoning_effort="none"` to disable it for lower latency on simple flows.
+- `server_tools` results are billed by xAI and never surface to your client code.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Engines" icon="bolt" href="/python-sdk/engines">All engines side by side.</Card>
+  <Card title="OpenAI Realtime" icon="bolt" href="/python-sdk/providers/openai-realtime">The default engine.</Card>
+  <Card title="Agents" icon="user-gear" href="/python-sdk/agents">System prompts, tools, first messages.</Card>
+  <Card title="Tools" icon="screwdriver-wrench" href="/python-sdk/tools">Function calling inside a realtime session.</Card>
+</CardGroup>

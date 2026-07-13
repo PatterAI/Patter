@@ -141,6 +141,10 @@ DEFAULT_PRICING: dict[str, dict] = {
     "cartesia_stt": {"unit": PricingUnit.MINUTE, "price": 0.0025},
     # Soniox real-time STT: $0.12/hr = $0.002/min
     "soniox": {"unit": PricingUnit.MINUTE, "price": 0.002},
+    # xAI streaming STT: $0.20/hr = $0.20/60 per min. The batch REST path is
+    # cheaper ($0.10/hr = $0.10/60 per min), but the pipeline meters the
+    # streaming rate; batch callers reconcile via ``XAI_STT_BATCH_PRICE_PER_MINUTE``.
+    "xai": {"unit": PricingUnit.MINUTE, "price": 0.20 / 60},
     # Speechmatics Pro tier: $0.24/hr = $0.0040/min (new users land here).
     # Previous $0.0173 reflected a retired Standard tier; users were
     # being over-billed ~4.3x.
@@ -238,6 +242,8 @@ DEFAULT_PRICING: dict[str, dict] = {
     # chars/hr, $0.70/hr ÷ 54 ≈ $0.013 / 1k chars. Source:
     # https://soniox.com/pricing (also https://soniox.com/text-to-speech).
     "soniox_tts": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.013},
+    # xAI TTS: $15.00 / 1M chars = $0.015 / 1k chars.
+    "xai_tts": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.015},
     # Sarvam AI Bulbul TTS — per 1,000 characters. INR is authoritative; USD is
     # an indicative FX conversion (~Rs 83-84/USD). Bulbul v3 (default): Rs 30 /
     # 10k chars ≈ $0.036/1k; Bulbul v2: Rs 15 / 10k ≈ $0.018/1k. Billed per
@@ -325,6 +331,17 @@ DEFAULT_PRICING: dict[str, dict] = {
                 "cached_text_input_per_token": 0.0000025,
             },
         },
+    },
+    # xAI Grok Voice Agent (realtime) — billed per MINUTE of session audio
+    # ($0.05/min = $3.00/hr), NOT per token, so it uses the MINUTE unit and the
+    # ``duration_seconds`` path in :func:`calculate_realtime_cost`.
+    # ``text_input_per_message`` ($0.004 per ``conversation.item.create``) is a
+    # documented constant, NOT metered in v1 — the metrics layer has no
+    # per-message counter for realtime engines.
+    "xai_realtime": {
+        "unit": PricingUnit.MINUTE,
+        "price": 0.05,
+        "text_input_per_message": 0.004,
     },
     # Telephony — per minute of call duration.
     # twilio default = US inbound local (the 99% case for voice agents
@@ -451,21 +468,46 @@ def calculate_realtime_cost(
     usage: dict,
     pricing: dict,
     model: str | None = None,
+    *,
+    provider: str = "openai_realtime",
+    duration_seconds: float | None = None,
 ) -> float:
-    """Calculate OpenAI Realtime cost from token usage in ``response.done``.
+    """Calculate realtime-engine cost.
+
+    Two billing shapes are supported:
+
+    * **Token-based** (``openai_realtime``, the default ``provider``) — cost is
+      derived from the ``response.usage`` token counts in a ``response.done``
+      event. This is the original behaviour; existing callers are unaffected.
+    * **Per-minute** (e.g. ``xai_realtime``) — when the resolved provider entry's
+      unit is ``minute``, cost is ``price * duration_seconds / 60`` (``0.0`` when
+      ``duration_seconds`` is ``None``); token usage is ignored.
 
     Args:
-        usage: The ``response.usage`` dict from an OpenAI ``response.done``
-            event.  Expected keys: ``input_token_details``,
-            ``output_token_details``.
+        usage: The ``response.usage`` dict from a ``response.done`` event
+            (token-based providers only). Expected keys:
+            ``input_token_details``, ``output_token_details``.
         pricing: Merged pricing dict.
+        model: Optional model id for per-model rate resolution.
+        provider: Pricing-table key for the realtime engine (default
+            ``"openai_realtime"``).
+        duration_seconds: Session audio duration — used by MINUTE-unit
+            providers; ignored by token-unit providers.
 
     Returns:
-        Total cost in USD for this response.
+        Total cost in USD.
     """
-    config = pricing.get("openai_realtime", {})
+    config = pricing.get(provider, {})
     rates = _resolve_provider_rates(config, model)
-    if rates.get("unit") != "token":
+    unit = rates.get("unit")
+    if unit == "minute":
+        # Per-minute realtime billing (e.g. xAI Grok Voice Agent). The
+        # ``text_input_per_message`` constant is documented on the entry but not
+        # metered here (no per-message counter in the metrics layer).
+        if duration_seconds is None:
+            return 0.0
+        return rates.get("price", 0.0) * duration_seconds / 60.0
+    if unit != "token":
         return 0.0
 
     # Guard against OpenAI sending ``"input_token_details": null`` — dict.get
