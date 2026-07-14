@@ -256,13 +256,16 @@ Provider-level defaults are listed below. Per-model rates live under `DEFAULT_PR
 | Cartesia STT (ink-whisper) | per minute | $0.0025 |
 | Soniox | per minute | $0.002 |
 | Speechmatics (Pro) | per minute | $0.004 |
+| xAI STT (streaming) | per minute | $0.003333 ($0.20/hr) |
 | ElevenLabs (`eleven_flash_v2_5`) | per 1k chars | $0.06 |
 | OpenAI TTS (`tts-1`) | per 1k chars | $0.015 |
 | Cartesia TTS (`sonic-2`) | per 1k chars | $0.030 |
 | Rime (`mistv2`) | per 1k chars | $0.030 |
 | LMNT (`aurora`) | per 1k chars | $0.050 |
 | Inworld (`inworld-tts-2`) | per 1k chars | $0.020 |
+| xAI TTS | per 1k chars | $0.015 |
 | OpenAI Realtime (`gpt-realtime-mini` / `gpt-4o-mini-realtime-preview`) | per token | $10/M audio in · $20/M audio out · $0.60/M text in · $2.40/M text out (cached: $0.30/M audio · $0.06/M text) |
+| xAI Realtime (Grok Voice Agent) | per minute | $0.05 ($3.00/hr) |
 | Twilio (US inbound local) | per minute | $0.0085 (rounded up to whole minute, per Twilio) |
 | Telnyx | per minute | $0.007 |
 
@@ -282,6 +285,8 @@ Provider-level defaults are listed below. Per-model rates live under `DEFAULT_PR
 | OpenAI Transcribe (`openai_transcribe`) | `gpt-4o-transcribe` *(default)* | $0.006/min |
 | OpenAI Transcribe | `gpt-4o-mini-transcribe` | $0.003/min |
 | OpenAI Transcribe | `whisper-1` | $0.006/min |
+| xAI (`xai`) | streaming *(default)* | $0.003333/min ($0.20/hr) |
+| xAI | batch / REST (`xaiTranscribe`) | $0.10/hr (documented; not metered on the pipeline) |
 
 #### TTS — per-model rates
 
@@ -300,6 +305,7 @@ Provider-level defaults are listed below. Per-model rates live under `DEFAULT_PR
 | LMNT | `aurora` *(default)* / `blizzard` | $0.050/1k |
 | Inworld | `inworld-tts-2` *(default)* | $0.020/1k |
 | Inworld | `inworld-tts-1.5-max` / `inworld-tts-1.5` | $0.025/1k |
+| xAI (`xai_tts`) | default | $0.015/1k ($15.00/1M chars) |
 
 #### OpenAI Realtime — per-model rates
 
@@ -313,6 +319,15 @@ Provider-level defaults are listed below. Per-model rates live under `DEFAULT_PR
 <Warning>
 `gpt-4o-realtime-preview` is roughly **10x** the cost of `gpt-realtime-mini` for audio. Switching realtime models has direct billing impact — confirm the model on `agent.realtime.model` matches the rate you expect.
 </Warning>
+
+#### xAI Realtime — rates
+
+Unlike OpenAI Realtime (token-based), the xAI Grok Voice Agent is billed **per minute** of session audio, so Patter meters it from the call's `durationSeconds` rather than token counts.
+
+| Provider | Unit | Rate |
+|----------|------|------|
+| xAI Realtime (`xai_realtime`) | per minute | $0.05/min ($3.00/hr) |
+| xAI Realtime — text input | per message | $0.004 per `conversation.item.create` *(documented constant; not metered by Patter metrics v1)* |
 
 <Note>
 Twilio defaults match US **inbound** local. Override `pricing.twilio.price` for US toll-free inbound (~$0.022/min) or US outbound local (~$0.014/min). Default pricing is based on publicly listed provider rates and may become stale — check the provider's pricing page or pass your own overrides for authoritative numbers.

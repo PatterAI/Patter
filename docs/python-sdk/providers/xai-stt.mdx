@@ -1,0 +1,281 @@
+---
+title: "xAI STT"
+description: "xAI (Grok) real-time streaming speech-to-text plus a one-shot batch transcription helper for Patter pipeline mode."
+icon: "waveform"
+---
+
+# xAI STT
+
+`XaiSTT` streams raw audio to xAI's real-time [Speech-to-Text WebSocket](https://docs.x.ai/) (`wss://api.x.ai/v1/stt`) and yields Patter transcript events. Configuration is carried entirely in the URL query string — there is **no setup message** — and audio is sent as raw binary frames (no base64). The adapter waits for the server's `transcript.created` event before it declares the connection ready, then maps xAI's `is_final` / `speech_final` flags onto Patter's interim / chunk-final / utterance-final semantics, the same two-flag scheme Deepgram uses.
+
+The module also exports a one-shot batch helper — `xai_transcribe` (Python) / `xaiTranscribe` (TypeScript) — that wraps the REST endpoint (`POST https://api.x.ai/v1/stt`) for file or URL transcription with word timestamps.
+
+<Note>
+**Beta.** The adapter is validated against the xAI STT API spec; it has not yet
+been exercised against a live phone call.
+</Note>
+
+## Install
+
+<CodeGroup>
+```bash Python
+pip install "getpatter[xai]"
+```
+
+```bash TypeScript
+npm install getpatter
+```
+</CodeGroup>
+
+The Python adapter uses `aiohttp` (pulled in by the `[xai]` extra). The TypeScript adapter uses the `ws` package and the platform `fetch` — no vendor SDK.
+
+## Authentication
+
+```bash
+export XAI_API_KEY="<your-xai-api-key>"
+```
+
+Both the streaming and batch endpoints authenticate with an `Authorization: Bearer <key>` header. `XAI_API_KEY` is read automatically when `api_key` / `apiKey` is omitted.
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.stt.xai`) or the flat re-export
+  (`XaiSTT`). Both auto-resolve `XAI_API_KEY` from the environment when
+  `api_key` is omitted.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import (pipeline mode)
+from getpatter.stt import xai
+
+stt = xai.STT()                                            # reads XAI_API_KEY
+stt = xai.STT(api_key="...", language="en", smart_turn=0.7)
+
+# Flat alias (equivalent)
+from getpatter import XaiSTT
+
+stt = XaiSTT()
+```
+
+```typescript TypeScript
+// Namespaced import (pipeline mode)
+import * as xai from "getpatter/stt/xai";
+
+const stt = new xai.STT();                                 // reads XAI_API_KEY
+const stt2 = new xai.STT({ apiKey: "...", language: "en", smartTurn: 0.7 });
+
+// Flat alias (equivalent)
+import { XaiSTT } from "getpatter";
+
+const stt3 = new XaiSTT();
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+<CodeGroup>
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, XaiSTT, XaiTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=XaiSTT(smart_turn=0.7),                            # XAI_API_KEY from env
+    tts=XaiTTS.for_twilio(voice="eve"),
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, XaiSTT, XaiTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new XaiSTT({ smartTurn: 0.7 }),                     // XAI_API_KEY from env
+  tts: XaiTTS.forTwilio({ voice: "eve" }),
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+## Streaming transcript semantics
+
+xAI emits `transcript.partial` events whose `is_final` / `speech_final` flags map onto the transcript states the pipeline reacts to:
+
+| `is_final` | `speech_final` | Patter meaning | Emitted when |
+|---|---|---|---|
+| `false` | `false` | **Interim** — a live partial for barge-in | only with `interim_results` on (~every 500 ms) |
+| `true` | `false` | **Chunk final** — a locked segment (~3 s) | continuous long speech |
+| `true` | `true` | **Utterance final** — end of turn | silence / Smart Turn / `finalize()` |
+
+A trailing `transcript.done` (after `close()` sends `audio.done`) surfaces any remaining text as a final. `error` frames are logged and do **not** close the connection.
+
+The adapter exposes `finalize()`, which sends `{"type": "finalize"}` to force the current utterance to `speech_final` immediately. The pipeline's VAD speech-end fast-path duck-types this — without it every turn waits out the full endpointing delay.
+
+## Smart Turn end-of-turn detection
+
+Set `smart_turn` / `smartTurn` to a confidence threshold in `[0.0, 1.0]` to enable xAI's Smart Turn ML end-of-turn model instead of relying on silence-based endpointing alone. The threshold trades responsiveness against interruption safety:
+
+| Threshold | Behaviour |
+|---|---|
+| Low (~0.1–0.3) | Ends the turn eagerly on weak end-of-turn signals — snappiest, but more likely to cut a speaker off mid-thought. |
+| Medium (~0.4–0.6) | Balanced default for most conversational agents. |
+| High (~0.7–0.9) | Waits for a strong end-of-turn signal — safest against premature cut-offs, slightly higher latency. |
+
+Pair it with `smart_turn_timeout_ms` / `smartTurnTimeoutMs` (`[1, 5000]`) to force `speech_final` after that much silence even when the model is undecided.
+
+<CodeGroup>
+```python Python
+stt = XaiSTT(smart_turn=0.6, smart_turn_timeout_ms=2000)
+```
+
+```typescript TypeScript
+const stt = new XaiSTT({ smartTurn: 0.6, smartTurnTimeoutMs: 2000 });
+```
+</CodeGroup>
+
+## Keyterms and diarization
+
+Bias transcription toward domain vocabulary (product names, proper nouns) with up to 100 key terms (≤50 chars each), and turn on speaker diarization so each word carries a `speaker` index:
+
+<CodeGroup>
+```python Python
+stt = XaiSTT(
+    keyterms=["Patter", "getpatter", "Grok"],
+    diarize=True,
+)
+```
+
+```typescript TypeScript
+const stt = new XaiSTT({
+  keyterms: ["Patter", "getpatter", "Grok"],
+  diarize: true,
+});
+```
+</CodeGroup>
+
+## Languages
+
+Pass a language code to `language` to enable server-side text formatting (Inverse Text Normalization) for that language. xAI supports 25 codes for the streaming endpoint:
+
+| Code | Language | Code | Language | Code | Language |
+|---|---|---|---|---|---|
+| `ar` | Arabic | `id` | Indonesian | `ro` | Romanian |
+| `cs` | Czech | `it` | Italian | `ru` | Russian |
+| `da` | Danish | `ja` | Japanese | `es` | Spanish |
+| `nl` | Dutch | `ko` | Korean | `sv` | Swedish |
+| `en` | English | `mk` | Macedonian | `th` | Thai |
+| `fil` | Filipino | `ms` | Malay | `tr` | Turkish |
+| `fr` | French | `fa` | Persian | `vi` | Vietnamese |
+| `de` | German | `pl` | Polish | | |
+| `hi` | Hindi | `pt` | Portuguese | | |
+
+## Encodings and sample rate
+
+`encoding` accepts `pcm` (default), `mulaw`, or `alaw`. The default `pcm` @ `sample_rate=16000` matches what Patter's pipeline feeds every STT stage (the carrier bridge decodes inbound μ-law to linear PCM16 @ 16 kHz on both Twilio and Telnyx), so `XaiSTT` drops in without transcoding. Set `mulaw` / `alaw` @ `8000` only when feeding raw carrier audio directly.
+
+## Rates
+
+xAI bills STT by audio duration. Patter meters the streaming rate on the pipeline (provider key `xai`):
+
+| Path | Rate |
+|---|---|
+| Streaming (WebSocket) | $0.20 / hr ($0.003333 / min) |
+| Batch (REST / `xai_transcribe`) | $0.10 / hr |
+
+Override the metered rate per-project via `Patter(pricing={"xai": {"price": ...}})`. See [Metrics](/python-sdk/metrics) for the full rate table.
+
+## Options
+
+| Python | TypeScript | Default | Notes |
+|---|---|---|---|
+| `api_key` | `apiKey` | — | Reads `XAI_API_KEY` when omitted. |
+| `language` | `language` | — | BCP-47 code enabling server-side text formatting. Auto when unset. |
+| `encoding` | `encoding` | `"pcm"` | `pcm` / `mulaw` / `alaw`. |
+| `sample_rate` | `sampleRate` | `16000` | Input sample rate (Hz). |
+| `interim_results` | `interimResults` | `True` | Emit `is_final=false` partials (~every 500 ms). |
+| `endpointing_ms` | `endpointingMs` | `None` | Silence (ms, `[0, 5000]`) before an utterance is final. `None` keeps the xAI default (10); `0` = any VAD boundary. |
+| `smart_turn` | `smartTurn` | `None` | Smart Turn end-of-turn confidence threshold `[0.0, 1.0]`. `None` leaves it off. |
+| `smart_turn_timeout_ms` | `smartTurnTimeoutMs` | `None` | Max silence (ms, `[1, 5000]`) before forcing `speech_final` when Smart Turn is on. |
+| `keyterms` | `keyterms` | `()` | Up to 100 bias terms (≤50 chars each). |
+| `diarize` | `diarize` | `False` | Speaker diarization — words gain a `speaker` index. |
+| `filler_words` | `fillerWords` | `False` | Include "uh" / "um" in the transcript. |
+| `base_url` | `baseUrl` | xAI STT WS endpoint | Override for proxying or tests. |
+
+## Batch transcription
+
+For a one-shot file or URL (rather than a live stream), use the batch helper. Pass either raw `audio` bytes or a `url` for xAI to download server-side. Container formats (WAV/MP3/OGG/Opus/FLAC/AAC/MP4/M4A/MKV) are auto-detected; for raw headerless audio pass `audio_format` (`pcm` / `mulaw` / `alaw`) and `sample_rate`. Set `format=True` (with `language`) for Inverse Text Normalization ("one hundred dollars" → "$100").
+
+<CodeGroup>
+```python Python
+from getpatter import xai_transcribe
+
+# From bytes
+with open("call.wav", "rb") as f:
+    audio = f.read()
+result = await xai_transcribe(audio, language="en", format=True)
+
+# Or from a URL, with word timestamps + diarization
+from_url = await xai_transcribe(
+    url="https://example.com/recording.mp3",
+    diarize=True,
+)
+
+print(result.text, result.duration)
+for word in result.words:
+    print(word.text, word.start, word.end, word.speaker)
+```
+
+```typescript TypeScript
+import { readFile } from "node:fs/promises";
+import { xaiTranscribe } from "getpatter";
+
+// From bytes
+const audio = await readFile("call.wav");
+const result = await xaiTranscribe({ audio, language: "en", format: true });
+
+// Or from a URL, with word timestamps + diarization
+const fromUrl = await xaiTranscribe({
+  url: "https://example.com/recording.mp3",
+  diarize: true,
+});
+
+console.log(result.text, result.duration);
+for (const word of result.words) {
+  console.log(word.text, word.start, word.end, word.speaker);
+}
+```
+</CodeGroup>
+
+The helper returns a parsed result — `XaiTranscription(text, language, duration, words)` — where each `XaiWord` carries `text`, `start`, `end`, and (when `diarize` is on) `speaker`.
+
+## Low-level usage
+
+The pipeline-mode wrapper adds `XAI_API_KEY` resolution on top of the underlying provider. To use the provider directly, import it from `getpatter.providers.xai_stt`:
+
+```python
+from getpatter.providers.xai_stt import XaiSTT
+
+stt = XaiSTT("<api-key>", language="en", smart_turn=0.7)
+await stt.connect()
+async for transcript in stt.receive_transcripts():
+    print(transcript.text, transcript.is_final, transcript.speech_final)
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="STT" icon="microphone" href="/python-sdk/stt">All STT providers side by side.</Card>
+  <Card title="xAI TTS" icon="waveform" href="/python-sdk/providers/xai-tts">Grok text-to-speech.</Card>
+  <Card title="xAI Realtime" icon="bolt" href="/python-sdk/providers/xai-realtime">Grok Voice Agent engine.</Card>
+  <Card title="Metrics" icon="chart-line" href="/python-sdk/metrics">Cost tracking and rates.</Card>
+</CardGroup>

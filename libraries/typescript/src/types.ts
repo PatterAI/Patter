@@ -18,6 +18,7 @@ import type { ConvAI } from "./engines/elevenlabs";
 import type { GeminiLive } from "./engines/gemini";
 import type { GeminiCascade } from "./engines/gemini-cascade";
 import type { InworldRealtime } from "./engines/inworld";
+import type { XaiRealtime } from "./engines/xai";
 import type { CloudflareTunnel, Static as StaticTunnel } from "./tunnels";
 import type { Tool as ToolInstance } from "./public-api";
 import type { STTAdapter, TTSAdapter } from "./provider-factory";
@@ -880,13 +881,13 @@ export interface AgentOptions {
    * matching mode (``openai_realtime`` or ``elevenlabs_convai``). When absent,
    * pipeline mode is selected if ``stt`` and ``tts`` are provided.
    */
-  readonly engine?: Realtime | Realtime2 | ConvAI | GeminiLive | GeminiCascade | InworldRealtime;
+  readonly engine?: Realtime | Realtime2 | ConvAI | GeminiLive | GeminiCascade | InworldRealtime | XaiRealtime;
   /**
    * Provider mode. Normally derived from ``engine`` / ``stt`` + ``tts``. Pass
    * ``'pipeline'`` explicitly when building a pipeline-mode agent without
    * an engine instance.
    */
-  readonly provider?: 'openai_realtime' | 'elevenlabs_convai' | 'gemini_live' | 'gemini_cascade' | 'inworld_realtime' | 'pipeline';
+  readonly provider?: 'openai_realtime' | 'elevenlabs_convai' | 'gemini_live' | 'gemini_cascade' | 'inworld_realtime' | 'xai_realtime' | 'pipeline';
   /** Pre-instantiated STT adapter (e.g. ``new DeepgramSTT({ apiKey })``). */
   readonly stt?: STTAdapter;
   /** Pre-instantiated TTS adapter (e.g. ``new ElevenLabsTTS({ apiKey })``). */

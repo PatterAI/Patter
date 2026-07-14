@@ -20,6 +20,7 @@ class LocalConfig:
     soniox_key: str = ""
     speechmatics_key: str = ""
     assemblyai_key: str = ""
+    xai_key: str = ""
     phone_number: str = ""
     webhook_url: str = ""
     # SECURITY: require valid webhook signatures on Twilio, Telnyx and Plivo

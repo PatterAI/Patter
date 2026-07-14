@@ -22,4 +22,5 @@ __all__ = [
     "speechmatics",
     "assemblyai",
     "openai_transcribe",
+    "xai",
 ]

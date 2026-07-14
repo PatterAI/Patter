@@ -1,0 +1,293 @@
+---
+title: "xAI TTS"
+description: "xAI (Grok) text-to-speech — expressive voices, inline speech tags, and telephony-native output over the one-shot /tts bytes endpoint."
+icon: "waveform"
+---
+
+# xAI TTS
+
+`XaiTTS` targets xAI's one-shot [Text-to-Speech endpoint](https://docs.x.ai/) (`POST https://api.x.ai/v1/tts`). The response body is raw audio bytes in the requested codec, which maps cleanly onto Patter's streaming synthesis contract and keeps the provider dependency-free (just `fetch` / `aiohttp`).
+
+The default voice is **`eve`**, and the default output is **PCM-16-LE @ 16 kHz** so chunks drop straight into the Patter pipeline without transcoding. For phone calls the carrier factories emit telephony-native audio — see [Telephony](#telephony).
+
+<Note>
+**Beta.** The adapter is validated against the xAI TTS API spec; it has not yet
+been exercised against a live phone call.
+</Note>
+
+## Install
+
+<CodeGroup>
+```bash TypeScript
+npm install getpatter
+```
+
+```bash Python
+pip install "getpatter[xai]"
+```
+</CodeGroup>
+
+## Authentication
+
+```bash
+export XAI_API_KEY="<your-xai-api-key>"
+```
+
+The REST endpoint authenticates with an `Authorization: Bearer <key>` header. `XAI_API_KEY` is read automatically when `apiKey` / `api_key` is omitted.
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter/tts/xai`) or the flat re-export
+  (`XaiTTS`). Both auto-resolve `XAI_API_KEY` from the environment when
+  `apiKey` is omitted.
+</Note>
+
+<CodeGroup>
+```typescript TypeScript
+// Namespaced import (pipeline mode)
+import * as xai from "getpatter/tts/xai";
+
+const tts = new xai.TTS();                                 // reads XAI_API_KEY, voice "eve"
+const tts2 = new xai.TTS({ apiKey: "...", voice: "leo", language: "en" });
+
+// Flat alias (equivalent)
+import { XaiTTS } from "getpatter";
+
+const tts3 = new XaiTTS();
+```
+
+```python Python
+# Namespaced import (pipeline mode)
+from getpatter.tts import xai
+
+tts = xai.TTS()                                            # reads XAI_API_KEY, voice "eve"
+tts = xai.TTS(api_key="...", voice="leo", language="en")
+
+# Flat alias (equivalent)
+from getpatter import XaiTTS
+
+tts = XaiTTS()
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+<CodeGroup>
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, XaiTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                                  // DEEPGRAM_API_KEY from env
+  tts: XaiTTS.forTwilio({ voice: "eve" }),                 // XAI_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, XaiTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                     # DEEPGRAM_API_KEY from env
+    tts=XaiTTS.for_twilio(voice="eve"),                    # XAI_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+</CodeGroup>
+
+## Voices
+
+xAI ships a roster of 26 built-in voices, each with a distinct personality. `eve` is the default; voice IDs are **case-insensitive** (`eve`, `Eve`, and `EVE` all work). Tone and suggested use cases below are from the [xAI Voice Overview](https://docs.x.ai/developers/model-capabilities/audio/voice); preview samples for each voice in the [xAI console playground](https://console.x.ai/).
+
+| Voice | Tone | Suggested use cases |
+|---|---|---|
+| `eve` *(default)* | Energetic and upbeat | — |
+| `altair` | Elegant, refined, and effortlessly premium | Advertising, Narration |
+| `ara` | Warm and friendly | — |
+| `atlas` | Confident, commanding, and reassuring | Sales, Assistant |
+| `carina` | Soft, empathetic, and soothing | Wellness, Support |
+| `castor` | Charismatic, down-to-earth, and easygoing | Sales, Support |
+| `celeste` | Compassionate, confident, and reassuring | Support, Assistant |
+| `cosmo` | Bright, curious, and easy to follow | Education, Podcast |
+| `helios` | Upbeat, energetic, and endlessly versatile | Assistant, Wellness |
+| `helix` | Bold, dynamic, and adrenaline-fueled | Commentary, Podcast |
+| `iris` | Friendly, upbeat, and naturally charming | Sales, Support |
+| `kepler` | Inventive, forward-thinking, and charismatic | Advertising, Podcast |
+| `leo` | Authoritative and strong | — |
+| `lumen` | Warm, articulate, and engaging | Education, Advertising |
+| `luna` | Gentle, patient, and deeply nurturing | Education, Assistant |
+| `lux` | Grounded, calm, and quietly wise | Wellness, Narration |
+| `naksh` | Warm, thoughtful, and wise | Assistant, Support |
+| `orion` | Rich, cinematic, and resonant | Narration, Audiobooks |
+| `perseus` | Strong, confident, and trustworthy | Advertising, Narration |
+| `rex` | Confident and clear | — |
+| `rigel` | Precise, professional, and calmly confident | Assistant, Support |
+| `sal` | Smooth and balanced | — |
+| `sirius` | Quick-witted, clever, and playful | Commentary, Characters |
+| `ursa` | Friendly, warm, and steadfast | Assistant, Podcast |
+| `zagan` | Powerful, dramatic, and unmistakable | Characters, Narration |
+| `zenith` | Sharp, focused, and driven | Sales, Advertising |
+
+### Custom voices
+
+Clone a voice from a short reference clip (WAV, ≤120 s) with the custom-voices helper. It returns a `voice_id` usable as the `voice` on both `XaiTTS` and the [xAI Realtime engine](/typescript-sdk/providers/xai-realtime):
+
+<CodeGroup>
+```typescript TypeScript
+import { readFile } from "node:fs/promises";
+import { xaiCreateCustomVoice, XaiTTS } from "getpatter";
+
+const clip = await readFile("reference.wav");             // ≤120 s
+const voiceId = await xaiCreateCustomVoice({
+  name: "Front Desk",
+  language: "en",
+  audio: clip,
+});
+
+const tts = new XaiTTS({ voice: voiceId });
+```
+
+```python Python
+from getpatter import xai_create_custom_voice, XaiTTS
+
+with open("reference.wav", "rb") as f:                    # ≤120 s
+    clip = f.read()
+voice_id = await xai_create_custom_voice(
+    name="Front Desk",
+    language="en",
+    audio=clip,
+)
+
+tts = XaiTTS(voice=voice_id)
+```
+</CodeGroup>
+
+## Language
+
+`language` is required by xAI and defaults to `"auto"` (the model detects the language of the text). Pass a BCP-47 code — e.g. `"en"`, `"it"`, `"pt-BR"` — for consistent results. Language validation is case-insensitive.
+
+## Speech tags
+
+xAI supports inline speech tags embedded in the synthesized text for expressive delivery — for example `[pause]` and `[laugh]` for vocal expressions, plus wrapping tags to change delivery style (whispering, singing). Because Patter forwards the reply text verbatim to xAI, any tags your LLM (or system prompt) produces in the text are honored:
+
+<CodeGroup>
+```typescript TypeScript
+// The tags travel inside the text your agent speaks.
+const tts = new XaiTTS({ voice: "eve", language: "en" });
+for await (const chunk of tts.synthesizeStream(
+  "So I walked in and [pause] there it was. [laugh] Incredible!",
+)) {
+  // raw PCM-16-LE @ 16 kHz
+}
+```
+
+```python Python
+# The tags travel inside the text your agent speaks.
+tts = XaiTTS(voice="eve", language="en")
+async for chunk in tts.synthesize(
+    "So I walked in and [pause] there it was. [laugh] Incredible!",
+):
+    ...  # raw PCM-16-LE @ 16 kHz
+```
+</CodeGroup>
+
+<Note>
+A single request accepts up to **15,000 characters**. The adapter warns and
+forwards the text as-is past that limit (the API rejects it); split long text
+upstream — the pipeline already synthesizes per utterance.
+</Note>
+
+## Telephony
+
+The constructor default `codec="pcm"` @ `sampleRate=16000` is correct for web playback and 16 kHz pipelines. For real phone calls use the carrier factories, which negotiate the carrier-native codec so the pipeline skips resampling:
+
+<CodeGroup>
+```typescript TypeScript
+import { XaiTTS } from "getpatter";
+
+// Twilio Media Streams: μ-law @ 8 kHz native — bit-clean passthrough, no resample.
+const tts = XaiTTS.forTwilio({ voice: "eve" });
+
+// Telnyx: PCM @ 16 kHz — flows through the standard PCM16 path.
+const tts2 = XaiTTS.forTelnyx({ voice: "eve" });
+```
+
+```python Python
+from getpatter import XaiTTS
+
+# Twilio Media Streams: μ-law @ 8 kHz native — bit-clean passthrough, no resample.
+tts = XaiTTS.for_twilio(voice="eve")
+
+# Telnyx: PCM @ 16 kHz — flows through the standard PCM16 path.
+tts2 = XaiTTS.for_telnyx(voice="eve")
+```
+</CodeGroup>
+
+`forTwilio()` emits G.711 μ-law @ 8 kHz — exactly Twilio's wire codec, which xAI supports natively — so the audio passes straight through with zero resampling and zero PCM → μ-law encoding.
+
+## Output formats
+
+Control the codec and sample rate directly when not using the carrier factories:
+
+| `codec` | Best for |
+|---|---|
+| `mp3` | General web use — wide compatibility. |
+| `wav` | Lossless — editing / post-production. |
+| `pcm` (default) | Raw audio — real-time pipelines. |
+| `mulaw` | Telephony (G.711 μ-law). |
+| `alaw` | Telephony (G.711 A-law). |
+
+Supported `sampleRate` values: `8000`, `16000`, `22050`, `24000` (xAI's own default), `44100`, `48000`. `bitRate` applies to `mp3` only (`32000`–`192000`).
+
+## Rates
+
+xAI bills TTS per character. Patter's default rate (provider key `xai_tts`) is **$0.015 / 1k characters** ($15.00 / 1M chars). Override per-project via `new Patter({ pricing: { xai_tts: { price: ... } } })`. See [Metrics](/typescript-sdk/metrics) for the full rate table.
+
+## Options
+
+| TypeScript | Python | Default | Notes |
+|---|---|---|---|
+| `apiKey` | `api_key` | — | Reads `XAI_API_KEY` when omitted. |
+| `voice` | `voice` | `"eve"` | Built-in or custom voice ID (case-insensitive). |
+| `language` | `language` | `"auto"` | BCP-47 tag or `"auto"`. Required by xAI. |
+| `codec` | `codec` | `"pcm"` | `pcm` / `mulaw` / `alaw` / `wav` / `mp3`. |
+| `sampleRate` | `sample_rate` | `16000` | `8000` / `16000` / `22050` / `24000` / `44100` / `48000`. |
+| `bitRate` | — | — | Bit rate (bits/sec), MP3 only. |
+| `speed` | `speed` | — | Speaking-rate multiplier in `[0.7, 1.5]`. |
+| `optimizeStreamingLatency` | `optimize_streaming_latency` | — | `0` / `1` / `2` — higher trades quality for lower time-to-first-audio. |
+| `textNormalization` | `text_normalization` | `false` | Normalize numbers / abbreviations / symbols to spoken form. |
+| `baseUrl` | `base_url` | xAI `/tts` endpoint | Override for proxying or tests. |
+
+`bitRate` is a TypeScript-only constructor option; on the Python side pass it via the low-level provider if you need a non-default MP3 bit rate.
+
+## Low-level usage
+
+The pipeline-mode wrapper adds `XAI_API_KEY` resolution on top of the underlying provider. To use it directly, import from `getpatter/providers/xai-tts` and pass the API key first:
+
+```typescript
+import { XaiTTS as LowLevelTTS } from "getpatter/providers/xai-tts";
+
+const tts = new LowLevelTTS("<api-key>", { voice: "eve", codec: "pcm", sampleRate: 16000 });
+for await (const chunk of tts.synthesizeStream("Hello from the Patter pipeline.")) {
+  // raw PCM-16-LE @ 16 kHz
+}
+```
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="TTS" icon="volume" href="/typescript-sdk/tts">All TTS providers side by side.</Card>
+  <Card title="xAI STT" icon="waveform" href="/typescript-sdk/providers/xai-stt">Grok speech-to-text.</Card>
+  <Card title="xAI Realtime" icon="bolt" href="/typescript-sdk/providers/xai-realtime">Grok Voice Agent engine.</Card>
+  <Card title="Metrics" icon="chart-line" href="/typescript-sdk/metrics">Cost tracking and rates.</Card>
+</CardGroup>

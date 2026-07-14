@@ -33,7 +33,9 @@ logger = logging.getLogger("getpatter")
 # string union ``'openai_realtime' | 'elevenlabs_convai' | 'pipeline'`` in
 # ``types.ts``. Tightened from a free ``str`` so editors autocomplete and
 # typos surface at type-check time instead of at call time.
-ProviderMode = Literal["openai_realtime", "elevenlabs_convai", "pipeline"]
+ProviderMode = Literal[
+    "openai_realtime", "xai_realtime", "elevenlabs_convai", "pipeline"
+]
 
 
 @dataclass(frozen=True)
@@ -765,6 +767,14 @@ class Agent:
     # default is the decoupled behavior — it reclaims the ~500 ms Whisper wait).
     # Realtime modes only; pipeline mode uses its own dedicated STT.
     realtime_gate_response_on_transcript: bool | None = None
+    # xAI Grok Voice Agent — engine-supplied session tuning threaded through
+    # from ``engines.xai.XaiRealtime(...)``. ``None`` (default) when the agent
+    # is not an xAI realtime engine; otherwise a dict of the xAI-specific knobs
+    # (reasoning_effort, vad_threshold, silence_duration_ms, prefix_padding_ms,
+    # idle_timeout_ms, language_hint, keyterms, speed, replace, resumption,
+    # server_tools) that the stream-handler forwards to
+    # ``providers.xai_realtime.XaiRealtimeAdapter``. Only set keys are present.
+    xai_realtime: dict | None = None
     # Opt-in barge-in confirmation strategies (pipeline mode). With the
     # default empty tuple the SDK falls back to the legacy "interrupt
     # immediately on VAD speech_start" behaviour. When at least one

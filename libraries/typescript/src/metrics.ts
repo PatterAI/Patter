@@ -902,6 +902,13 @@ export class CallMetricsAccumulator {
     },
     model?: string | null,
   ): void {
+    // xAI Grok Voice Agent bills per MINUTE (see ``_computeCost``), not per
+    // token. It is OpenAI-Realtime-GA-compatible, so its ``response.done`` MAY
+    // carry an OpenAI-shaped ``usage`` block — but metering it here would both
+    // double-count against the per-minute cost AND surface a bogus
+    // "saved from caching" figure on the dashboard. Ignore token usage for
+    // MINUTE-unit realtime providers; the duration path owns their cost.
+    if (this.providerMode === 'xai_realtime') return;
     const resolvedModel = model || this.realtimeModel || null;
     this._totalRealtimeCost += calculateRealtimeCost(usage, this._pricing, resolvedModel);
     this._totalRealtimeCachedSavings += calculateRealtimeCachedSavings(
@@ -1247,6 +1254,20 @@ export class CallMetricsAccumulator {
       stt = 0;
       tts = 0;
       llm = this._totalRealtimeCost;
+    } else if (this.providerMode === 'xai_realtime') {
+      // xAI Grok Voice Agent bills per MINUTE of session audio (not per token),
+      // so the realtime cost is derived from the call duration at call-end
+      // rather than the per-turn token ``usage`` accumulated in
+      // ``_totalRealtimeCost`` (which stays 0 for xAI).
+      stt = 0;
+      tts = 0;
+      llm = calculateRealtimeCost(
+        {},
+        this._pricing,
+        this.realtimeModel || null,
+        'xai_realtime',
+        durationSeconds,
+      );
     } else if (this.providerMode === 'elevenlabs_convai') {
       stt = 0;
       tts = 0;
