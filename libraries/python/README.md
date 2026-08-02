@@ -81,6 +81,7 @@ Every provider reads its credentials from the environment by default. Pass `api_
 | `CARTESIA_API_KEY` | `getpatter.stt.cartesia.STT`, `getpatter.tts.cartesia.TTS` |
 | `RIME_API_KEY` | `getpatter.tts.rime.TTS` |
 | `LMNT_API_KEY` | `getpatter.tts.lmnt.TTS` |
+| `FISH_AUDIO_API_KEY` | `getpatter.tts.fish_audio.TTS`, `getpatter.stt.fish_audio.STT` |
 | `SONIOX_API_KEY` | `getpatter.stt.soniox.STT` |
 | `SPEECHMATICS_API_KEY` | `getpatter.stt.speechmatics.STT` |
 | `ASSEMBLYAI_API_KEY` | `getpatter.stt.assemblyai.STT` |

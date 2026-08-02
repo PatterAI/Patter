@@ -128,7 +128,8 @@
                       "python-sdk/providers/soniox",
                       "python-sdk/providers/speechmatics",
                       "python-sdk/providers/telnyx-stt",
-                      "python-sdk/providers/xai-stt"
+                      "python-sdk/providers/xai-stt",
+                      "python-sdk/providers/fish-audio-stt"
                     ]
                   },
                   {
@@ -155,7 +156,8 @@
                       "python-sdk/providers/cartesia-tts",
                       "python-sdk/providers/inworld",
                       "python-sdk/providers/telnyx-tts",
-                      "python-sdk/providers/xai-tts"
+                      "python-sdk/providers/xai-tts",
+                      "python-sdk/providers/fish-audio-tts"
                     ]
                   },
                   {
@@ -266,7 +268,8 @@
                       "typescript-sdk/providers/soniox",
                       "typescript-sdk/providers/speechmatics",
                       "typescript-sdk/providers/telnyx-stt",
-                      "typescript-sdk/providers/xai-stt"
+                      "typescript-sdk/providers/xai-stt",
+                      "typescript-sdk/providers/fish-audio-stt"
                     ]
                   },
                   {
@@ -293,7 +296,8 @@
                       "typescript-sdk/providers/cartesia-tts",
                       "typescript-sdk/providers/inworld",
                       "typescript-sdk/providers/telnyx-tts",
-                      "typescript-sdk/providers/xai-tts"
+                      "typescript-sdk/providers/xai-tts",
+                      "typescript-sdk/providers/fish-audio-tts"
                     ]
                   },
                   {

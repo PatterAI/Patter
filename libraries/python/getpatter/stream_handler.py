@@ -1244,16 +1244,20 @@ class StreamHandler(ABC):
         cls_name = type(tts).__name__.lower()
         # Heuristic: provider classes are named like ``ElevenLabsTTS``,
         # ``OpenAITTS``, ``CartesiaTTS`` etc.
-        for known in (
-            "elevenlabs",
-            "openai",
-            "cartesia",
-            "rime",
-            "lmnt",
-            "inworld",
-            "telnyx",
+        # Pairs are ``(class-name needle, canonical provider key)`` — they only
+        # differ when the class name drops a separator, e.g. ``FishAudioTTS``
+        # -> ``fish_audio``.
+        for needle, known in (
+            ("elevenlabs", "elevenlabs"),
+            ("openai", "openai"),
+            ("cartesia", "cartesia"),
+            ("rime", "rime"),
+            ("lmnt", "lmnt"),
+            ("inworld", "inworld"),
+            ("fishaudio", "fish_audio"),
+            ("telnyx", "telnyx"),
         ):
-            if known in cls_name:
+            if needle in cls_name:
                 return known
         return cls_name.replace("tts", "") or None
 
@@ -3961,7 +3965,9 @@ class PipelineStreamHandler(StreamHandler):
             from getpatter.providers.denoiser import resolve_denoiser
 
             self._resolved_denoiser = resolve_denoiser(denoiser_id)
-            logger.info("denoiser '%s' resolved for pipeline inbound chain", denoiser_id)
+            logger.info(
+                "denoiser '%s' resolved for pipeline inbound chain", denoiser_id
+            )
 
         # Prewarm-handoff: try to adopt pre-opened provider WebSockets
         # that the prewarm pipeline (see
@@ -7989,9 +7995,7 @@ class PipelineStreamHandler(StreamHandler):
             else:  # in flight — proportional word-boundary split
                 span = end_s - start_s
                 frac = (heard_s - start_s) / span if span > 1e-9 else 0.0
-                heard_words, unsaid_words = self._split_sentence_at_fraction(
-                    text, frac
-                )
+                heard_words, unsaid_words = self._split_sentence_at_fraction(text, frac)
                 if heard_words:
                     heard_parts.append(heard_words)
                 if unsaid_words:
@@ -8100,9 +8104,7 @@ class PipelineStreamHandler(StreamHandler):
         if not should:
             return
         self._pending_redelivery = (heard, unsaid)
-        logger.debug(
-            "Re-delivery armed: %d word(s) un-heard", len(unsaid.split())
-        )
+        logger.debug("Re-delivery armed: %d word(s) un-heard", len(unsaid.split()))
 
     def _arm_pending_redelivery_nudge(self) -> None:
         """Inject any armed re-delivery as a one-shot LLM system nudge.

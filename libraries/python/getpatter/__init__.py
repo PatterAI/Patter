@@ -12,7 +12,7 @@ Installation extras:
   small).
 * Optional provider extras (``anthropic``, ``groq``, ``cerebras``, ``google``,
   ``gemini-live``, ``ultravox``, ``speechmatics``, ``assemblyai``, ``cartesia``,
-  ``soniox``, ``rime``, ``lmnt``, ``telnyx-ai``, ``silero``,
+  ``soniox``, ``rime``, ``lmnt``, ``fish_audio``, ``telnyx-ai``, ``silero``,
   ``turn-detector``, ``krisp``, ``deepfilternet``, ``ivr``,
   ``background-audio``, ``evals``, ``tracing``) —
   install only the ones matching the provider your agent uses.
@@ -116,6 +116,7 @@ from getpatter.stt.soniox import STT as SonioxSTT
 from getpatter.stt.speechmatics import STT as SpeechmaticsSTT
 from getpatter.stt.assemblyai import STT as AssemblyAISTT
 from getpatter.stt.xai import STT as XaiSTT
+from getpatter.stt.fish_audio import STT as FishAudioSTT
 from getpatter.providers.xai_stt import (
     XaiTranscription,
     XaiWord,
@@ -139,6 +140,8 @@ from getpatter.tts.soniox import TTS as SonioxTTS
 from getpatter.tts.sarvam import TTS as SarvamTTS
 from getpatter.tts.xai import TTS as XaiTTS
 from getpatter.providers.xai_tts import create_custom_voice as xai_create_custom_voice
+from getpatter.tts.fish_audio import TTS as FishAudioTTS
+from getpatter.tts.fish_audio import WebSocketTTS as FishAudioWebSocketTTS
 
 # LLM flat aliases — parity with libraries/typescript/src/index.ts and mirror of STT/TTS layout.
 from getpatter.llm.openai import LLM as OpenAILLM
@@ -536,6 +539,7 @@ __all__ = [
     "XaiTranscription",
     "XaiWord",
     "xai_transcribe",
+    "FishAudioSTT",
     "ElevenLabsTTS",
     "ElevenLabsWebSocketTTS",
     "ElevenLabsRestTTS",
@@ -548,6 +552,8 @@ __all__ = [
     "SarvamTTS",
     "XaiTTS",
     "xai_create_custom_voice",
+    "FishAudioTTS",
+    "FishAudioWebSocketTTS",
     "OpenAILLM",
     "AnthropicLLM",
     "GroqLLM",

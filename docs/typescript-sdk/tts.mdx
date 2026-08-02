@@ -38,6 +38,8 @@ await phone.serve({ agent });
 | `RimeTTS` | `RIME_API_KEY` |
 | `LMNTTTS` | `LMNT_API_KEY` |
 | `XaiTTS` | `XAI_API_KEY` |
+| `FishAudioTTS` | `FISH_AUDIO_API_KEY` |
+| `FishAudioWebSocketTTS` | `FISH_AUDIO_API_KEY` |
 
 ### Model / voice / format enums
 
@@ -163,6 +165,19 @@ import { XaiTTS } from "getpatter";
 const tts = new XaiTTS();                                         // reads XAI_API_KEY
 const tts2 = new XaiTTS({ voice: "leo", language: "en" });
 const tts3 = XaiTTS.forTwilio({ voice: "eve" });                 // μ-law @ 8 kHz native
+```
+
+## Fish Audio
+
+S2.1-Pro (83 languages, `[bracket]` expression control, multi-speaker) over HTTP streaming, plus an opt-in WebSocket transport for S2-Pro's ~100 ms time-to-first-audio. See [Fish Audio TTS setup](/typescript-sdk/providers/fish-audio-tts).
+
+```typescript
+import { FishAudioTTS, FishAudioWebSocketTTS } from "getpatter";
+
+const tts = new FishAudioTTS();                                   // reads FISH_AUDIO_API_KEY, model s2.1-pro
+const tts2 = new FishAudioTTS({ voice: "<reference-id>", latency: "low" });
+const tts3 = FishAudioTTS.forTwilio({});                          // PCM @ 8 kHz — skips the resample
+const tts4 = new FishAudioWebSocketTTS();                         // s2-pro over wss:// (HTTP-only models rejected)
 ```
 
 ## Missing credentials

@@ -81,6 +81,7 @@ Every provider reads its credentials from the environment by default. Pass `apiK
 | `CARTESIA_API_KEY` | `CartesiaSTT`, `CartesiaTTS` |
 | `RIME_API_KEY` | `RimeTTS` |
 | `LMNT_API_KEY` | `LMNTTTS` |
+| `FISH_AUDIO_API_KEY` | `FishAudioTTS`, `FishAudioSTT` |
 | `SONIOX_API_KEY` | `SonioxSTT` |
 | `ASSEMBLYAI_API_KEY` | `AssemblyAISTT` |
 | `ANTHROPIC_API_KEY` | `AnthropicLLM` |

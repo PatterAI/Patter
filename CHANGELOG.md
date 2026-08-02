@@ -2,6 +2,46 @@
 
 ### Added
 
+- **Fish Audio voice provider suite** — TTS (S2.1-Pro / S2-Pro) and ASR land in
+  both SDKs, wired end-to-end with real pricing. One `FISH_AUDIO_API_KEY`
+  covers both directions of the call:
+  - **`FishAudioTTS`**: HTTP streaming synthesis via `POST /v1/tts`, default
+    model `s2.1-pro` (83 languages, multi-speaker via `<|speaker:N|>` markers,
+    natural-language `[bracket]` expression control). Output defaults to
+    PCM_S16LE @ 16 kHz so chunks feed the pipeline with no transcoding, and
+    `latency` defaults to `balanced` (~300 ms). Fish selects the model with a
+    **request header**, so switching generations is a constructor argument.
+    `for_twilio()` requests PCM directly at 8 kHz — the carrier wire rate — so
+    the pipeline skips the resample (Fish has no native G.711, so the μ-law
+    encode still runs); `for_telnyx()` keeps the 16 kHz pipeline rate. Every
+    unset knob is omitted from the request so Fish applies its own documented
+    default rather than one the SDK guessed.
+  - **`FishAudioWebSocketTTS`**: opt-in low-latency transport over
+    `wss://api.fish.audio/v1/tts/live`, pairing with `s2-pro`'s ~100 ms
+    time-to-first-audio and skipping the per-utterance HTTP setup. Fish serves
+    **only `s1` and `s2-pro`** on that socket, so the constructor rejects
+    `s2.1-pro` up front with a pointer back to the HTTP adapter instead of
+    failing mid-call. Frames are MessagePack (`start`→`text`→`flush`→`stop`),
+    which is the sole reason the `[fish_audio]` extra pulls in `ormsgpack`
+    (TypeScript: `@msgpack/msgpack`, an optional dependency).
+  - **`FishAudioSTT`**: batch transcription via `POST /v1/asr`. Fish exposes no
+    streaming socket, so the adapter buffers ~2 s windows and emits one final
+    transcript each — no interim partials, same shape as `WhisperSTT`. A short
+    tail is silence-padded up to Fish's documented 1-second floor rather than
+    dropped, so the last words of an utterance are never lost. Server errors
+    are logged and yield no transcript; they never raise into a live call.
+  - **Pricing** (official, docs.fish.audio): TTS $15.00 per 1M UTF-8 **bytes**
+    (`s2.1-pro-free` free), ASR $0.36 per audio hour. The adapters meter UTF-8
+    byte length rather than character count — exact for latin scripts and
+    correctly ~3× higher for CJK.
+  `libraries/python/getpatter/providers/fish_audio_{tts,ws_tts,stt}.py`,
+  `libraries/typescript/src/providers/fish-audio-{tts,ws-tts,stt}.ts`,
+  `tts/fish_audio.*`, `stt/fish_audio.*`, `pricing.*`, `telemetry/stack.*`,
+  init-wizard catalogues, and docs pages under
+  `docs/{python,typescript}-sdk/providers/fish-audio-{tts,stt}.mdx`. Beta:
+  validated against the Fish Audio API spec with real local HTTP/WebSocket
+  servers in the test suite; not yet exercised on a live call.
+
 - **xAI (Grok) voice provider suite** — all three xAI Voice APIs land in both
   SDKs, wired end-to-end with real pricing:
   - **`XaiRealtime` engine (Grok Voice Agent API)**: real-time speech-to-speech

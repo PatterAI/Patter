@@ -129,6 +129,12 @@ PIPELINE_STT: dict[str, dict] = {
         "env": ("OPENAI_API_KEY",),
         "extra": "",
     },
+    "fish_audio": {
+        "class": "FishAudioSTT",
+        "label": "Fish Audio (batch — higher latency)",
+        "env": ("FISH_AUDIO_API_KEY",),
+        "extra": "fish_audio",
+    },
 }
 DEFAULT_STT = "deepgram"
 
@@ -204,6 +210,12 @@ PIPELINE_TTS: dict[str, dict] = {
         "label": "Inworld",
         "env": ("INWORLD_API_KEY",),
         "extra": "inworld",
+    },
+    "fish_audio": {
+        "class": "FishAudioTTS",
+        "label": "Fish Audio (s2.1-pro)",
+        "env": ("FISH_AUDIO_API_KEY",),
+        "extra": "fish_audio",
     },
 }
 DEFAULT_TTS = "elevenlabs"
