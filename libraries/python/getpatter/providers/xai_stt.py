@@ -581,5 +581,3 @@ async def transcribe(
         duration=float(payload.get("duration", 0.0)),
         words=_parse_words(payload.get("words")),
     )
-
-
