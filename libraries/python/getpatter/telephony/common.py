@@ -199,9 +199,17 @@ def _create_stt_from_config(config, for_twilio: bool = False):
             )
         return AssemblyAISTT(api_key=config.api_key, language=config.language, **kwargs)
 
+    if provider == "fish_audio":
+        from getpatter.providers.fish_audio_stt import FishAudioSTT  # type: ignore[import]
+
+        allowed = {"ignore_timestamps", "buffer_size_bytes", "base_url"}
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        return FishAudioSTT(api_key=config.api_key, language=config.language, **kwargs)
+
     raise ValueError(
         f"Unknown STT provider '{provider}'. "
-        "Supported: deepgram, whisper, cartesia, soniox, speechmatics, assemblyai."
+        "Supported: deepgram, whisper, cartesia, soniox, speechmatics, "
+        "assemblyai, fish_audio."
     )
 
 
@@ -324,8 +332,52 @@ def _create_tts_from_config(config):
         # The Sarvam adapter calls the user-facing ``voice`` a ``speaker``.
         return SarvamTTS(api_key=config.api_key, speaker=config.voice, **kwargs)
 
+    if provider == "fish_audio":
+        allowed = {
+            "model",
+            "format",
+            "sample_rate",
+            "latency",
+            "speed",
+            "volume",
+            "normalize_loudness",
+            "temperature",
+            "top_p",
+            "chunk_length",
+            "min_chunk_length",
+            "normalize",
+            "max_new_tokens",
+            "repetition_penalty",
+            "condition_on_previous_chunks",
+            "early_stop_threshold",
+            "mp3_bitrate",
+            "opus_bitrate",
+            "base_url",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        # ``transport="websocket"`` selects the /v1/tts/live socket (s1 /
+        # s2-pro only); anything else uses the HTTP streaming endpoint, which
+        # is the only transport that serves s2.1-pro.
+        if opts.get("transport") == "websocket":
+            from getpatter.providers.fish_audio_ws_tts import (  # type: ignore[import]
+                FishAudioWebSocketTTS,
+            )
+
+            kwargs.setdefault("model", "s2-pro")
+            return FishAudioWebSocketTTS(
+                api_key=config.api_key, voice=config.voice or None, **kwargs
+            )
+
+        from getpatter.providers.fish_audio_tts import FishAudioTTS  # type: ignore[import]
+
+        # Fish's ``voice`` is a reference_id; an empty string means "use the
+        # model's built-in voice", which the adapter expresses as None.
+        return FishAudioTTS(
+            api_key=config.api_key, voice=config.voice or None, **kwargs
+        )
+
     raise ValueError(
         f"Unknown TTS provider '{provider}'. "
         "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld, "
-        "soniox_tts, sarvam."
+        "soniox_tts, sarvam, fish_audio."
     )

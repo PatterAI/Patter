@@ -44,6 +44,7 @@ STACK_VENDORS: frozenset[str] = frozenset(
         "inworld",
         "sarvam",
         "xai",
+        "fish_audio",
         "telnyx",
         "other",
     }
@@ -59,6 +60,7 @@ _VENDOR_ALIASES: dict[str, str] = {
     "soniox_tts": "soniox",
     "xai_tts": "xai",
     "xai_realtime": "xai",
+    "fish_audio_stt": "fish_audio",
     "telnyx_stt": "telnyx",
     "telnyx_tts": "telnyx",
 }

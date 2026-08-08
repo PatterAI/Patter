@@ -292,6 +292,26 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   // xAI TTS — $15.00 / 1M chars = $0.000015/char = $0.015 / 1k chars.
   // Source: docs.x.ai/developers/pricing.
   xai_tts: { unit: PricingUnit.THOUSAND_CHARS, price: 0.015 },
+  // Fish Audio TTS — $15.00 / 1M UTF-8 BYTES = $0.015 / 1k bytes. Fish meters
+  // bytes, not characters, so the adapter reports UTF-8 byte length as the
+  // "chars" figure — exact for latin scripts, and correctly ~3x higher for CJK
+  // where one character is three bytes. `s2.1-pro-free` is the free tier and
+  // bills nothing. Source:
+  // https://docs.fish.audio/developer-guide/models-pricing/pricing-and-rate-limits
+  fish_audio: {
+    unit: PricingUnit.THOUSAND_CHARS,
+    // Default = s2.1-pro.
+    price: 0.015,
+    models: {
+      's2.1-pro': { price: 0.015 },
+      's2.1-pro-free': { price: 0.0 },
+      's2-pro': { price: 0.015 },
+      s1: { price: 0.015 },
+    },
+  },
+  // Fish Audio ASR (transcribe-1) — $0.36 / audio hour = $0.006 / minute,
+  // rounded up to the nearest second by Fish.
+  fish_audio_stt: { unit: PricingUnit.MINUTE, price: 0.006 },
   // Sarvam AI Bulbul TTS — per 1,000 characters. INR is authoritative; USD is an
   // indicative FX conversion (~Rs 83-84/USD). Bulbul v3 (default): Rs 30 / 10k
   // chars ≈ $0.036/1k; Bulbul v2: Rs 15 / 10k ≈ $0.018/1k. Billed per character,

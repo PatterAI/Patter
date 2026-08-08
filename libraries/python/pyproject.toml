@@ -59,6 +59,14 @@ soniox = [
 xai = [
     "aiohttp>=3.10",
 ]
+# Fish Audio TTS (s2.1-pro / s2-pro) + ASR. The HTTP TTS and ASR adapters need
+# only aiohttp; ``ormsgpack`` is required exclusively by the WebSocket TTS
+# transport, whose frames are MessagePack (they carry raw audio bytes inline,
+# which JSON cannot express without base64).
+fish_audio = [
+    "aiohttp>=3.10",
+    "ormsgpack>=1.5",
+]
 speechmatics = [
     "speechmatics-voice[smart]>=0.2.8",
 ]

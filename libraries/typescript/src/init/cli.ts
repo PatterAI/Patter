@@ -119,6 +119,12 @@ const PIPELINE_STT: Record<string, ProviderEntry> = {
     env: ['OPENAI_API_KEY'],
     extra: '',
   },
+  fish_audio: {
+    cls: 'FishAudioSTT',
+    label: 'Fish Audio (batch — higher latency)',
+    env: ['FISH_AUDIO_API_KEY'],
+    extra: 'fish_audio',
+  },
 };
 const DEFAULT_STT = 'deepgram';
 
@@ -194,6 +200,12 @@ const PIPELINE_TTS: Record<string, ProviderEntry> = {
     label: 'Inworld',
     env: ['INWORLD_API_KEY'],
     extra: 'inworld',
+  },
+  fish_audio: {
+    cls: 'FishAudioTTS',
+    label: 'Fish Audio (s2.1-pro)',
+    env: ['FISH_AUDIO_API_KEY'],
+    extra: 'fish_audio',
   },
 };
 const DEFAULT_TTS = 'elevenlabs';

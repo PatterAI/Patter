@@ -90,6 +90,54 @@ def inworld(
     )
 
 
+def fish_audio(
+    api_key: str,
+    voice: str = "",
+    *,
+    model: str = "s2.1-pro",
+    latency: str = "balanced",
+) -> TTSConfig:
+    """Config helper for Fish Audio TTS (requires the ``fish_audio`` extra).
+
+    ``voice`` is a Fish ``reference_id`` — a voice-model id from the Fish voice
+    library or one you cloned. Leave it empty to use the model's built-in
+    voice. ``model`` defaults to ``s2.1-pro`` (the recommended production
+    model); pass ``s2-pro`` for the ~100 ms time-to-first-audio generation or
+    ``s2.1-pro-free`` for the free tier (no latency guarantee).
+    """
+    return TTSConfig(
+        provider="fish_audio",
+        api_key=api_key,
+        voice=voice,
+        options={"model": model, "latency": latency},
+    )
+
+
+def fish_audio_asr(
+    api_key: str,
+    language: str = "en",
+    *,
+    ignore_timestamps: bool = True,
+) -> STTConfig:
+    """Config helper for Fish Audio ASR (requires the ``fish_audio`` extra).
+
+    Fish transcription is a batch endpoint, so this adapter uploads short
+    windows instead of streaming — see ``FishAudioSTT`` for the latency
+    trade-off against Deepgram / Soniox / AssemblyAI.
+
+    Named ``_asr`` (Fish's own term for the endpoint) rather than ``_stt`` on
+    purpose: a helper called ``fish_audio_stt`` would be shadowed by the
+    ``providers.fish_audio_stt`` submodule as soon as the factory imports it —
+    the same trap that ``soniox_tts`` needs an explicit re-bind to survive.
+    """
+    return STTConfig(
+        provider="fish_audio",
+        api_key=api_key,
+        language=language,
+        options={"ignore_timestamps": ignore_timestamps},
+    )
+
+
 def soniox_tts(
     api_key: str,
     voice: str = "Adrian",
@@ -194,6 +242,8 @@ __all__ = [
     "rime",
     "lmnt",
     "inworld",
+    "fish_audio",
+    "fish_audio_asr",
     "soniox_tts",
     "sarvam",
     "AnthropicLLMProvider",

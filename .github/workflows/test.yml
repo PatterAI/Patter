@@ -53,7 +53,7 @@ jobs:
       - name: Install base + all OSS extras
         run: |
           cd libraries/python
-          pip install -e ".[local,dev,silero,deepfilternet,ivr,anthropic,groq,cerebras,google,cartesia,soniox,assemblyai,rime,lmnt,ultravox,gemini-live,evals,tracing,scheduling,background-audio,telnyx-ai]"
+          pip install -e ".[local,dev,silero,deepfilternet,ivr,anthropic,groq,cerebras,google,cartesia,soniox,assemblyai,rime,lmnt,fish_audio,ultravox,gemini-live,evals,tracing,scheduling,background-audio,telnyx-ai]"
       - name: Run tests (provider+extras coverage)
         run: |
           cd libraries/python

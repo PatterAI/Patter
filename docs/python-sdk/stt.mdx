@@ -56,6 +56,7 @@ agent = phone.agent(
 | `SonioxSTT` | `getpatter.stt.soniox.STT` | `SONIOX_API_KEY` | `getpatter[soniox]` |
 | `SpeechmaticsSTT` | `getpatter.stt.speechmatics.STT` | `SPEECHMATICS_API_KEY` | `getpatter[speechmatics]` |
 | `XaiSTT` | `getpatter.stt.xai.STT` | `XAI_API_KEY` | `getpatter[xai]` |
+| `FishAudioSTT` | `getpatter.stt.fish_audio.STT` | `FISH_AUDIO_API_KEY` | `getpatter[fish_audio]` |
 
 ### Model enums
 
@@ -185,6 +186,17 @@ from getpatter import XaiSTT
 
 stt = XaiSTT()                               # reads XAI_API_KEY
 stt = XaiSTT(smart_turn=0.7, language="en")
+```
+
+## Fish Audio
+
+Batch transcription via Fish Audio's ASR endpoint — one vendor and one key for both directions of the call. Emits one final transcript per ~2 s window and **no interim partials**, so prefer a streaming provider when turn latency dominates. See [Fish Audio STT setup](/python-sdk/providers/fish-audio-stt).
+
+```python
+from getpatter import FishAudioSTT
+
+stt = FishAudioSTT()                         # reads FISH_AUDIO_API_KEY
+stt = FishAudioSTT(language="it", ignore_timestamps=False)
 ```
 
 ## Missing credentials

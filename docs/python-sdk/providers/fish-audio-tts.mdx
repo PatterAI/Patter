@@ -1,0 +1,297 @@
+---
+title: "Fish Audio TTS"
+description: "S2.1-Pro (83 languages, bracket expression control, multi-speaker) and S2-Pro (~100 ms time-to-first-audio) over Fish Audio's HTTP streaming and WebSocket endpoints."
+icon: "fish"
+---
+
+# Fish Audio TTS
+
+`FishAudioTTS` targets the [Fish Audio TTS endpoint](https://docs.fish.audio/api-reference/endpoint/openapi-v1/text-to-speech) (`POST https://api.fish.audio/v1/tts`), which streams synthesised audio back with chunked transfer encoding.
+
+The default model is **`s2.1-pro`** — Fish's recommended production model: 83 languages, multi-speaker synthesis, and natural-language expression control via `[bracket]` tags. The default audio output is **PCM_S16LE @ 16 kHz** so chunks drop straight into the Patter pipeline without transcoding.
+
+<Note>
+Fish selects the model with a **request header**, not a body field. One API key
+therefore serves every model without reconnecting — switching between
+`s2.1-pro` and `s2-pro` is a constructor argument, nothing more.
+</Note>
+
+## Install
+
+<CodeGroup>
+
+```bash Python
+pip install "getpatter[fish_audio]"
+```
+
+```bash TypeScript
+npm install getpatter
+```
+
+</CodeGroup>
+
+The `getpatter[fish_audio]` extra adds `aiohttp>=3.10` for HTTP streaming plus `ormsgpack>=1.5`, which is used **only** by the WebSocket transport (see [WebSocket streaming](#websocket-streaming-s2-pro)). On TypeScript the HTTP and ASR adapters need nothing beyond the base install; the WebSocket transport uses `@msgpack/msgpack`, shipped as an optional dependency.
+
+## Authentication
+
+```bash
+export FISH_AUDIO_API_KEY="<your-fish-audio-api-key>"
+```
+
+The same key covers TTS and [Fish Audio ASR](/python-sdk/providers/fish-audio-stt).
+
+## Usage
+
+<CodeGroup>
+
+```python Python
+# Namespaced import (pipeline mode)
+from getpatter.tts import fish_audio
+
+tts = fish_audio.TTS()                                   # reads FISH_AUDIO_API_KEY
+tts = fish_audio.TTS(api_key="...", voice="<reference-id>", latency="low")
+
+# Flat alias (equivalent)
+from getpatter import FishAudioTTS
+
+tts = FishAudioTTS()
+```
+
+```typescript TypeScript
+// Namespaced import (pipeline mode)
+import * as fishAudio from "getpatter/tts/fish-audio";
+
+const tts = new fishAudio.TTS();                         // reads FISH_AUDIO_API_KEY
+const tts2 = new fishAudio.TTS({ apiKey: "...", voice: "<reference-id>", latency: "low" });
+
+// Flat alias (equivalent)
+import { FishAudioTTS } from "getpatter";
+
+const tts3 = new FishAudioTTS();
+```
+
+</CodeGroup>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, FishAudioTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),                                   # DEEPGRAM_API_KEY from env
+    tts=FishAudioTTS.for_twilio(),                       # FISH_AUDIO_API_KEY from env
+    system_prompt="You are a helpful assistant.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, DeepgramSTT, FishAudioTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),                                // DEEPGRAM_API_KEY from env
+  tts: FishAudioTTS.forTwilio({}),                       // FISH_AUDIO_API_KEY from env
+  systemPrompt: "You are a helpful assistant.",
+});
+
+await phone.serve({ agent });
+```
+
+</CodeGroup>
+
+## Choosing a voice
+
+`voice` maps to Fish's `reference_id` — the id of a voice model from the Fish voice library or one you cloned yourself. Omit it entirely to use the model's built-in voice.
+
+<CodeGroup>
+
+```python Python
+tts = FishAudioTTS(voice="9a9cf47702da476aa4629e2506d4a857")
+```
+
+```typescript TypeScript
+const tts = new FishAudioTTS({ voice: "9a9cf47702da476aa4629e2506d4a857" });
+```
+
+</CodeGroup>
+
+### Multi-speaker (S2 models)
+
+Pass a sequence of reference ids and mark the speakers inline in the text:
+
+<CodeGroup>
+
+```python Python
+tts = FishAudioTTS(voice=["speaker-a-id", "speaker-b-id"])
+
+async for pcm in tts.synthesize("<|speaker:0|>Buongiorno!<|speaker:1|>Salve, come posso aiutarla?"):
+    ...
+```
+
+```typescript TypeScript
+const tts = new FishAudioTTS({ voice: ["speaker-a-id", "speaker-b-id"] });
+
+for await (const pcm of tts.synthesizeStream(
+  "<|speaker:0|>Buongiorno!<|speaker:1|>Salve, come posso aiutarla?",
+)) {
+  // ...
+}
+```
+
+</CodeGroup>
+
+## Expression control
+
+S2 models steer delivery from natural-language tags written inline in `[brackets]`. The tags are consumed by the model, not spoken:
+
+```text
+[whispers sweetly] Non dirlo a nessuno. [excited] Abbiamo vinto!
+```
+
+<Warning>
+The legacy `s1` model uses `(parentheses)` for its 64+ named emotions instead
+of bracket syntax. Bracket tags sent to `s1` are read aloud verbatim.
+</Warning>
+
+## Latency
+
+`latency` trades quality against time-to-first-audio. Patter defaults to `balanced`, the interactive sweet spot.
+
+| Mode | Fish's stated latency | When to use |
+|---|---|---|
+| `low` | fastest first chunk | Barge-in-heavy agents where responsiveness beats fidelity |
+| `balanced` | ~300 ms | **Default.** Live phone calls |
+| `normal` | ~500 ms | Voicemail drops, IVR prompts, anything pre-rendered |
+
+## Telephony
+
+Fish emits linear PCM only — it has no native G.711 output — so the pipeline always runs the μ-law encode. The carrier factories still save work:
+
+| Factory | Output | Effect |
+|---|---|---|
+| `for_twilio()` / `forTwilio()` | PCM @ 8 kHz | Requests the carrier wire rate directly, so the pipeline skips the 16 kHz → 8 kHz resample |
+| `for_telnyx()` / `forTelnyx()` | PCM @ 16 kHz | Matches the Telnyx PCM16 pipeline; one resample downstream |
+
+<CodeGroup>
+
+```python Python
+tts = FishAudioTTS.for_twilio(voice="<reference-id>", latency="low")
+```
+
+```typescript TypeScript
+const tts = FishAudioTTS.forTwilio({ voice: "<reference-id>", latency: "low" });
+```
+
+</CodeGroup>
+
+## WebSocket streaming (`s2-pro`)
+
+`FishAudioWebSocketTTS` targets [`wss://api.fish.audio/v1/tts/live`](https://docs.fish.audio/api-reference/endpoint/websocket/tts-live) instead of the HTTP endpoint. It skips the per-utterance HTTP request setup (~50 ms) and pairs with `s2-pro`'s ~100 ms time-to-first-audio.
+
+<Warning>
+Fish serves **only `s1` and `s2-pro`** on the streaming socket — `s2.1-pro` is
+HTTP-only. The constructor raises immediately (with a pointer back to
+`FishAudioTTS`) rather than letting the socket fail mid-call.
+</Warning>
+
+<CodeGroup>
+
+```python Python
+from getpatter import FishAudioWebSocketTTS
+
+tts = FishAudioWebSocketTTS()                            # s2-pro by default
+```
+
+```typescript TypeScript
+import { FishAudioWebSocketTTS } from "getpatter";
+
+const tts = new FishAudioWebSocketTTS();                 // s2-pro by default
+```
+
+</CodeGroup>
+
+The socket protocol is MessagePack-framed (`start` → `text` → `flush` → `stop`, with `audio` frames coming back). That is why the codec dependency exists — the server returns raw audio bytes inline, which JSON cannot carry without base64. The HTTP adapter has no such requirement.
+
+## Models
+
+| Model id | Languages | Notes |
+|---|---|---|
+| `s2.1-pro` | 83 | **Default.** Recommended production model. Multi-speaker, bracket expression control. |
+| `s2.1-pro-free` | 83 | Same model, free tier under fair-use limits. **No time-to-first-audio guarantee** — not suitable for live calls. |
+| `s2-pro` | 80+ | ~100 ms time-to-first-audio. The only S2 model on the WebSocket transport. |
+| `s1` | 13 | Legacy. Emotion control uses `(parentheses)`. |
+
+## Options
+
+| Python | TypeScript | Default | Notes |
+|---|---|---|---|
+| `api_key` | `apiKey` | — | Reads `FISH_AUDIO_API_KEY` when omitted. |
+| `model` | `model` | `"s2.1-pro"` | Sent as the `model:` request header. |
+| `voice` | `voice` | — | Fish `reference_id`; a sequence enables multi-speaker. |
+| `format` | `format` | `"pcm"` | `pcm` / `wav` / `mp3` / `opus`. Only `pcm` is pipeline-compatible. |
+| `sample_rate` | `sampleRate` | `16000` | Hz. Sent for `pcm` / `wav` only. |
+| `latency` | `latency` | `"balanced"` | `low` / `balanced` / `normal`. |
+| `speed` | `speed` | — | Prosody speed multiplier, `[0.5, 2.0]`. |
+| `volume` | `volume` | — | Prosody volume in dB, `[-20, +20]`. |
+| `normalize_loudness` | `normalizeLoudness` | — | Loudness normalisation (S2-Pro only). |
+| `temperature` | `temperature` | — | `[0, 1]`. Fish default `0.7`. |
+| `top_p` | `topP` | — | `[0, 1]`. Fish default `0.7`. |
+| `chunk_length` | `chunkLength` | — | `[100, 300]`. Fish default `300`. |
+| `min_chunk_length` | `minChunkLength` | — | `[0, 100]` characters. Fish default `50`. |
+| `normalize` | `normalize` | — | Text normalisation. Fish default `true`. |
+| `max_new_tokens` | `maxNewTokens` | — | Fish default `1024`. |
+| `repetition_penalty` | `repetitionPenalty` | — | Fish default `1.2`. |
+| `condition_on_previous_chunks` | `conditionOnPreviousChunks` | — | Fish default `true`. |
+| `early_stop_threshold` | `earlyStopThreshold` | — | `[0, 1]`. Fish default `1`. |
+| `mp3_bitrate` | `mp3Bitrate` | — | `64` / `128` / `192` kbps. |
+| `opus_bitrate` | `opusBitrate` | — | `-1000` (auto) / `24000` / `32000` / `48000` / `64000` bps. |
+| `base_url` | `baseUrl` | Fish `/v1/tts` | Override for proxying or tests. |
+
+Every option left unset is **omitted from the request** so Fish applies its own documented default rather than a value the SDK guessed.
+
+## Low-level usage
+
+<CodeGroup>
+
+```python Python
+from getpatter.providers.fish_audio_tts import FishAudioTTS as _LowLevelTTS
+
+tts = _LowLevelTTS(api_key="...", model="s2-pro", sample_rate=16000)
+
+async for pcm_chunk in tts.synthesize("Hello from the Patter pipeline."):
+    ...                                                  # raw PCM_S16LE @ 16 kHz
+
+await tts.close()
+```
+
+```typescript TypeScript
+import { FishAudioTTS } from "getpatter/providers/fish-audio-tts";
+
+const tts = new FishAudioTTS("...", { model: "s2-pro", sampleRate: 16000 });
+
+for await (const pcmChunk of tts.synthesizeStream("Hello from the Patter pipeline.")) {
+  // raw PCM_S16LE @ 16 kHz
+}
+```
+
+</CodeGroup>
+
+## Pricing
+
+Fish bills **$15.00 per 1M UTF-8 bytes** for `s2.1-pro`, `s2-pro` and `s1`; `s2.1-pro-free` bills nothing. Patter records `$0.015 / 1k` and meters **UTF-8 byte length**, not character count — exact for latin scripts and correctly ~3× higher for CJK, where one character is three bytes.
+
+Override per project via `Patter(pricing={...})`. See [Fish Audio pricing and rate limits](https://docs.fish.audio/developer-guide/models-pricing/pricing-and-rate-limits) for the authoritative numbers and the concurrency tiers.
+
+<Note>
+**Beta.** This provider is validated against the Fish Audio API specification
+but has not yet been exercised on a live phone call end to end.
+</Note>

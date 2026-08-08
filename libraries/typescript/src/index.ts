@@ -68,6 +68,8 @@ export {
   inworld,
   sonioxTts,
   sarvam,
+  fishAudio,
+  fishAudioAsr,
   ultravox,
   geminiLive,
 } from "./providers";
@@ -193,6 +195,9 @@ export type { CartesiaSTTOptions } from "./stt/cartesia";
 export { STT as SonioxSTT } from "./stt/soniox";
 export { STT as XaiSTT } from "./stt/xai";
 export type { XaiSTTOptions } from "./stt/xai";
+export { STT as FishAudioSTT } from "./stt/fish-audio";
+export type { FishAudioSTTOptions } from "./stt/fish-audio";
+export type { FishAudioSegment } from "./providers/fish-audio-stt";
 export { STT as AssemblyAISTT } from "./stt/assemblyai";
 export type { AssemblyAISTTOptions } from "./stt/assemblyai";
 export { STT as SpeechmaticsSTT } from "./stt/speechmatics";
@@ -234,6 +239,13 @@ export { TTS as SarvamTTS } from "./tts/sarvam";
 export type { SarvamTTSOptions, SarvamCarrierOptions } from "./tts/sarvam";
 export { TTS as XaiTTS } from "./tts/xai";
 export type { XaiTTSOptions, XaiCarrierOptions } from "./tts/xai";
+export { TTS as FishAudioTTS, WebSocketTTS as FishAudioWebSocketTTS } from "./tts/fish-audio";
+export type {
+  FishAudioTTSOptions,
+  FishAudioWebSocketTTSOptions,
+  FishAudioCarrierOptions,
+} from "./tts/fish-audio";
+export { FishAudioModel, FishAudioFormat, FishAudioLatency } from "./providers/fish-audio-tts";
 
 // New namespaced LLM classes (Phase 2 of the v0.5.x API refactor).
 export { LLM as OpenAILLM } from "./llm/openai";

@@ -54,6 +54,8 @@ agent = phone.agent(
 | `RimeTTS` | `getpatter.tts.rime.TTS` | `RIME_API_KEY` | `getpatter[rime]` |
 | `LMNTTTS` | `getpatter.tts.lmnt.TTS` | `LMNT_API_KEY` | `getpatter[lmnt]` |
 | `XaiTTS` | `getpatter.tts.xai.TTS` | `XAI_API_KEY` | `getpatter[xai]` |
+| `FishAudioTTS` | `getpatter.tts.fish_audio.TTS` | `FISH_AUDIO_API_KEY` | `getpatter[fish_audio]` |
+| `FishAudioWebSocketTTS` | `getpatter.tts.fish_audio.WebSocketTTS` | `FISH_AUDIO_API_KEY` | `getpatter[fish_audio]` |
 
 ### Model / voice / format enums
 
@@ -191,6 +193,19 @@ from getpatter import XaiTTS
 tts = XaiTTS()                              # reads XAI_API_KEY
 tts = XaiTTS(voice="leo", language="en")
 tts = XaiTTS.for_twilio(voice="eve")        # μ-law @ 8 kHz native
+```
+
+## Fish Audio
+
+S2.1-Pro (83 languages, `[bracket]` expression control, multi-speaker) over HTTP streaming, plus an opt-in WebSocket transport for S2-Pro's ~100 ms time-to-first-audio. See [Fish Audio TTS setup](/python-sdk/providers/fish-audio-tts).
+
+```python
+from getpatter import FishAudioTTS, FishAudioWebSocketTTS
+
+tts = FishAudioTTS()                        # reads FISH_AUDIO_API_KEY, model s2.1-pro
+tts = FishAudioTTS(voice="<reference-id>", latency="low")
+tts = FishAudioTTS.for_twilio()             # PCM @ 8 kHz — skips the resample
+tts = FishAudioWebSocketTTS()               # s2-pro over wss:// (HTTP-only models rejected)
 ```
 
 ## Missing credentials

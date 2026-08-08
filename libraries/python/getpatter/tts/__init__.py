@@ -22,4 +22,5 @@ __all__ = [
     "soniox",
     "sarvam",
     "xai",
+    "fish_audio",
 ]

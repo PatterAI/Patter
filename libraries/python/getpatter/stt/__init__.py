@@ -23,4 +23,5 @@ __all__ = [
     "assemblyai",
     "openai_transcribe",
     "xai",
+    "fish_audio",
 ]

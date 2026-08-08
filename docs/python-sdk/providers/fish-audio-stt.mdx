@@ -1,0 +1,204 @@
+---
+title: "Fish Audio STT"
+description: "Batch transcription via Fish Audio's ASR endpoint — one vendor for both directions of the call, at $0.36 per audio hour."
+icon: "fish"
+---
+
+# Fish Audio STT
+
+`FishAudioSTT` targets the [Fish Audio ASR endpoint](https://docs.fish.audio/api-reference/endpoint/openapi-v1/speech-to-text) (`POST https://api.fish.audio/v1/asr`). It buffers incoming PCM, uploads it as a WAV once the window fills, and emits the returned text as a final transcript.
+
+<Warning>
+**Fish transcription is batch-only** — there is no streaming socket. This
+adapter therefore emits one final transcript per ~2 s window and **no interim
+partials**, exactly like [`WhisperSTT`](/python-sdk/providers/whisper). If turn
+latency is what you are optimising, use a genuinely streaming provider:
+[Deepgram](/python-sdk/providers/deepgram), [Soniox](/python-sdk/providers/soniox),
+[AssemblyAI](/python-sdk/providers/assemblyai) or
+[Speechmatics](/python-sdk/providers/speechmatics).
+
+Reach for Fish ASR when you want a single vendor (and a single key) for both
+directions of the call, or for its language coverage.
+</Warning>
+
+## Install
+
+<CodeGroup>
+
+```bash Python
+pip install "getpatter[fish_audio]"
+```
+
+```bash TypeScript
+npm install getpatter
+```
+
+</CodeGroup>
+
+## Authentication
+
+```bash
+export FISH_AUDIO_API_KEY="<your-fish-audio-api-key>"
+```
+
+The same key covers ASR and [Fish Audio TTS](/python-sdk/providers/fish-audio-tts).
+
+## Usage
+
+<CodeGroup>
+
+```python Python
+# Namespaced import (pipeline mode)
+from getpatter.stt import fish_audio
+
+stt = fish_audio.STT()                                   # reads FISH_AUDIO_API_KEY
+stt = fish_audio.STT(api_key="...", language="it")
+
+# Flat alias (equivalent)
+from getpatter import FishAudioSTT
+
+stt = FishAudioSTT()
+```
+
+```typescript TypeScript
+// Namespaced import (pipeline mode)
+import * as fishAudio from "getpatter/stt/fish-audio";
+
+const stt = new fishAudio.STT();                         // reads FISH_AUDIO_API_KEY
+const stt2 = new fishAudio.STT({ apiKey: "...", language: "it" });
+
+// Flat alias (equivalent)
+import { FishAudioSTT } from "getpatter";
+
+const stt3 = new FishAudioSTT();
+```
+
+</CodeGroup>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, FishAudioSTT, FishAudioTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=FishAudioSTT(language="it"),                      # FISH_AUDIO_API_KEY from env
+    tts=FishAudioTTS.for_twilio(),                        # same key
+    system_prompt="Sei l'assistente di Acme. Rispondi in italiano.",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, FishAudioSTT, FishAudioTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new FishAudioSTT({ language: "it" }),              // FISH_AUDIO_API_KEY from env
+  tts: FishAudioTTS.forTwilio({}),                        // same key
+  systemPrompt: "Sei l'assistente di Acme. Rispondi in italiano.",
+});
+
+await phone.serve({ agent });
+```
+
+</CodeGroup>
+
+## Language detection
+
+Leave `language` unset (`None` / `undefined`) and Fish auto-detects. Pass an ISO code to pin it — pinning is usually more accurate and slightly faster on short windows.
+
+<CodeGroup>
+
+```python Python
+stt = FishAudioSTT(language=None)                         # auto-detect
+stt = FishAudioSTT(language="it")                         # pinned
+```
+
+```typescript TypeScript
+const auto = new FishAudioSTT({ language: undefined });   // auto-detect
+const pinned = new FishAudioSTT({ language: "it" });      // pinned
+```
+
+</CodeGroup>
+
+## Timestamps
+
+`ignore_timestamps` defaults to `True`, which Fish documents as the lower-latency path for clips under 30 s. Set it to `False` to receive per-segment timings.
+
+<CodeGroup>
+
+```python Python
+stt = FishAudioSTT(ignore_timestamps=False)
+
+# Segments arrive on Transcript.words — Fish returns {text, start, end} per segment.
+# transcript.words[0] -> {"text": "ciao", "start": 0.0, "end": 0.4}
+```
+
+```typescript TypeScript
+const stt = new FishAudioSTT({ ignoreTimestamps: false });
+
+// Segments arrive on Transcript.segments — {text, start, end} per segment.
+// transcript.segments?.[0] -> { text: "ciao", start: 0, end: 0.4 }
+```
+
+</CodeGroup>
+
+<Note>
+Python surfaces segments on `Transcript.words` (the shared frozen dataclass's
+provider-specific field); TypeScript exposes a dedicated `segments` array. Same
+data, same order — the field name differs because the Python `Transcript` shape
+is shared across every STT provider.
+</Note>
+
+## Buffering and the 1-second floor
+
+Fish rejects clips shorter than **1 second** and longer than 60 minutes / 20 MB. The adapter handles both ends:
+
+- The steady-state window is **~2 s** (64,000 bytes of 16 kHz PCM16), comfortably clear of the floor and half the request count of a 1 s window.
+- On `close()` a **short tail is padded with digital silence** up to the 1 s minimum rather than dropped — otherwise the last words of an utterance would vanish, which is the exact bug that was fixed on the Whisper adapter.
+- An oversized buffer is truncated to the most recent 20 MB with a warning.
+
+Tune the window with `buffer_size_bytes` / `bufferSize` if you want lower latency at the cost of more requests:
+
+<CodeGroup>
+
+```python Python
+stt = FishAudioSTT(buffer_size_bytes=32000)               # ~1 s windows
+```
+
+```typescript TypeScript
+const stt = new FishAudioSTT({ bufferSize: 32000 });      // ~1 s windows
+```
+
+</CodeGroup>
+
+## Failure behaviour
+
+A non-2xx response or an unreachable host is logged at ERROR and yields **no transcript** — it never raises into the call. A live call degrades to silence on that window rather than dropping.
+
+## Options
+
+| Python | TypeScript | Default | Notes |
+|---|---|---|---|
+| `api_key` | `apiKey` | — | Reads `FISH_AUDIO_API_KEY` when omitted. |
+| `language` | `language` | `"en"` | ISO code. Pass `None` / `undefined` to auto-detect. |
+| `ignore_timestamps` | `ignoreTimestamps` | `True` | `False` returns per-segment `start` / `end`. |
+| `buffer_size_bytes` | `bufferSize` | `64000` | Bytes of 16 kHz PCM16 per upload (~2 s). |
+| `base_url` | `baseUrl` | Fish `/v1/asr` | Override for proxying or tests. |
+
+## Pricing
+
+Fish bills ASR at **$0.36 per audio hour**, rounded up to the nearest second — Patter records `$0.006 / minute`. See [Fish Audio pricing and rate limits](https://docs.fish.audio/developer-guide/models-pricing/pricing-and-rate-limits) for the authoritative numbers and the concurrency tiers.
+
+<Note>
+**Beta.** This provider is validated against the Fish Audio API specification
+but has not yet been exercised on a live phone call end to end.
+</Note>

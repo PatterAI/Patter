@@ -167,6 +167,28 @@ export function sarvam(opts: { apiKey: string; voice?: string }): TTSConfig {
   return new TTSConfigImpl("sarvam", opts.apiKey, opts.voice ?? "shubh");
 }
 
+/**
+ * Fish Audio TTS config helper (parity with Python ``getpatter.providers.fish_audio``).
+ *
+ * ``voice`` is a Fish ``reference_id`` — a voice-model id from the Fish voice
+ * library or one you cloned. Leave it empty to use the model's built-in voice.
+ * For pipeline use the documented path is the direct adapter
+ * ``new FishAudioTTS({...})`` from ``getpatter``.
+ */
+export function fishAudio(opts: { apiKey: string; voice?: string }): TTSConfig {
+  return new TTSConfigImpl("fish_audio", opts.apiKey, opts.voice ?? "");
+}
+
+/**
+ * Fish Audio ASR config helper (parity with Python
+ * ``getpatter.providers.fish_audio_asr``). Fish transcription is a batch
+ * endpoint, so the adapter uploads short windows instead of streaming — see
+ * ``FishAudioSTT`` for the latency trade-off against Deepgram / Soniox.
+ */
+export function fishAudioAsr(opts: { apiKey: string; language?: string }): STTConfig {
+  return new STTConfigImpl("fish_audio", opts.apiKey, opts.language ?? "en");
+}
+
 // ---------------------------------------------------------------------------
 // Realtime / ConvAI helpers
 // ---------------------------------------------------------------------------

@@ -142,7 +142,7 @@ if [ "$SKIP_PY" = "0" ] && [ "$MODE" != "quick" ]; then
         bash -c "cd libraries/python && pytest tests/security/ -q -m security"
     if [ "$MODE" = "full" ]; then
         run_check "python: all-extras tests (slow)" pytest \
-            bash -c "cd libraries/python && pip install -e '.[dev,silero,deepfilternet,ivr,anthropic,groq,cerebras,google,cartesia,soniox,assemblyai,rime,lmnt,ultravox,gemini-live,evals,tracing,scheduling,background-audio,telnyx-ai]' --quiet && pytest tests/ -q --tb=line"
+            bash -c "cd libraries/python && pip install -e '.[dev,silero,deepfilternet,ivr,anthropic,groq,cerebras,google,cartesia,soniox,assemblyai,rime,lmnt,fish_audio,ultravox,gemini-live,evals,tracing,scheduling,background-audio,telnyx-ai]' --quiet && pytest tests/ -q --tb=line"
     fi
 fi
 

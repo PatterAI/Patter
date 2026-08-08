@@ -36,6 +36,7 @@ export const STACK_VENDORS: ReadonlySet<string> = new Set([
   'inworld',
   'sarvam',
   'xai',
+  'fish_audio',
   'telnyx',
   'other',
 ]);
@@ -49,6 +50,7 @@ const VENDOR_ALIASES: Record<string, string> = {
   elevenlabs_ws: 'elevenlabs',
   soniox_tts: 'soniox',
   xai_tts: 'xai',
+  fish_audio_stt: 'fish_audio',
   xai_realtime: 'xai',
   telnyx_stt: 'telnyx',
   telnyx_tts: 'telnyx',
