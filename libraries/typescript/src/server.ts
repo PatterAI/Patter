@@ -55,6 +55,7 @@ import type {
 import type { CallMetrics, CostBreakdown } from './metrics';
 import { CallLogger, resolveLogRoot } from './services/call-log';
 import { LocalCallRecorder } from './audio/call-recorder';
+import { alawToMulaw } from './audio/transcoding';
 
 /** Resolved configuration consumed by `EmbeddedServer` (carrier credentials, webhook URL, etc.). */
 export interface LocalConfig {
@@ -3349,6 +3350,10 @@ export class EmbeddedServer {
     const bridge = new TelnyxBridge(this.config);
     const handler = new StreamHandler(this.buildStreamHandlerDeps(bridge), ws, caller, callee);
     let streamStarted = false;
+    // The inbound stream follows the call-leg codec, which is PCMA on many
+    // European routes even though outbound bidirectional audio is pinned to
+    // PCMU. Normalize PCMA frames before they reach the SDK-wide mu-law path.
+    let inboundIsAlaw = false;
 
     // Per-connection FIFO: ws@8 invokes async listeners WITHOUT awaiting
     // them, so back-to-back 20 ms media frames interleaved inside
@@ -3375,7 +3380,12 @@ export class EmbeddedServer {
         // mirror of the Python bridge.
         let data: {
           event?: string;
-          start?: { call_control_id?: string; from?: string; to?: string };
+          start?: {
+            call_control_id?: string;
+            from?: string;
+            to?: string;
+            media_format?: { encoding?: string; sample_rate?: number; channels?: number };
+          };
           media?: { payload?: string; track?: string };
           dtmf?: { digit?: string };
           stop?: Record<string, unknown>;
@@ -3392,6 +3402,20 @@ export class EmbeddedServer {
 
         if (event === 'start' && !streamStarted) {
           streamStarted = true;
+          const mediaFormat = data.start?.media_format;
+          const encoding = String(mediaFormat?.encoding ?? 'PCMU').toUpperCase();
+          inboundIsAlaw = encoding === 'PCMA';
+          getLogger().info(
+            `Telnyx media stream format: encoding=${encoding} ` +
+              `sample_rate=${mediaFormat?.sample_rate ?? 8000}` +
+              (inboundIsAlaw ? ' — transcoding inbound PCMA → PCMU' : ''),
+          );
+          if (encoding !== 'PCMU' && encoding !== 'PCMA') {
+            getLogger().warn(
+              `Telnyx inbound encoding ${encoding} is not G.711; ` +
+                'caller audio may be misdecoded (expected PCMU or PCMA)',
+            );
+          }
           const callControlId = data.start?.call_control_id ?? '';
           if (callControlId) this.activeCallIds.set(ws, callControlId);
           await handler.handleCallStart(callControlId);
@@ -3411,9 +3435,10 @@ export class EmbeddedServer {
           if (track !== 'inbound') return;
           const audioChunk = data.media?.payload ?? '';
           if (!audioChunk) return;
+          const wireBytes = Buffer.from(audioChunk, 'base64');
           // ``await`` keeps a rejection inside the outer try/catch — un-awaited
           // it becomes an unhandled rejection that kills the process (Node 15+).
-          await handler.handleAudio(Buffer.from(audioChunk, 'base64'));
+          await handler.handleAudio(inboundIsAlaw ? alawToMulaw(wireBytes) : wireBytes);
         } else if (event === 'dtmf') {
           const digit = String(data.dtmf?.digit ?? '').trim();
           if (digit) {

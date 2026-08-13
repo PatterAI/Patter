@@ -75,6 +75,10 @@
 
 ### Fixed
 
+- Restored Telnyx inbound codec negotiation in both SDKs. Media WebSocket
+  `start.media_format` is now honored and European PCMA/A-law caller frames are
+  normalized to the existing PCMU/mu-law stream contract before reaching the
+  voice engine; PCMU routes remain byte-identical.
 - **`gemini-3.1-flash-live-preview` is now actually usable** (field-debugged on
   the Pillar demo line; fixed in both SDKs):
   - Setup: `enableAffectiveDialog`/`proactivity` are dated-2.5-native-audio-only

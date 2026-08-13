@@ -202,6 +202,35 @@ describe('[mocked] GeminiLiveAdapter — thinking suppression', () => {
   });
 });
 
+describe('[mocked] GeminiLiveAdapter — input transcription language', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('uses the configured BCP-47 language as the caller transcription hint', async () => {
+    const capture = newCapture();
+    vi.doMock('@google/genai', () => makeGenAIMock(makeFakeSession(), capture));
+
+    const adapter = new GeminiLiveAdapter('test-key', {
+      model: GEMINI_LIVE_3_1_FLASH_PREVIEW,
+      language: 'it-IT',
+    });
+    await adapter.connect();
+
+    const cfg = capture.configs[0] as {
+      speechConfig?: { languageCode?: string };
+      inputAudioTranscription?: {
+        languageHints?: { languageCodes?: string[] };
+      };
+    };
+    expect(cfg.speechConfig?.languageCode).toBe('it-IT');
+    expect(cfg.inputAudioTranscription).toEqual({
+      languageHints: { languageCodes: ['it-IT'] },
+    });
+    await adapter.close();
+  });
+});
+
 describe('[mocked] GeminiLiveAdapter — apiVersion selection (issue: 3.1 session ready timeout)', () => {
   beforeEach(() => {
     vi.resetModules();

@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  alawToMulaw,
+  alawToPcm16,
   mulawToPcm16,
   pcm16ToMulaw,
   resample8kTo16k,
@@ -7,6 +9,27 @@ import {
   resample24kTo16k,
   StatefulFirLowpass,
 } from "../src/audio/transcoding";
+
+describe("[unit] G.711 A-law (PCMA) transcoding", () => {
+  it("decodes the standard A-law silence octet to near-zero PCM", () => {
+    const pcm = alawToPcm16(Buffer.from([0xd5]));
+
+    expect(pcm.length).toBe(2);
+    expect(Math.abs(pcm.readInt16LE(0))).toBeLessThanOrEqual(8);
+  });
+
+  it("normalizes a known PCMA vector to the SDK-wide PCMU contract", () => {
+    const pcma = Buffer.from([0xd5, 0x55, 0x80, 0x00, 0xaa, 0x2a]);
+
+    expect(alawToMulaw(pcma)).toEqual(Buffer.from([0xfe, 0x7e, 0xa9, 0x29, 0x80, 0x00]));
+  });
+
+  it("is byte-for-byte A-law expansion followed by mu-law compression", () => {
+    const pcma = Buffer.from(Array.from({ length: 256 }, (_, index) => index));
+
+    expect(alawToMulaw(pcma)).toEqual(pcm16ToMulaw(alawToPcm16(pcma)));
+  });
+});
 
 /** Generate `numSamples` of a real sine tone as a PCM16-LE buffer. */
 function sinePcm(freqHz: number, numSamples: number, amp = 10000, rate = 24000): Buffer {

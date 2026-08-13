@@ -259,9 +259,11 @@ describe('Twilio media-stream auth (#204)', () => {
 
 describe('Telnyx media-stream auth (#204)', () => {
   let startSpy: ReturnType<typeof vi.spyOn>;
+  let audioSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     startSpy = vi.spyOn(StreamHandler.prototype, 'handleCallStart').mockResolvedValue(undefined);
+    audioSpy = vi.spyOn(StreamHandler.prototype, 'handleAudio').mockResolvedValue(undefined);
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -320,6 +322,64 @@ describe('Telnyx media-stream auth (#204)', () => {
       await flush();
       expect(startSpy).toHaveBeenCalledTimes(1);
       expect(startSpy).toHaveBeenCalledWith(CTRL);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('normalizes Telnyx PCMA caller frames to PCMU before the stream handler', async () => {
+    const server = new EmbeddedServer(telnyxConfig(), makeAgent());
+    const port = await getFreePort();
+    await server.start(port);
+    try {
+      const wsUrl = await mintViaWebhook(server, port);
+      const ws = new MockWs();
+      (server as any).handleTelnyxStream(ws, wsUrl);
+      ws.emit('message', Buffer.from(JSON.stringify({
+        event: 'start',
+        start: {
+          call_control_id: CTRL,
+          media_format: { encoding: 'PCMA', sample_rate: 8000, channels: 1 },
+        },
+      })));
+      ws.emit('message', Buffer.from(JSON.stringify({
+        event: 'media',
+        media: {
+          track: 'inbound',
+          payload: Buffer.from([0xd5, 0x55, 0x80, 0x00, 0xaa, 0x2a]).toString('base64'),
+        },
+      })));
+      await flush();
+
+      expect(audioSpy).toHaveBeenCalledWith(Buffer.from([0xfe, 0x7e, 0xa9, 0x29, 0x80, 0x00]));
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('leaves Telnyx PCMU caller frames byte-identical', async () => {
+    const server = new EmbeddedServer(telnyxConfig(), makeAgent());
+    const port = await getFreePort();
+    await server.start(port);
+    try {
+      const wsUrl = await mintViaWebhook(server, port);
+      const ws = new MockWs();
+      const pcmu = Buffer.from([0xff, 0x7f, 0x80, 0x00]);
+      (server as any).handleTelnyxStream(ws, wsUrl);
+      ws.emit('message', Buffer.from(JSON.stringify({
+        event: 'start',
+        start: {
+          call_control_id: CTRL,
+          media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 },
+        },
+      })));
+      ws.emit('message', Buffer.from(JSON.stringify({
+        event: 'media',
+        media: { track: 'inbound', payload: pcmu.toString('base64') },
+      })));
+      await flush();
+
+      expect(audioSpy).toHaveBeenCalledWith(pcmu);
     } finally {
       await server.stop();
     }

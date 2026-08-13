@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from starlette.websockets import WebSocketDisconnect
 
+from getpatter.audio.transcoding import alaw_to_mulaw
 from getpatter.observability.attributes import patter_call_scope
 from getpatter.telephony.common import STREAM_TOKEN_PARAM, _validate_e164
 from getpatter.utils.log_sanitize import mask_phone_number
@@ -324,6 +325,9 @@ async def telnyx_stream_bridge(
     call_id_actual: str = ""
     transcript_entries: deque[dict] = deque(maxlen=200)
     stream_started = False
+    # Telnyx's inbound stream follows the call-leg codec. European routes can
+    # therefore deliver PCMA even when outbound bidirectional audio is PCMU.
+    inbound_is_alaw = False
 
     handler: (
         OpenAIRealtimeStreamHandler
@@ -373,6 +377,23 @@ async def telnyx_stream_bridge(
                 call_id_actual = start_info.get("call_control_id", "")
                 caller = start_info.get("from", "") or caller
                 callee = start_info.get("to", "") or callee
+                media_format = start_info.get("media_format", {}) or {}
+                encoding = str(media_format.get("encoding", "PCMU")).upper()
+                inbound_is_alaw = encoding == "PCMA"
+                logger.info(
+                    "Telnyx media stream format: encoding=%s sample_rate=%s%s",
+                    encoding,
+                    media_format.get("sample_rate", 8000),
+                    " — transcoding inbound PCMA → PCMU"
+                    if inbound_is_alaw
+                    else "",
+                )
+                if encoding not in ("PCMU", "PCMA"):
+                    logger.warning(
+                        "Telnyx inbound encoding %s is not G.711; caller audio "
+                        "may be misdecoded (expected PCMU or PCMA)",
+                        encoding,
+                    )
 
                 # Single INFO line per call-start — full context in one place.
                 _mode = (
@@ -736,7 +757,10 @@ async def telnyx_stream_bridge(
                 if not audio_chunk_b64:
                     continue
 
-                pcm_audio = base64.b64decode(audio_chunk_b64)
+                wire_audio = base64.b64decode(audio_chunk_b64)
+                pcm_audio = (
+                    alaw_to_mulaw(wire_audio) if inbound_is_alaw else wire_audio
+                )
                 if handler is not None:
                     await handler.on_audio_received(pcm_audio)
 

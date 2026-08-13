@@ -306,8 +306,12 @@ export class GeminiLiveAdapter {
       thinkingConfig: this.resolveThinkingConfig(),
       // Without these, native-audio sessions produced NO user transcript
       // ever and no assistant transcript in AUDIO modality — logs/history/
-      // metrics got nothing for Gemini Live calls. Mirrors Python.
-      inputAudioTranscription: {},
+      // metrics got nothing for Gemini Live calls. Use the same BCP-47 language
+      // as speech synthesis to bias caller ASR instead of auto-detecting a
+      // neighbouring language on narrow-band telephony audio.
+      inputAudioTranscription: {
+        languageHints: { languageCodes: [this.language] },
+      },
       outputAudioTranscription: {},
     };
     // Native-audio humanization knobs (opt-in). enableAffectiveDialog makes the

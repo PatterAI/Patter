@@ -2,7 +2,7 @@
  * Audio transcoding utilities for Patter TypeScript SDK.
  *
  * Pure TypeScript implementation — no native dependencies required.
- * Handles mulaw (G.711) encoding/decoding and PCM16 resampling for
+ * Handles mu-law/A-law (G.711) encoding/decoding and PCM16 resampling for
  * telephony audio pipelines (Twilio mulaw 8kHz, Telnyx 16kHz PCM,
  * OpenAI TTS 24kHz PCM).
  */
@@ -59,6 +59,50 @@ const PCM16_TO_MULAW_TABLE: Uint8Array = (() => {
 
   return table;
 })();
+
+// ---------- ITU-T G.711 A-law tables ----------
+
+/** Lookup table: A-law encoded byte -> signed 16-bit PCM value. */
+const ALAW_TO_PCM16_TABLE: Int16Array = (() => {
+  const table = new Int16Array(256);
+  for (let i = 0; i < 256; i++) {
+    const aval = i ^ 0x55;
+    let magnitude = (aval & 0x0f) << 4;
+    const segment = (aval & 0x70) >> 4;
+    if (segment === 0) magnitude += 8;
+    else if (segment === 1) magnitude += 0x108;
+    else magnitude = (magnitude + 0x108) << (segment - 1);
+    table[i] = aval & 0x80 ? magnitude : -magnitude;
+  }
+  return table;
+})();
+
+/** Lookup table: A-law encoded byte -> mu-law encoded byte. */
+const ALAW_TO_MULAW_TABLE: Uint8Array = (() => {
+  const table = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) {
+    table[i] = PCM16_TO_MULAW_TABLE[(ALAW_TO_PCM16_TABLE[i] + 65536) & 0xffff];
+  }
+  return table;
+})();
+
+/** Decode G.711 A-law bytes to signed 16-bit little-endian PCM. */
+export function alawToPcm16(alawData: Buffer): Buffer {
+  const out = Buffer.alloc(alawData.length * 2);
+  for (let i = 0; i < alawData.length; i++) {
+    out.writeInt16LE(ALAW_TO_PCM16_TABLE[alawData[i]], i * 2);
+  }
+  return out;
+}
+
+/** Normalize G.711 A-law bytes to the SDK-wide G.711 mu-law contract. */
+export function alawToMulaw(alawData: Buffer): Buffer {
+  const out = Buffer.alloc(alawData.length);
+  for (let i = 0; i < alawData.length; i++) {
+    out[i] = ALAW_TO_MULAW_TABLE[alawData[i]];
+  }
+  return out;
+}
 
 /**
  * Decode mu-law 8-bit audio to signed 16-bit little-endian PCM.

@@ -2,7 +2,8 @@
 
 Public API
 ----------
-- ``mulaw_to_pcm16`` / ``pcm16_to_mulaw``  — codec conversion
+- ``mulaw_to_pcm16`` / ``pcm16_to_mulaw``  — mu-law codec conversion
+- ``alaw_to_pcm16`` / ``alaw_to_mulaw``  — A-law decode/normalization
 - ``resample_8k_to_16k`` / ``resample_16k_to_8k``  — **deprecated** one-shot helpers
 - ``PcmCarry``  — odd-byte alignment helper
 - ``StatefulResampler``  — stateful chunk-by-chunk resampler (preferred)
@@ -34,6 +35,8 @@ except ImportError:
 __all__ = [
     "mulaw_to_pcm16",
     "pcm16_to_mulaw",
+    "alaw_to_pcm16",
+    "alaw_to_mulaw",
     "resample_8k_to_16k",
     "resample_16k_to_8k",
     "resample_24k_to_16k",
@@ -66,6 +69,20 @@ def pcm16_to_mulaw(pcm_data: bytes) -> bytes:
     if audioop is None:
         raise ImportError(_AUDIOOP_MISSING_MSG)
     return audioop.lin2ulaw(pcm_data, 2)
+
+
+def alaw_to_pcm16(alaw_data: bytes) -> bytes:
+    """Decode A-law (G.711) bytes to signed 16-bit linear PCM."""
+    if audioop is None:
+        raise ImportError(_AUDIOOP_MISSING_MSG)
+    return audioop.alaw2lin(alaw_data, 2)
+
+
+def alaw_to_mulaw(alaw_data: bytes) -> bytes:
+    """Normalize A-law (PCMA) bytes to the SDK-wide mu-law contract."""
+    if audioop is None:
+        raise ImportError(_AUDIOOP_MISSING_MSG)
+    return audioop.lin2ulaw(audioop.alaw2lin(alaw_data, 2), 2)
 
 
 # ---------------------------------------------------------------------------
