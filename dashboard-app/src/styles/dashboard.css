@@ -5,9 +5,9 @@
    live-call motif (pulse dot, live pill, streaming indicator) — every
    other "selected / active / checked" state is an ink chip (bg var(--ink),
    text var(--bg-cream), which the tokens.css body.dark block inverts for
-   free) or a pale green-100/green-800 tint, the design system's exempt
-   status-tint tier. See tokens.css for the variable aliases this file
-   reads throughout.
+   free) or the pale --tint-bg/--tint-fg status tint (green-100/green-800 in
+   light, green-900/green-200 in dark), the design system's exempt tier.
+   See tokens.css for the variable aliases this file reads throughout.
    ============================================================ */
 *,*::before,*::after{box-sizing:border-box}
 html,body{margin:0;background:var(--bg-cream);color:var(--ink);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
@@ -64,9 +64,9 @@ button{font-family:inherit;color:inherit}
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
 .metric{background:var(--surface-neu);box-shadow:var(--neu);border-radius:var(--r-card);padding:18px 18px 14px;position:relative;display:flex;flex-direction:column;transition:box-shadow var(--motion-fast) var(--easing)}
 .metric:hover{box-shadow:var(--neu-sm)}
-/* .peach is a legacy slot name (see tokens.css) — now the pale green-100
+/* .peach is a legacy slot name (see tokens.css) — now the pale --tint-bg
    status tint, the design system's tier exempt from the one-signal budget. */
-.metric.peach{background:var(--green-100);box-shadow:inset 0 0 0 1px var(--green-200)}
+.metric.peach{background:var(--tint-bg);box-shadow:inset 0 0 0 1px var(--tint-border)}
 .metric .lbl{font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-tertiary);font-weight:500;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
 .metric .val{font-size:32px;font-weight:560;letter-spacing:-.02em;line-height:1;font-family:var(--font-display);font-variant-numeric:tabular-nums;color:var(--ink)}
 .metric .val .unit{font-size:18px;color:var(--ink-faint);font-weight:500;margin-left:2px}
@@ -102,7 +102,7 @@ button{font-family:inherit;color:inherit}
 .spark-tooltip-list .status{color:var(--frost-40);font-size:10px;text-transform:uppercase;letter-spacing:.04em}
 .spark-tooltip-list .cost{color:var(--signal-hot);font-variant-numeric:tabular-nums}
 .spark-tooltip-more{margin-top:6px;font-family:var(--font-mono);font-size:10px;color:var(--frost-40);letter-spacing:.04em}
-.metric .badge-now{font-family:var(--font-mono);font-size:10px;font-weight:600;background:var(--green-100);color:var(--green-800);padding:2px 8px;border-radius:var(--r-pill);letter-spacing:.04em}
+.metric .badge-now{font-family:var(--font-mono);font-size:10px;font-weight:600;background:var(--tint-bg);color:var(--tint-fg);padding:2px 8px;border-radius:var(--r-pill);letter-spacing:.04em}
 
 /* main split */
 .split{display:grid;grid-template-columns:1fr 400px;gap:14px;align-items:start}
@@ -126,11 +126,11 @@ thead th{text-align:left;padding:9px 20px;font-size:11px;font-family:var(--font-
 tbody td{padding:13px 20px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:middle}
 tbody tr{cursor:pointer;transition:background var(--motion-fast) var(--easing)}
 tbody tr:hover{background:var(--bg)}
-tbody tr.selected{background:var(--green-100)}
+tbody tr.selected{background:var(--tint-bg)}
 tbody tr.selected td:first-child{box-shadow:inset 3px 0 0 var(--signal)}
 tbody tr:last-child td{border-bottom:0}
 tbody tr.new-row{animation:slideIn 400ms var(--easing)}
-@keyframes slideIn{from{background:var(--green-100);transform:translateY(-4px);opacity:0}to{background:transparent;transform:translateY(0);opacity:1}}
+@keyframes slideIn{from{background:var(--tint-bg);transform:translateY(-4px);opacity:0}to{background:transparent;transform:translateY(0);opacity:1}}
 
 /* ── Bulk select / delete ─────────────────────────────────────────
    Neumorphic squircle checkboxes: inset ring at rest, ink-chip fill when
@@ -163,7 +163,7 @@ tbody tr.new-row{animation:slideIn 400ms var(--easing)}
 .row-check svg{display:block;width:11px;height:11px}
 tbody tr.checked{background:var(--bg-cool)}
 tbody tr.checked:hover{background:var(--silver-3)}
-tbody tr.checked.selected{background:var(--green-100)}
+tbody tr.checked.selected{background:var(--tint-bg)}
 tbody tr.checked.selected td:first-child{box-shadow:inset 3px 0 0 var(--signal)}
 
 .bulk-bar{
@@ -254,7 +254,7 @@ tbody tr.checked.selected td:first-child{box-shadow:inset 3px 0 0 var(--signal)}
 .metrics-panel-h .seg button.on{background:var(--ink);color:var(--bg-cream);box-shadow:var(--neu-sm)}
 .metrics-panel-h .seg button:not(.on):not(:disabled):hover{color:var(--ink)}
 .metrics-panel-h .seg button:disabled{opacity:.35;cursor:not-allowed}
-.rr-card.peach{background:var(--green-100);box-shadow:inset 0 0 0 1px var(--green-200)}
+.rr-card.peach{background:var(--tint-bg);box-shadow:inset 0 0 0 1px var(--tint-border)}
 .rr-card h3{margin:0 0 4px;font-family:var(--font-display);font-size:15px;font-weight:600;display:flex;justify-content:space-between;align-items:center;color:var(--ink)}
 .rr-card .meta{font-family:var(--font-mono);font-size:12px;color:var(--fg-tertiary);font-weight:500;margin-bottom:14px}
 .rr-card .meta strong{color:var(--ink);font-weight:600}
@@ -277,7 +277,7 @@ tbody tr.checked.selected td:first-child{box-shadow:inset 3px 0 0 var(--signal)}
    tier, exempt from the one-signal budget even with many turns on screen
    at once, so a whole transcript of agent replies never reads as "many
    green fills". */
-.turn.bot .av{background:var(--green-100);color:var(--green-800);box-shadow:none}
+.turn.bot .av{background:var(--tint-bg);color:var(--tint-fg);box-shadow:none}
 .turn .body{flex:1;min-width:0}
 .turn .body .who{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-tertiary);font-weight:500;margin-bottom:2px;display:flex;align-items:center;gap:6px}
 .turn .body .txt{color:var(--ink-2);word-wrap:break-word}
@@ -301,7 +301,7 @@ tbody tr.checked.selected td:first-child{box-shadow:inset 3px 0 0 var(--signal)}
 /* "Active" toggles (mute / recording) use the pale green tint — both can
    be on at once, so this must stay in the exempt tier, never the one
    saturated signal fill. */
-.ctrl.active{background:var(--green-100);color:var(--green-800);box-shadow:none}
+.ctrl.active{background:var(--tint-bg);color:var(--tint-fg);box-shadow:none}
 
 /* mini lat panel */
 .lat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}

@@ -44,6 +44,18 @@
   --peach-cream:   var(--green-100);
   --peach-deep:    var(--ink-60);
 
+  /* --- pale status-tint tier (dashboard.css's "Active now" card, the
+     bot/agent avatar, selected/checked rows, active toggles) — the design
+     system's tier exempt from the one-signal-per-viewport budget. Routed
+     through its own alias, not straight to --green-100/--green-800,
+     because the design system's own dark theme does NOT just keep the
+     light pair on a dark page — it remaps the whole accent role to
+     --green-900/--green-200 (see ui/src/styles/globals.css's .dark
+     block), which is what body.dark below reproduces. */
+  --tint-bg:       var(--green-100);
+  --tint-fg:       var(--green-800);
+  --tint-border:   var(--green-200);
+
   /* --- color: illustrative (unused by this app; kept as a harmless alias) --- */
   --blue-1:        var(--ink-60);
   --blue-2:        var(--ink-40);
@@ -182,6 +194,9 @@ body.dark {
   --border:        var(--frost);
   --surface-glass: var(--glass-dark);
   --surface-neu:   var(--ink-bg-2);
+  --tint-bg:       var(--green-900);
+  --tint-fg:       var(--green-200);
+  --tint-border:   var(--green-800);
 }
 
 /* =========================================================================
