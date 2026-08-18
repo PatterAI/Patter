@@ -1,0 +1,23 @@
+/* Silver & Signal — modest docs overrides.
+   docs.json's `fonts` key has no code/mono override, so DM Mono for code is
+   wired here instead — the one gap Mintlify's config schema can't close.
+   Mintlify auto-loads any .css file placed in the docs content directory;
+   this file needs no reference elsewhere. Everything else (grounds, panels,
+   nav) stays on the "almond" theme per DIRECTION.md's "do not fight it". */
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap');
+
+code,
+pre,
+kbd,
+samp,
+pre[class*='language-'],
+code[class*='language-'] {
+  font-family: 'DM Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* Hairline instead of the theme's heavier default border, matching the
+   design system's --hair value (rgba(14,18,16,.08)). */
+hr {
+  border-color: rgba(14, 18, 16, 0.08);
+}

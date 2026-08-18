@@ -3,15 +3,24 @@
   "theme": "almond",
   "name": "Patter | Documentation",
   "colors": {
-    "primary": "#18181B",
-    "light": "#FFFFFF",
-    "dark": "#18181B"
+    "primary": "#00873F",
+    "light": "#22D96C",
+    "dark": "#063A1F"
   },
   "logo": {
     "light": "/logo/patter-logo.png",
     "dark": "/logo/patter-logo-dark.png",
     "href": "https://www.getpatter.com",
     "height": 45
+  },
+  "favicon": "/favicon.svg",
+  "fonts": {
+    "heading": {
+      "family": "Host Grotesk"
+    },
+    "body": {
+      "family": "Host Grotesk"
+    }
   },
   "navbar": {
     "links": [
