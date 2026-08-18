@@ -146,7 +146,7 @@ function CallRow({
           className="dir in"
           style={{
             marginRight: 8,
-            color: call.direction === 'inbound' ? '#3b6f3b' : '#4a4a4a',
+            color: call.direction === 'inbound' ? 'var(--signal-ink)' : 'var(--ink-2)',
           }}
         >
           {call.direction === 'inbound' ? <IconArrowDown /> : <IconArrowUp />}
@@ -286,7 +286,7 @@ export function CallTable({
             style={{
               fontFamily: 'var(--font-mono)',
               fontSize: 11,
-              color: '#aaa',
+              color: 'var(--ink-faint)',
               fontWeight: 500,
               marginLeft: 4,
             }}

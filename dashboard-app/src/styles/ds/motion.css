@@ -1,0 +1,18 @@
+/* Callable — motion. One curve, three durations. Nothing bounces, nothing bounces back. */
+:root{
+  --ease:cubic-bezier(.32,.72,0,1); /* @kind other */
+  --t:.4s var(--ease);              /* @kind other */
+  --t-fast:.18s var(--ease);        /* @kind other */
+  --t-slow:.7s var(--ease);         /* @kind other */
+}
+
+/* The only loops in the system are the live-dot ring and the orb drift. Both collapse
+   here, along with every transition and the smooth scroll. */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{
+    animation-duration:.001ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:.001ms !important;
+    scroll-behavior:auto !important;
+  }
+}

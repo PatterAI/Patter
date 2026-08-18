@@ -1,0 +1,134 @@
+/* Callable — the graphic elements. Wash, glass, neumorphism, orbs, line, streak,
+   live dot, hub. These are the world; components only arrange them.
+   The `.statement` type class lives in css/base.css with the rest of the scale. */
+
+/* ---------- wash — the thing glass refracts ----------
+   Glass over flat white composites to nothing, so every glass surface needs a washed
+   parent. The gradient is the silver field; the radials are the one chroma, out of focus. */
+.wash{position:relative;isolation:isolate;overflow:hidden;
+  background:linear-gradient(135deg,var(--silver-0),var(--lilac) 45%,var(--sage))}
+.wash::before{content:"";position:absolute;inset:-22% -12%;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(60% 50% at 20% 10%,rgba(34,217,108,.22),transparent 70%),
+    radial-gradient(46% 42% at 88% 76%,rgba(11,181,82,.16),transparent 72%);
+  filter:blur(18px)}
+.wash>*{position:relative;z-index:1}
+/* Quieter ground for long reading sections and for two washes in a row. */
+.wash--soft{background:linear-gradient(135deg,var(--silver-0),var(--silver-1) 52%,var(--silver-2))}
+.wash--soft::before{opacity:.45}
+
+/* ---------- glass — rim of light on top, shade edge below, hairline all round ---------- */
+.glass{position:relative;background:var(--glass-2);border-radius:var(--r-lg);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  box-shadow:inset 0 1px 0 var(--rim),inset 0 -1px 0 var(--rim-lo),
+             inset 0 0 0 1px var(--hair),var(--e2)}
+.glass--1{background:var(--glass-1)}
+.glass--2{background:var(--glass-2)}
+.glass--3{background:var(--glass-3)}
+.glass--dark{background:var(--glass-dark);color:var(--frost);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.14),inset 0 -1px 0 rgba(0,0,0,.35),
+             inset 0 0 0 1px var(--hair-dark),var(--e2)}
+/* Without blur support the fill has to carry the separation on its own, so it gets
+   more opaque rather than staying a see-through wash of white. */
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .glass,.glass--2{background:rgba(255,255,255,.90)}
+  .glass--1{background:rgba(255,255,255,.84)}
+  .glass--3{background:rgba(255,255,255,.96)}
+  .glass--dark{background:rgba(18,24,21,.94)}
+}
+
+/* ---------- neumorphism — paired light and shade, pressed inset ---------- */
+.neu{background:var(--silver-1);border-radius:var(--r-card);box-shadow:var(--neu);
+  transition:box-shadow var(--t-fast),transform var(--t-fast)}
+.neu--sm{box-shadow:var(--neu-sm)}
+.neu--in{box-shadow:var(--neu-in)}
+.neu--dark{background:var(--ink-bg-2);color:var(--frost);box-shadow:var(--neu-dark)}
+.neu:active{box-shadow:var(--neu-in);transform:scale(.98)}
+.neu--dark:active{box-shadow:inset 4px 4px 12px rgba(0,0,0,.6),
+             inset -4px -4px 12px rgba(255,255,255,.05)}
+
+/* ---------- orb — a rendered chrome sphere ---------- */
+/* The sphere itself is a raster render (assets/orbs/render-orbs.mjs), because a
+   CSS gradient cannot show the horizon, the dark equator band and the softbox
+   reflection that make a ball read as chrome rather than as matte putty. The
+   gradient and inset shadows below stay as the fallback the box shows if the
+   image fails to load; when it loads it covers them. There is no drop shadow
+   here: each PNG carries its own contact shadow, which is why the box must not
+   clip. Geometry contract with the renderer: the 520x600 canvas holds a 440px
+   sphere inset 40px, so the image is 118.1818% of the box at -9.0909% on both
+   axes, and its shadow falls outside the box below. */
+.orb{position:relative;display:block;flex:none;width:120px;height:120px;overflow:visible;
+  border-radius:var(--r-full);
+  background:radial-gradient(circle at 32% 28%,#fff 0%,#F2F4F7 12%,#C9CED8 38%,
+             #8E96A3 62%,#E7EAF0 78%,#FFFFFF 100%);
+  box-shadow:inset -8px -10px 24px rgba(14,18,16,.18),
+             inset 6px 8px 18px rgba(255,255,255,.9)}
+.orb>img{position:absolute;z-index:1;left:-9.0909%;top:-9.0909%;width:118.1818%;
+  height:auto;max-width:none;pointer-events:none;user-select:none}
+/* the fallback specular highlight — a soft ellipse where the light source sits */
+.orb::after{content:"";position:absolute;left:21%;top:13%;width:30%;height:21%;
+  border-radius:var(--r-full);pointer-events:none;filter:blur(2px);
+  background:radial-gradient(ellipse at 50% 50%,rgba(255,255,255,.96),rgba(255,255,255,0) 70%)}
+.orb--sm{width:56px;height:56px}
+.orb--md{width:120px;height:120px}
+.orb--lg{width:220px;height:220px}
+.orb--signal{background:radial-gradient(circle at 32% 28%,#EAFFF2 0%,#B7F5CE 12%,
+             #22D96C 40%,#00873F 64%,#0BB552 80%,#7BEBA6 100%);
+  box-shadow:inset -8px -10px 24px rgba(3,26,14,.36),
+             inset 6px 8px 18px rgba(255,255,255,.5)}
+.orb--shade{background:radial-gradient(circle at 36% 30%,#3A423D 0%,#1A201C 34%,
+             #0B0F0C 72%,#050706 100%);
+  filter:blur(18px);opacity:.9;box-shadow:none}
+.orb--shade::after{display:none}
+@media (prefers-reduced-motion:no-preference){
+  .orb{animation:drift 14s ease-in-out infinite}
+  .orb--shade{animation-duration:19s;animation-direction:reverse}
+}
+@keyframes drift{
+  0%,100%{transform:translate3d(0,0,0)}
+  50%{transform:translate3d(-8px,-12px,0)}
+}
+
+/* ---------- line — the thread that answers ---------- */
+.line{display:block;width:100%;height:1px;border:0;margin:0;
+  background:linear-gradient(90deg,transparent,var(--signal-hot),transparent);
+  box-shadow:0 0 12px rgba(34,217,108,.6)}
+
+/* ---------- streak — the diagonal light across an ink slab ----------
+   Place it as an absolutely positioned child of a slab that is
+   `position:relative;overflow:hidden`, before the content. */
+.streak{position:absolute;inset:-10% -5%;z-index:0;pointer-events:none;
+  background:linear-gradient(115deg,transparent 30%,rgba(34,217,108,.35) 48%,
+             rgba(11,181,82,.15) 55%,transparent 70%);
+  filter:blur(28px)}
+
+/* ---------- live dot ---------- */
+.live-dot{display:inline-block;width:8px;height:8px;flex:none;
+  border-radius:var(--r-full);background:var(--signal-hot);
+  box-shadow:0 0 0 0 rgba(34,217,108,.7)}
+@media (prefers-reduced-motion:no-preference){
+  .live-dot{animation:ring 2.6s ease-out infinite}
+}
+@keyframes ring{
+  to{box-shadow:0 0 0 12px rgba(34,217,108,0)}
+}
+
+/* ---------- hub — the 56px add button, plus drawn in CSS ---------- */
+.hub{position:relative;width:56px;height:56px;padding:0;border:0;cursor:pointer;
+  border-radius:var(--r-full);background:var(--silver-1);
+  box-shadow:var(--neu),inset 0 0 0 1px var(--hair);
+  transition:box-shadow var(--t-fast),transform var(--t-fast)}
+.hub::before,.hub::after{content:"";position:absolute;left:50%;top:50%;
+  background:var(--signal);border-radius:2px}
+.hub::before{width:18px;height:2px;transform:translate(-50%,-50%)}
+.hub::after{width:2px;height:18px;transform:translate(-50%,-50%)}
+.hub:active{transform:scale(.98);box-shadow:var(--neu-in),inset 0 0 0 1px var(--hair)}
+
+/* ---------- reveal — opt-in scroll entrance, 20px rise over --t-slow ----------
+   Content is visible by default so a page with no script, or a reader who asked for
+   reduced motion, never sees an empty band. */
+@media (prefers-reduced-motion:no-preference){
+  .reveal{opacity:0;transform:translateY(20px);
+    transition:opacity var(--t-slow),transform var(--t-slow)}
+  .reveal.is-in{opacity:1;transform:none}
+}

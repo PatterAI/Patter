@@ -1,0 +1,15 @@
+/* Silver & Signal — foundation barrel.
+   Verbatim copies from gtm/brand/callable-design-system/{tokens,css,fonts}/,
+   imported in the same order the design system's own styles.css uses:
+   fonts, the five token files, then base.css. main.tsx imports this file
+   first, ahead of tokens.css (the app's semantic alias layer) and
+   dashboard.css (the app's own selectors). Do not hand-edit the individual
+   files in this directory — redeploy by re-copying from the source system. */
+
+@import './fonts.css';
+@import './colors.css';
+@import './typography.css';
+@import './layout.css';
+@import './motion.css';
+@import './effects.css';
+@import './base.css';

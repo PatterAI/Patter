@@ -1,0 +1,10 @@
+/* Callable — radius, measure, band rhythm. Pill controls, squircle panels. */
+:root{
+  --r-btn:980px; --r-input:14px; --r-card:22px; --r-lg:30px; --r-xl:40px; --r-full:999px;
+  --page:1120px; --wide:1320px; --gutter:24px;
+  --band-tight:56px; --band:112px; --band-chapter:144px;
+}
+
+@media (max-width:760px){
+  :root{--gutter:20px}
+}

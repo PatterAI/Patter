@@ -100,7 +100,7 @@ function LatencyView({ call }: { call: Call }) {
             <span className="lbl">e2e</span>
             <span className="track">
               <span
-                className="seg-bar llm"
+                className="seg-bar stt"
                 style={{ left: 0, width: Math.min(100, (p95 / 1000) * 100) + '%' }}
               />
             </span>
@@ -109,7 +109,7 @@ function LatencyView({ call }: { call: Call }) {
         </div>
         <div className="wf-legend">
           <span>
-            <i style={{ background: '#DF9367' }}></i>end-to-end
+            <i style={{ background: 'var(--ink)' }}></i>end-to-end
           </span>
           <span style={{ marginLeft: 'auto' }}>
             {call.agent ?? 'realtime'}
@@ -196,13 +196,13 @@ function LatencyView({ call }: { call: Call }) {
       </div>
       <div className="wf-legend">
         <span>
-          <i style={{ background: '#1a1a1a' }}></i>stt
+          <i style={{ background: 'var(--ink)' }}></i>stt
         </span>
         <span>
-          <i style={{ background: '#DF9367' }}></i>llm
+          <i style={{ background: 'var(--ink-muted)' }}></i>llm
         </span>
         <span>
-          <i style={{ background: '#278EFF', opacity: 0.8 }}></i>tts
+          <i style={{ background: 'var(--ink-faint)' }}></i>tts
         </span>
         <span style={{ marginLeft: 'auto' }}>total {total} ms</span>
       </div>
@@ -253,10 +253,10 @@ function CostView({ call }: { call: Call }) {
     <>
       {subtotal > 0 && (
         <div className="cost-bar">
-          <i style={{ background: '#cc0000', width: seg(telco) + '%' }} />
-          <i style={{ background: '#DF9367', width: seg(llm) + '%' }} />
-          <i style={{ background: '#1a1a1a', width: seg(stt + sttTtsLegacy) + '%' }} />
-          <i style={{ background: '#6c6c6c', width: seg(tts) + '%' }} />
+          <i style={{ background: 'var(--ink)', width: seg(telco) + '%' }} />
+          <i style={{ background: 'var(--ink-2)', width: seg(llm) + '%' }} />
+          <i style={{ background: 'var(--ink-muted)', width: seg(stt + sttTtsLegacy) + '%' }} />
+          <i style={{ background: 'var(--ink-faint)', width: seg(tts) + '%' }} />
         </div>
       )}
       {telco > 0 && (
@@ -270,7 +270,7 @@ function CostView({ call }: { call: Call }) {
       {llm > 0 && (
         <div className="stack-row">
           <span className="lbl">
-            <span className="swatch" style={{ background: '#DF9367' }}></span>
+            <span className="swatch" style={{ background: 'var(--ink-2)' }}></span>
             {llmLabel}
           </span>
           <span className="v">{fmtCostUSD(llm)}</span>
@@ -280,7 +280,7 @@ function CostView({ call }: { call: Call }) {
       {stt > 0 && (
         <div className="stack-row">
           <span className="lbl">
-            <span className="swatch" style={{ background: '#1a1a1a' }}></span>
+            <span className="swatch" style={{ background: 'var(--ink-muted)' }}></span>
             {sttLabel}
           </span>
           <span className="v">{fmtCostUSD(stt)}</span>
@@ -289,7 +289,7 @@ function CostView({ call }: { call: Call }) {
       {tts > 0 && (
         <div className="stack-row">
           <span className="lbl">
-            <span className="swatch" style={{ background: '#6c6c6c' }}></span>
+            <span className="swatch" style={{ background: 'var(--ink-faint)' }}></span>
             {ttsLabel}
           </span>
           <span className="v">{fmtCostUSD(tts)}</span>
@@ -298,7 +298,7 @@ function CostView({ call }: { call: Call }) {
       {sttTtsLegacy > 0 && (
         <div className="stack-row">
           <span className="lbl">
-            <span className="swatch" style={{ background: '#1a1a1a' }}></span>
+            <span className="swatch" style={{ background: 'var(--ink-muted)' }}></span>
             STT / TTS (legacy)
           </span>
           <span className="v">{fmtCostUSD(sttTtsLegacy)}</span>
@@ -312,7 +312,7 @@ function CostView({ call }: { call: Call }) {
               style={{
                 fontFamily: 'var(--font-mono)',
                 fontSize: 10,
-                color: '#aaa',
+                color: 'var(--ink-faint)',
                 marginLeft: 4,
               }}
             >

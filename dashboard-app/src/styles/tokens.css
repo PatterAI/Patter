@@ -1,69 +1,90 @@
 /* =========================================================================
-   Patter Design System — tokens
-   Single typeface (Instrument Sans), near-monochrome palette,
-   one peach accent, hard borders, dot-grid texture.
+   Patter dashboard — semantic alias layer
+   Silver & Signal restandardisation: every custom property below keeps its
+   original NAME (dashboard.css and a few component inline styles reference
+   these by name) but now resolves through the design-system tokens loaded
+   by ds/index.css. Light values live in :root; body.dark redefines the same
+   names so every rule in dashboard.css that reads var(--x) flips for free —
+   no per-selector dark overrides needed beyond what's already in this file.
    ========================================================================= */
 
 :root {
-  /* --- color: ink + surfaces --- */
-  --ink:           #000000;
-  --ink-2:         #1a1a1a;
-  --ink-muted:     #aaaaaa;     /* secondary text, captions */
-  --ink-faint:     #cbcbcb;     /* disabled text, dividers */
-  --line:          #eeeeee;     /* hairline borders */
-  --line-2:        #e3e3e6;     /* slightly cooler border */
+  /* --- color: ink + surfaces ---
+     --ink and --ink-2 are NOT redeclared here: ds/colors.css already sets
+     them at :root (loaded first, in ds/index.css) and this file's :root
+     carries equal specificity, so redeclaring the same name here would be
+     self-referential (a custom property cannot read "the value from the
+     other :root block" via var() of its own name — that's a cycle, not an
+     inherit) rather than an alias. Everything below reads var(--ink) /
+     var(--ink-2) and gets the design system's values directly. */
+  --ink-muted:     var(--ink-60);        /* captions */
+  --ink-faint:     var(--ink-40);        /* disabled text, dividers */
+  --line:          var(--hair);          /* hairline borders */
+  --line-2:        var(--hair-2);        /* slightly heavier hairline */
 
-  --bg:            #ffffff;
-  --bg-cream:      #f6f6f4;     /* logo backplate, hero panel */
-  --bg-warm:       #fff8ef;     /* peachy callout surface */
-  --bg-cool:       #ebf0f5;     /* cool surface (illustrative tile) */
-  --bg-fog:        #f4f7fb;     /* faint blue-grey */
+  --bg:            var(--silver-0);
+  --bg-cream:      var(--silver-1);      /* page canvas */
+  --bg-warm:       var(--green-100);     /* pale status tint — exempt from the one-signal budget */
+  --bg-cool:       var(--silver-2);
+  --bg-fog:        var(--silver-2);
 
-  /* --- color: dot-grid + texture --- */
-  --dot:           #dad8de;     /* the dot-grid color, ~9500 occurrences in figma */
-  --dot-soft:      #e8e6ec;
+  /* --- color: dot-grid (unused by this app; kept as a harmless alias) --- */
+  --dot:           var(--silver-3);
+  --dot-soft:      var(--silver-2);
 
-  /* --- color: accent (peach) --- */
-  --peach:         #df9367;     /* the one brand color */
-  --peach-light:   #efc5ac;
-  --peach-cream:   #fff8ef;
-  --peach-deep:    #c97a4c;
+  /* --- color: accent —
+     "peach" was v1's one brand color. Silver & Signal reserves saturated
+     fill for the live-call motif only (see dashboard.css); these aliases
+     exist so nothing that still reads var(--peach*) renders unstyled, but
+     every live selector was re-pointed to the correct token directly
+     rather than through this alias — treat these four as a neutral
+     fallback, not an active brand slot. */
+  --peach:         var(--ink-40);
+  --peach-light:   var(--ink-40);
+  --peach-cream:   var(--green-100);
+  --peach-deep:    var(--ink-60);
 
-  /* --- color: illustrative blues (Patter Stack only) --- */
-  --blue-1:        #278eff;
-  --blue-2:        #93c5fd;
-  --blue-3:        #5a96f0;
-  --blue-cool:     #3b82f6;
+  /* --- color: illustrative (unused by this app; kept as a harmless alias) --- */
+  --blue-1:        var(--ink-60);
+  --blue-2:        var(--ink-40);
+  --blue-3:        var(--ink-60);
+  --blue-cool:     var(--ink-60);
 
-  /* --- decorative halo glows (logo composition) --- */
-  --halo-yellow:   rgba(237, 241, 188, 0.5);
-  --halo-blue:     rgba(90, 150, 240, 0.7);
+  /* --- decorative halo glows (unused by this app) --- */
+  --halo-yellow:   transparent;
+  --halo-blue:     transparent;
 
   /* --- semantic --- */
   --fg-primary:    var(--ink);
-  --fg-secondary:  #4a4a4a;
+  --fg-secondary:  var(--ink-2);
   --fg-tertiary:   var(--ink-muted);
-  --fg-on-accent:  var(--ink);
+  --fg-on-accent:  var(--on-signal);
 
   --surface:           var(--bg);
   --surface-secondary: var(--bg-cream);
-  --surface-accent:    var(--peach);
+  --surface-accent:    var(--signal);
   --surface-warm:      var(--bg-warm);
+  /* Glass and neu surfaces need their own flip point: ds/colors.css's
+     --glass-2 / --silver-1 are fixed values, not theme-reactive, and the
+     design system's own dark treatment (.glass--dark, .neu--dark) uses a
+     different token entirely rather than inverting the light one. */
+  --surface-glass:     var(--glass-2);
+  --surface-neu:       var(--silver-1);
 
-  --border:        var(--ink);            /* hard black border is the brand */
+  --border:        var(--ink);
   --border-soft:   var(--line);
   --border-hair:   var(--line-2);
 
-  --code-bg:       #fafaf8;
-  --code-fg:       #1a1a1a;
+  --code-bg:       var(--silver-0);
+  --code-fg:       var(--ink);
   --code-border:   var(--line);
 
-  /* --- type families --- */
-  --font-sans:     "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono:     "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --font-display:  var(--font-sans);
+  /* --- type families — Host Grotesk + DM Mono, via ds/typography.css --- */
+  --font-sans:     var(--font);
+  --font-mono:     var(--mono);
+  --font-display:  var(--display);
 
-  /* --- type scale (px-based, generous) --- */
+  /* --- type scale (unchanged — px-based, generous) --- */
   --fs-12:  12px;
   --fs-13:  13px;
   --fs-14:  14px;
@@ -93,7 +114,7 @@
   --lh-normal:  1.4;
   --lh-relaxed: 1.55;
 
-  /* --- spacing scale (4px base) --- */
+  /* --- spacing scale (unchanged, 4px base) --- */
   --s-0:   0;
   --s-1:   4px;
   --s-2:   8px;
@@ -106,42 +127,67 @@
   --s-9:   96px;
   --s-10: 128px;
 
-  /* --- radii --- */
+  /* --- radii — mapped onto the pill/squircle scale --- */
   --r-0:    0;
-  --r-1:    4px;
-  --r-2:    8px;
-  --r-3:    12px;
-  --r-4:    16px;
-  --r-5:    24px;          /* stack tile */
-  --r-pill: 999px;
+  --r-1:    var(--r-input);   /* 14px */
+  --r-2:    var(--r-input);
+  --r-3:    var(--r-card);    /* 22px */
+  --r-4:    var(--r-lg);      /* 30px */
+  --r-5:    var(--r-lg);
+  --r-pill: var(--r-btn);     /* 980px */
 
   /* --- borders --- */
   --bw-hair: 1px;
-  --bw-1:    1.5px;        /* default UI border */
-  --bw-2:    2px;          /* emphasized border */
-  --bw-3:    3px;          /* illustration border */
-  --bw-stack: 5px;         /* literal stack-tile stroke */
+  --bw-1:    1px;
+  --bw-2:    1.5px;
+  --bw-3:    2px;
+  --bw-stack: 3px;
 
-  /* --- shadows (used sparingly) --- */
+  /* --- shadows — neumorphic pair + elevation, from ds/colors.css --- */
   --shadow-none:    none;
-  --shadow-subtle:  0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-card:    0 8px 32px rgba(0, 0, 0, 0.08);
-  --shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.18);
-  --shadow-stack:   0 8px 0 -1px var(--bg-cream), 0 8px 0 0 var(--ink);
+  --shadow-subtle:  var(--neu-sm);
+  --shadow-card:    var(--e1);
+  --shadow-overlay: var(--e2);
+  --shadow-stack:   var(--neu);
 
   /* --- motion --- */
-  --motion-fast: 150ms;
-  --motion:      220ms;
-  --motion-slow: 320ms;
-  --easing:      cubic-bezier(0.2, 0.0, 0.0, 1);
+  --motion-fast: var(--t-fast);
+  --motion:      var(--t);
+  --motion-slow: var(--t-slow);
+  --easing:      var(--ease);
 
-  /* --- dot grid background image --- */
-  --dot-grid: radial-gradient(circle at 1px 1px, var(--dot) 1px, transparent 0);
+  /* --- dot grid background image (unused by this app) --- */
+  --dot-grid: none;
   --dot-grid-size: 16px 16px;
 }
 
+/* Dark theme — toggled via ``body.dark`` (see hooks/useUiPrefs.ts). Every
+   name above cascades through automatically; only the roles that actually
+   invert between light and dark need redefining here. */
+body.dark {
+  --ink:           var(--frost);
+  --ink-2:         var(--frost-64);
+  --ink-muted:     var(--frost-64);
+  --ink-faint:     var(--frost-40);
+  --line:          var(--hair-dark);
+  --line-2:        var(--hair-dark);
+  --bg:            var(--ink-bg);
+  --bg-cream:      var(--ink-bg);
+  --bg-warm:       var(--green-900);
+  --bg-cool:       var(--ink-bg-2);
+  --bg-fog:        var(--ink-bg-2);
+  --code-bg:       var(--ink-bg-2);
+  --code-fg:       var(--frost);
+  --code-border:   var(--hair-dark);
+  --border:        var(--frost);
+  --surface-glass: var(--glass-dark);
+  --surface-neu:   var(--ink-bg-2);
+}
+
 /* =========================================================================
-   Semantic typographic styles
+   Semantic typographic styles (unused by this app's components today — kept
+   updated for anyone reaching for a shared class rather than an inline
+   style, per the existing file's own convention).
    ========================================================================= */
 
 .h-display {
@@ -258,18 +304,14 @@
 }
 
 /* =========================================================================
-   Reusable surface patterns
+   Reusable surface patterns (unused by this app's components today)
    ========================================================================= */
 
 .dot-grid {
-  background-image: var(--dot-grid);
-  background-size: var(--dot-grid-size);
   background-color: var(--bg);
 }
 
 .dot-grid-cream {
-  background-image: var(--dot-grid);
-  background-size: var(--dot-grid-size);
   background-color: var(--bg-cream);
 }
 
@@ -288,9 +330,9 @@
 }
 
 .card-accent {
-  background: var(--peach);
-  color: var(--ink);
-  border: var(--bw-1) solid var(--ink);
+  background: var(--signal);
+  color: var(--on-signal);
+  border: var(--bw-1) solid var(--signal-deep);
   border-radius: var(--r-5);
   padding: var(--s-5);
 }

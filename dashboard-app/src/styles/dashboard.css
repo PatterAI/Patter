@@ -1,117 +1,143 @@
 /* ============================================================
    Patter — Live Calls Dashboard
+   Silver & Signal: silver ground, glass topbar + panels, neumorphic
+   controls, hairline tables. One saturated chroma reserved for the
+   live-call motif (pulse dot, live pill, streaming indicator) — every
+   other "selected / active / checked" state is an ink chip (bg var(--ink),
+   text var(--bg-cream), which the tokens.css body.dark block inverts for
+   free) or a pale green-100/green-800 tint, the design system's exempt
+   status-tint tier. See tokens.css for the variable aliases this file
+   reads throughout.
    ============================================================ */
 *,*::before,*::after{box-sizing:border-box}
 html,body{margin:0;background:var(--bg-cream);color:var(--ink);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
 button{font-family:inherit;color:inherit}
 
-/* topbar */
-.top{display:flex;align-items:center;justify-content:space-between;height:60px;padding:0 24px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30}
+/* topbar — glass chrome, per Operate-mode guidance ("silver-1 ground, glass
+   sidebar/topbar" applies even without a decorative wash parent). */
+.top{display:flex;align-items:center;justify-content:space-between;height:60px;padding:0 24px;
+  background:var(--surface-glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  box-shadow:inset 0 -1px 0 var(--line);position:sticky;top:0;z-index:30}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px}
 .brand img{height:22px}
-.brand .tag{font-family:var(--font-mono);font-size:11px;font-weight:500;background:#f6f6f4;border:1px solid var(--line);padding:2px 8px;border-radius:999px;color:#4a4a4a}
+.brand .tag{font-family:var(--font-mono);font-size:11px;font-weight:500;background:var(--surface-neu);box-shadow:var(--neu-sm);padding:2px 10px;border-radius:var(--r-pill);color:var(--ink-muted)}
 .top-r{display:flex;align-items:center;gap:14px;font-size:13px}
-.live-chip{display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:12px;color:#000;font-weight:500}
-.pulse{width:8px;height:8px;background:var(--peach-deep);border-radius:999px}
-.pulse.active{background:#3b6f3b;box-shadow:0 0 0 0 rgba(59,111,59,.6);animation:pulse 1.5s infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(59,111,59,.6)}70%{box-shadow:0 0 0 8px rgba(59,111,59,0)}100%{box-shadow:0 0 0 0 rgba(59,111,59,0)}}
-.num-chip{font-family:var(--font-mono);font-size:13px;background:#fff;border:1px solid var(--line);padding:5px 12px;border-radius:8px;color:#000;font-weight:500}
-.icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:#fff;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;color:#1a1a1a;transition:background var(--motion-fast) var(--easing),border-color var(--motion-fast) var(--easing),color var(--motion-fast) var(--easing)}
-.icon-btn:hover{background:#fafaf8;border-color:#cbcbcb}
-.icon-btn:focus-visible{outline:2px solid var(--peach);outline-offset:2px}
-.icon-btn.toggle.on{background:#000;border-color:#000;color:#fff}
-.icon-btn.toggle.on:hover{background:#1a1a1a;border-color:#1a1a1a}
+.live-chip{display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:12px;color:var(--ink);font-weight:500}
+.pulse{width:8px;height:8px;background:var(--ink-faint);border-radius:999px}
+.pulse.active{background:var(--signal-hot);box-shadow:0 0 0 0 rgba(34,217,108,.6);animation:pulse 1.5s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(34,217,108,.6)}70%{box-shadow:0 0 0 8px rgba(34,217,108,0)}100%{box-shadow:0 0 0 0 rgba(34,217,108,0)}}
+.num-chip{font-family:var(--font-mono);font-size:13px;background:var(--surface-neu);box-shadow:var(--neu-sm);padding:5px 14px;border-radius:var(--r-pill);color:var(--ink);font-weight:500}
+.icon-btn{width:32px;height:32px;border-radius:var(--r-pill);border:0;background:var(--surface-neu);box-shadow:var(--neu-sm);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink);transition:box-shadow var(--motion-fast) var(--easing),transform var(--motion-fast) var(--easing),background var(--motion-fast) var(--easing),color var(--motion-fast) var(--easing)}
+.icon-btn:hover{box-shadow:var(--neu)}
+.icon-btn:active{box-shadow:var(--neu-in);transform:scale(.98)}
+.icon-btn:focus-visible{outline:2px solid var(--signal);outline-offset:3px}
+.icon-btn.toggle.on{background:var(--ink);box-shadow:var(--neu-in);color:var(--bg-cream)}
+.icon-btn.toggle.on:hover{box-shadow:var(--neu-in)}
 /* PII cells use tabular numerics so masked + revealed states share a column
    width — switching the eye toggle does not jitter the column. */
 .pii{font-variant-numeric:tabular-nums}
-.avatar{width:32px;height:32px;border-radius:999px;background:var(--peach);border:1.5px solid #000;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:11px;font-weight:600}
+.avatar{width:32px;height:32px;border-radius:999px;background:var(--surface-neu);box-shadow:var(--neu-sm);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:11px;font-weight:600;color:var(--ink)}
 
 /* page */
 .page{padding:24px;max-width:1440px;margin:0 auto}
 
 /* page header */
 .ph{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;gap:24px;flex-wrap:wrap}
-.ph h1{margin:0 0 4px;font-size:32px;letter-spacing:-.01em;font-weight:700;line-height:1.1}
-.ph .sub{font-size:14px;color:#4a4a4a;margin:0;max-width:540px}
+.ph h1{margin:0 0 4px;font-family:var(--font-display);font-size:32px;letter-spacing:-.03em;font-weight:560;line-height:1.1;color:var(--ink)}
+.ph .sub{font-size:14px;color:var(--ink-2);margin:0;max-width:540px}
 .filters{display:flex;gap:8px;align-items:center}
-.seg{display:flex;background:#fff;border:1px solid var(--line);border-radius:8px;padding:2px}
-.seg button{font-family:var(--font-mono);font-size:12px;border:0;background:transparent;padding:6px 12px;border-radius:6px;cursor:pointer;color:#4a4a4a;font-weight:500;transition:all var(--motion-fast) var(--easing)}
-.seg button.on{background:#000;color:#fff}
-.seg button:not(.on):hover{color:#000}
-.btn{font-family:var(--font-mono);font-size:12px;border:1px solid var(--line);background:#fff;padding:7px 12px;border-radius:8px;cursor:pointer;font-weight:500;display:inline-flex;align-items:center;gap:6px;transition:all var(--motion-fast) var(--easing)}
-.btn:hover{background:#fafaf8}
-.btn.primary{background:#000;color:#fff;border-color:#000}
-.btn.primary:hover{background:#1a1a1a}
+.seg{display:flex;background:var(--surface-neu);box-shadow:var(--neu-in);border-radius:var(--r-pill);padding:3px}
+.seg button{font-family:var(--font-mono);font-size:12px;border:0;background:transparent;padding:6px 14px;border-radius:var(--r-pill);cursor:pointer;color:var(--ink-muted);font-weight:500;transition:all var(--motion-fast) var(--easing)}
+.seg button.on{background:var(--ink);color:var(--bg-cream);box-shadow:var(--neu-sm)}
+.seg button:not(.on):hover{color:var(--ink)}
+.btn{font-family:var(--font-mono);font-size:12px;border:0;background:var(--surface-neu);box-shadow:var(--neu-sm);padding:8px 14px;border-radius:var(--r-pill);cursor:pointer;font-weight:500;display:inline-flex;align-items:center;gap:6px;color:var(--ink);transition:box-shadow var(--motion-fast) var(--easing),transform var(--motion-fast) var(--easing)}
+.btn:hover{box-shadow:var(--neu)}
+.btn:active{box-shadow:var(--neu-in);transform:scale(.98)}
+.btn:focus-visible{outline:2px solid var(--signal);outline-offset:3px}
+/* Dormant today (no caller passes className="btn primary") — kept ready as
+   the app's one sanctioned signal-filled button per the design system's
+   "one signal button" rule for Operate surfaces. */
+.btn.primary{background:var(--signal);color:var(--on-signal);box-shadow:var(--neu-sm)}
+.btn.primary:hover{background:var(--signal-deep)}
 
 /* metric grid */
 .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
-.metric{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 18px 14px;position:relative;display:flex;flex-direction:column;transition:border-color var(--motion-fast) var(--easing)}
-.metric:hover{border-color:#cfcfcf}
-.metric.peach{background:#FFF8EF;border-color:#EFC5AC}
+.metric{background:var(--surface-neu);box-shadow:var(--neu);border-radius:var(--r-card);padding:18px 18px 14px;position:relative;display:flex;flex-direction:column;transition:box-shadow var(--motion-fast) var(--easing)}
+.metric:hover{box-shadow:var(--neu-sm)}
+/* .peach is a legacy slot name (see tokens.css) — now the pale green-100
+   status tint, the design system's tier exempt from the one-signal budget. */
+.metric.peach{background:var(--green-100);box-shadow:inset 0 0 0 1px var(--green-200)}
 .metric .lbl{font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-tertiary);font-weight:500;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
-.metric .val{font-size:32px;font-weight:700;letter-spacing:-.01em;line-height:1;font-family:var(--font-sans);font-variant-numeric:tabular-nums}
-.metric .val .unit{font-size:18px;color:#aaa;font-weight:500;margin-left:2px}
-.metric .delta{font-family:var(--font-mono);font-size:12px;margin-top:6px;color:#4a4a4a}
-.metric .delta.up{color:#3b6f3b}
-.metric .delta.dn{color:#c97a4c}
+.metric .val{font-size:32px;font-weight:560;letter-spacing:-.02em;line-height:1;font-family:var(--font-display);font-variant-numeric:tabular-nums;color:var(--ink)}
+.metric .val .unit{font-size:18px;color:var(--ink-faint);font-weight:500;margin-left:2px}
+.metric .delta{font-family:var(--font-mono);font-size:12px;margin-top:6px;color:var(--ink-2)}
+.metric .delta.up{color:var(--signal-ink)}
+.metric .delta.dn{color:var(--ink-muted)}
 .metric .spark{display:flex;align-items:flex-end;gap:3px;height:32px;margin-top:auto;padding-top:14px}
 .metric .spark .spark-bar-static,.metric .spark .spark-bar-wrap{flex:1;display:flex;align-items:flex-end;position:relative;height:100%}
-.metric .spark .spark-bar-static{background:var(--ink);border-radius:2px;opacity:.92;width:100%;align-self:flex-end}
-.metric.peach .spark .spark-bar-static{background:var(--ink)}
-.metric .spark .spark-bar{flex:1;width:100%;border:0;padding:0;background:var(--ink);border-radius:2px;opacity:.92;cursor:pointer;font:inherit;color:inherit;align-self:flex-end;transition:opacity var(--motion-fast) var(--easing),background var(--motion-fast) var(--easing)}
-.metric .spark .spark-bar.empty{background:transparent;cursor:default;pointer-events:none;opacity:0}
-.metric .spark .spark-bar:not(.empty):hover{opacity:1;background:var(--peach-deep)}
-.metric.peach .spark .spark-bar:not(.empty):hover{background:#000}
-.metric .spark .spark-bar:focus-visible{outline:2px solid var(--peach);outline-offset:2px}
+.metric .spark .spark-bar-static{background:var(--ink-faint);border-radius:2px;width:100%;align-self:flex-end}
+.metric.peach .spark .spark-bar-static{background:var(--green-400)}
+.metric .spark .spark-bar{flex:1;width:100%;border:0;padding:0;background:var(--ink-faint);border-radius:2px;cursor:pointer;font:inherit;color:inherit;align-self:flex-end;transition:background var(--motion-fast) var(--easing)}
+.metric .spark .spark-bar.empty{background:transparent;cursor:default;pointer-events:none}
+.metric .spark .spark-bar:not(.empty):hover{background:var(--ink)}
+.metric.peach .spark .spark-bar:not(.empty){background:var(--green-400)}
+.metric.peach .spark .spark-bar:not(.empty):hover{background:var(--signal-deep)}
+.metric .spark .spark-bar:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
 
-/* Sparkline tooltip — Patter style: dark surface, mono numerics. */
-.spark-tooltip{position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);background:var(--ink);color:#fff;border-radius:8px;padding:10px 12px;font-family:var(--font-sans);font-size:12px;line-height:1.4;min-width:220px;max-width:280px;z-index:50;box-shadow:0 8px 24px rgba(0,0,0,.18);pointer-events:none;animation:spark-tooltip-in 80ms var(--easing) both}
-.spark-tooltip::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--ink)}
+/* Sparkline tooltip — an always-dark ink slab regardless of page theme, so
+   it reads var(--ink-bg) / var(--frost) directly rather than the
+   theme-reactive var(--ink) alias (which flips to a light colour under
+   body.dark and would turn this into a white-on-white chip). */
+.spark-tooltip{position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);background:var(--ink-bg);color:var(--frost);border-radius:var(--r-card);padding:10px 12px;font-family:var(--font-sans);font-size:12px;line-height:1.4;min-width:220px;max-width:280px;z-index:50;box-shadow:var(--e2);pointer-events:none;animation:spark-tooltip-in 80ms var(--easing) both}
+.spark-tooltip::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--ink-bg)}
 @keyframes spark-tooltip-in{from{opacity:0;transform:translateX(-50%) translateY(-2px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
-.spark-tooltip-range{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#aaa;margin-bottom:4px}
+.spark-tooltip-range{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--frost-40);margin-bottom:4px}
 .spark-tooltip-headline{font-family:var(--font-mono);font-size:12px;display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px}
-.spark-tooltip-headline-l{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#aaa;font-weight:500}
-.spark-tooltip-headline-v{color:#fff;font-weight:600;font-variant-numeric:tabular-nums}
-.spark-tooltip-empty{color:#aaa;font-style:italic;font-size:12px}
+.spark-tooltip-headline-l{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--frost-40);font-weight:500}
+.spark-tooltip-headline-v{color:var(--frost);font-weight:600;font-variant-numeric:tabular-nums}
+.spark-tooltip-empty{color:var(--frost-40);font-style:italic;font-size:12px}
 .spark-tooltip-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}
 .spark-tooltip-list li{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:baseline;font-family:var(--font-mono);font-size:11px}
-.spark-tooltip-list .num{color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.spark-tooltip-list .status{color:#aaa;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
-.spark-tooltip-list .cost{color:var(--peach-light);font-variant-numeric:tabular-nums}
-.spark-tooltip-more{margin-top:6px;font-family:var(--font-mono);font-size:10px;color:#aaa;letter-spacing:.04em}
-.metric .badge-now{font-family:var(--font-mono);font-size:10px;font-weight:600;background:#000;color:#fff;padding:2px 6px;border-radius:4px;letter-spacing:.04em}
+.spark-tooltip-list .num{color:var(--frost);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.spark-tooltip-list .status{color:var(--frost-40);font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+.spark-tooltip-list .cost{color:var(--signal-hot);font-variant-numeric:tabular-nums}
+.spark-tooltip-more{margin-top:6px;font-family:var(--font-mono);font-size:10px;color:var(--frost-40);letter-spacing:.04em}
+.metric .badge-now{font-family:var(--font-mono);font-size:10px;font-weight:600;background:var(--green-100);color:var(--green-800);padding:2px 8px;border-radius:var(--r-pill);letter-spacing:.04em}
 
 /* main split */
 .split{display:grid;grid-template-columns:1fr 400px;gap:14px;align-items:start}
 @media (max-width: 1100px){.split{grid-template-columns:1fr}}
 
-/* call table panel */
-.panel{background:#fff;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+/* call table panel — glass, per Card's default variant */
+.panel{position:relative;background:var(--surface-glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  box-shadow:inset 0 1px 0 var(--rim),inset 0 -1px 0 var(--rim-lo),inset 0 0 0 1px var(--hair),var(--e2);
+  border-radius:var(--r-lg);overflow:hidden}
 .panel-h{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);gap:12px}
-.panel-h h3{margin:0;font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
+.panel-h h3{margin:0;font-family:var(--font-display);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px;color:var(--ink)}
 .panel-h .sse{font-family:var(--font-mono);font-size:11px;color:var(--fg-tertiary);font-weight:500;display:flex;align-items:center;gap:6px}
-.panel-h .sse .dot{width:6px;height:6px;background:#3b6f3b;border-radius:999px;animation:pulse 1.5s infinite}
-.panel-h .search{flex:1;max-width:260px;display:flex;align-items:center;gap:8px;background:#fafaf8;border:1px solid var(--line);border-radius:8px;padding:5px 10px}
-.panel-h .search input{flex:1;border:0;background:transparent;outline:0;font-family:var(--font-mono);font-size:12px;color:#000}
-.panel-h .search input::placeholder{color:#aaa}
-.panel-h .search svg{color:#aaa}
+.panel-h .sse .dot{width:6px;height:6px;background:var(--signal-hot);border-radius:999px}
+.panel-h .search{flex:1;max-width:260px;display:flex;align-items:center;gap:8px;background:var(--surface-neu);box-shadow:var(--neu-in);border-radius:var(--r-input);padding:6px 12px}
+.panel-h .search input{flex:1;border:0;background:transparent;outline:0;font-family:var(--font-mono);font-size:12px;color:var(--ink)}
+.panel-h .search input::placeholder{color:var(--ink-faint)}
+.panel-h .search svg{color:var(--ink-faint)}
 
 table{width:100%;border-collapse:collapse}
-thead th{text-align:left;padding:9px 20px;font-size:11px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--fg-tertiary);font-weight:500;border-bottom:1px solid var(--line);background:#fafaf8;position:sticky;top:0}
+thead th{text-align:left;padding:9px 20px;font-size:11px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--fg-tertiary);font-weight:500;border-bottom:1px solid var(--line);background:var(--bg);position:sticky;top:0}
 tbody td{padding:13px 20px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:middle}
 tbody tr{cursor:pointer;transition:background var(--motion-fast) var(--easing)}
-tbody tr:hover{background:#fafaf8}
-tbody tr.selected{background:#fff8ef}
-tbody tr.selected td:first-child{box-shadow:inset 3px 0 0 #DF9367}
+tbody tr:hover{background:var(--bg)}
+tbody tr.selected{background:var(--green-100)}
+tbody tr.selected td:first-child{box-shadow:inset 3px 0 0 var(--signal)}
 tbody tr:last-child td{border-bottom:0}
 tbody tr.new-row{animation:slideIn 400ms var(--easing)}
-@keyframes slideIn{from{background:#fff8ef;transform:translateY(-4px);opacity:0}to{background:transparent;transform:translateY(0);opacity:1}}
+@keyframes slideIn{from{background:var(--green-100);transform:translateY(-4px);opacity:0}to{background:transparent;transform:translateY(0);opacity:1}}
 
 /* ── Bulk select / delete ─────────────────────────────────────────
-   Refined-minimal: hand-drawn-feeling square checkboxes (1.5px hard
-   border), peach destructive accent reserved for the actual confirm
-   step. Header check and per-row check share .row-check styles so
-   hit-targets are visually consistent. */
+   Neumorphic squircle checkboxes: inset ring at rest, ink-chip fill when
+   checked (never signal — a bulk selection can check many rows at once,
+   and the one-signal budget is per viewport, not per row). Header check
+   and per-row check share .row-check styles so hit-targets stay
+   consistent. */
 .call-table th.check-cell,
 .call-table td.check-cell{
   width:38px;padding-left:14px;padding-right:0;text-align:left;
@@ -119,112 +145,96 @@ tbody tr.new-row{animation:slideIn 400ms var(--easing)}
 .call-table td.check-cell{cursor:default}
 .row-check{
   appearance:none;display:inline-flex;align-items:center;justify-content:center;
-  width:16px;height:16px;border:1.5px solid #cbcbcb;border-radius:4px;
-  background:#fff;color:transparent;cursor:pointer;padding:0;
-  transition:border-color var(--motion-fast) var(--easing),
+  width:18px;height:18px;border:0;border-radius:6px;
+  background:var(--surface-neu);box-shadow:var(--neu-in);color:transparent;cursor:pointer;padding:0;
+  transition:box-shadow var(--motion-fast) var(--easing),
              background var(--motion-fast) var(--easing),
-             color var(--motion-fast) var(--easing),
-             box-shadow var(--motion-fast) var(--easing);
+             color var(--motion-fast) var(--easing);
 }
-.row-check:hover:not(.disabled){border-color:#000}
-.row-check:focus-visible{outline:2px solid var(--peach);outline-offset:2px}
-.row-check.on{background:#000;border-color:#000;color:#fff}
-.row-check.on:hover{background:#1a1a1a}
-.row-check.disabled{cursor:not-allowed;opacity:.35;background:#fafaf8}
-.row-check.head.indet{background:#fff;border-color:#000;color:transparent}
+.row-check:hover:not(.disabled){box-shadow:var(--neu-in),inset 0 0 0 1px var(--line-2)}
+.row-check:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+.row-check.on{background:var(--ink);box-shadow:none;color:var(--bg-cream)}
+.row-check.on:hover{background:var(--ink-2)}
+.row-check.disabled{cursor:not-allowed;opacity:.35}
+.row-check.head.indet{background:var(--surface-neu);box-shadow:inset 0 0 0 1px var(--ink);color:transparent}
 .row-check.head .indet-mark{
-  width:8px;height:1.5px;background:#000;border-radius:1px;display:block;
+  width:8px;height:1.5px;background:var(--ink);border-radius:1px;display:block;
 }
 .row-check svg{display:block;width:11px;height:11px}
-tbody tr.checked{background:#fbf3eb}
-tbody tr.checked:hover{background:#f7ead8}
-tbody tr.checked.selected{background:#fff8ef}
-tbody tr.checked.selected td:first-child{box-shadow:inset 3px 0 0 #DF9367}
+tbody tr.checked{background:var(--bg-cool)}
+tbody tr.checked:hover{background:var(--silver-3)}
+tbody tr.checked.selected{background:var(--green-100)}
+tbody tr.checked.selected td:first-child{box-shadow:inset 3px 0 0 var(--signal)}
 
 .bulk-bar{
   display:flex;align-items:center;gap:10px;
   padding:10px 16px 10px 12px;
-  background:#fafaf8;border-bottom:1px solid var(--line);
-  font-family:var(--font-sans);font-size:13px;color:#1a1a1a;
+  background:var(--bg);border-bottom:1px solid var(--line);
+  font-family:var(--font-sans);font-size:13px;color:var(--ink-2);
   animation:bulkSlideIn 180ms var(--easing) both;
 }
 @keyframes bulkSlideIn{from{transform:translateY(-2px);opacity:0}to{transform:translateY(0);opacity:1}}
-.bulk-bar.confirming{background:#fff4e8;border-bottom-color:#EFC5AC}
+.bulk-bar.confirming{background:var(--silver-2)}
 .bulk-count{display:inline-flex;align-items:baseline;gap:6px}
 .bulk-count .bulk-num{
   font-family:var(--font-mono);font-size:14px;font-weight:600;
-  font-variant-numeric:tabular-nums;color:#000;
+  font-variant-numeric:tabular-nums;color:var(--ink);
 }
 .bulk-count .bulk-lbl{
   font-family:var(--font-mono);font-size:11px;letter-spacing:.04em;
-  text-transform:uppercase;color:#4a4a4a;font-weight:500;
+  text-transform:uppercase;color:var(--ink-2);font-weight:500;
 }
 .bulk-spacer{flex:1}
 .bulk-warn{
   font-family:var(--font-mono);font-size:11px;letter-spacing:.02em;
-  color:#7a5b3e;margin-right:4px;
+  color:var(--ink-muted);margin-right:4px;
 }
 .bulk-btn{
   display:inline-flex;align-items:center;gap:6px;
   font-family:var(--font-mono);font-size:12px;font-weight:500;
-  height:30px;padding:0 12px;border-radius:8px;cursor:pointer;
-  border:1px solid var(--line);background:#fff;color:#1a1a1a;
-  transition:background var(--motion-fast) var(--easing),
+  height:32px;padding:0 14px;border-radius:var(--r-pill);cursor:pointer;
+  border:0;background:var(--surface-neu);box-shadow:var(--neu-sm);color:var(--ink-2);
+  transition:box-shadow var(--motion-fast) var(--easing),
+             background var(--motion-fast) var(--easing),
              color var(--motion-fast) var(--easing),
-             border-color var(--motion-fast) var(--easing),
              transform var(--motion-fast) var(--easing);
 }
-.bulk-btn:hover:not(:disabled){background:#fafaf8;border-color:#cbcbcb}
+.bulk-btn:hover:not(:disabled){box-shadow:var(--neu)}
 .bulk-btn:disabled{opacity:.5;cursor:not-allowed}
-.bulk-btn:focus-visible{outline:2px solid var(--peach);outline-offset:2px}
-.bulk-btn.ghost{background:transparent;border-color:transparent;color:#4a4a4a}
-.bulk-btn.ghost:hover:not(:disabled){background:#fff;border-color:var(--line);color:#000}
+.bulk-btn:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+.bulk-btn.ghost{background:transparent;box-shadow:none;color:var(--ink-muted)}
+.bulk-btn.ghost:hover:not(:disabled){background:var(--surface-neu);box-shadow:var(--neu-sm);color:var(--ink)}
+/* Destructive is ink, never a saturated colour — the design system's law. */
 .bulk-btn.destructive{
-  background:var(--peach);color:#000;border-color:var(--peach-deep);
+  background:var(--ink);color:var(--bg-cream);box-shadow:none;
 }
-.bulk-btn.destructive:hover:not(:disabled){background:var(--peach-deep);color:#fff;border-color:var(--peach-deep)}
-.bulk-btn.destructive:active:not(:disabled){transform:translateY(1px)}
+.bulk-btn.destructive:hover:not(:disabled){background:var(--ink-2)}
+.bulk-btn.destructive:active:not(:disabled){transform:scale(.98)}
 .bulk-btn svg{display:block}
 
-/* dark mode */
-body.dark .row-check{background:#0d0d0d;border-color:#3a3a3a}
-body.dark .row-check:hover:not(.disabled){border-color:#fff}
-body.dark .row-check.on{background:#fff;border-color:#fff;color:#000}
-body.dark .row-check.disabled{background:#0a0a0a}
-body.dark .row-check.head.indet .indet-mark{background:#fff}
-body.dark tbody tr.checked{background:#1a1410}
-body.dark tbody tr.checked:hover{background:#221911}
-body.dark .bulk-bar{background:#0d0d0d;border-bottom-color:#262626;color:#e5e5e5}
-body.dark .bulk-bar.confirming{background:#1f1611;border-bottom-color:#5a3f29}
-body.dark .bulk-count .bulk-num{color:#fff}
-body.dark .bulk-count .bulk-lbl{color:#888}
-body.dark .bulk-warn{color:#d4a578}
-body.dark .bulk-btn{background:#171717;border-color:#262626;color:#e5e5e5}
-body.dark .bulk-btn:hover:not(:disabled){background:#1f1f1f;border-color:#3a3a3a}
-body.dark .bulk-btn.ghost{background:transparent;border-color:transparent;color:#888}
-body.dark .bulk-btn.ghost:hover:not(:disabled){color:#fff;border-color:#262626;background:#171717}
-body.dark .bulk-btn.destructive{background:var(--peach);color:#000;border-color:var(--peach-deep)}
-
-.num-cell{font-family:var(--font-mono);font-size:13px;font-variant-numeric:tabular-nums}
-.pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--font-mono);font-size:11px;font-weight:500;padding:3px 9px;border-radius:999px;border:1px solid;white-space:nowrap}
-.pill.live{background:#fff;border-color:#000;color:#000}
-.pill.live::before{content:"";width:6px;height:6px;background:#3b6f3b;border-radius:999px;animation:pulse 1.5s infinite}
-.pill.done{background:#f6f6f4;border-color:var(--line);color:#4a4a4a}
-.pill.fail{background:#fff8ef;border-color:#EFC5AC;color:#c97a4c}
-.pill.queued{background:#ebf0f5;border-color:#d6dde5;color:#4a4a4a}
-.pill.queued::before{content:"";width:6px;height:6px;background:#aaa;border-radius:999px}
-.car-tw{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:#4a4a4a;font-weight:500}
+.num-cell{font-family:var(--font-mono);font-size:13px;font-variant-numeric:tabular-nums;color:var(--ink)}
+.pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--font-mono);font-size:11px;font-weight:500;padding:3px 10px;border-radius:999px;box-shadow:inset 0 0 0 1px var(--line);white-space:nowrap;color:var(--ink-2)}
+.pill.live{background:var(--surface-neu);box-shadow:inset 0 0 0 1px var(--ink);color:var(--ink)}
+.pill.live::before{content:"";width:6px;height:6px;background:var(--signal-hot);border-radius:999px;animation:pulse 1.5s infinite}
+.pill.done{background:var(--bg);color:var(--ink-muted)}
+.pill.fail{background:var(--silver-2);box-shadow:inset 0 0 0 1px var(--ink-faint);color:var(--ink);font-weight:600}
+.pill.queued{background:var(--bg);color:var(--ink-muted)}
+.pill.queued::before{content:"";width:6px;height:6px;background:var(--ink-faint);border-radius:999px}
+.car-tw{display:inline-flex;gap:6px;align-items:center;font-size:12px;color:var(--ink-2);font-weight:500}
 .car-dot{width:6px;height:6px;border-radius:999px;display:inline-block}
+/* Carrier colours are the vendors' own brand colours, not a design-system
+   accent — left as-is on purpose so the dot still means "this is Twilio /
+   Telnyx / Plivo" at a glance. */
 .car-dot.tw,.swatch.tw{background:#cc0000}
 .car-dot.tx,.swatch.tx{background:#00C896}
 .car-dot.pl,.swatch.pl{background:#8B5CF6}
-.lat-bar{display:inline-block;width:54px;height:5px;background:#eee;border-radius:999px;overflow:hidden;vertical-align:middle;margin-right:8px}
-.lat-bar i{display:block;height:100%;background:#000;border-radius:999px;transition:width 400ms var(--easing)}
-.lat-bar.warn i{background:#DF9367}
+.lat-bar{display:inline-block;width:54px;height:5px;background:var(--silver-2);border-radius:999px;overflow:hidden;vertical-align:middle;margin-right:8px}
+.lat-bar i{display:block;height:100%;background:var(--ink-faint);border-radius:999px;transition:width 400ms var(--easing)}
+.lat-bar.warn i{background:var(--ink)}
 .dir{display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:12px}
 .dir svg{flex-shrink:0}
-.dir.in{color:#3b6f3b}
-.dir.out{color:#4a4a4a}
+.dir.in{color:var(--signal-ink)}
+.dir.out{color:var(--ink-2)}
 
 /* right rail: live call */
 .rr{display:flex;flex-direction:column;gap:14px;min-height:590px}
@@ -232,102 +242,116 @@ body.dark .bulk-btn.destructive{background:var(--peach);color:#000;border-color:
    prevents the card from collapsing when no call is selected and keeps
    the layout anchored at the same height as the recent-calls table
    (header ~50px + 540px scroll area ≈ 590px). */
-.rr-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;min-height:280px}
+.rr-card{position:relative;background:var(--surface-glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  box-shadow:inset 0 1px 0 var(--rim),inset 0 -1px 0 var(--rim-lo),inset 0 0 0 1px var(--hair),var(--e2);
+  border-radius:var(--r-lg);padding:18px;min-height:280px}
 .metrics-panel-h{margin-bottom:14px}
 /* Lock the body area to the tallest layout (pipeline latency: 4 latboxes +
    waterfall + legend ≈ 230px) so switching Latency↔Cost tabs doesn't jump. */
 .metrics-panel-body{min-height:240px}
-.metrics-panel-h .seg{display:inline-flex;background:#fafaf8;border:1px solid var(--line);border-radius:8px;padding:2px}
-.metrics-panel-h .seg button{font-family:var(--font-mono);font-size:11px;border:0;background:transparent;padding:5px 14px;border-radius:6px;cursor:pointer;color:#4a4a4a;font-weight:500;transition:all var(--motion-fast) var(--easing);text-transform:uppercase;letter-spacing:.06em}
-.metrics-panel-h .seg button.on{background:#000;color:#fff}
-.metrics-panel-h .seg button:not(.on):not(:disabled):hover{color:#000}
+.metrics-panel-h .seg{display:inline-flex;background:var(--surface-neu);box-shadow:var(--neu-in);border-radius:var(--r-pill);padding:3px}
+.metrics-panel-h .seg button{font-family:var(--font-mono);font-size:11px;border:0;background:transparent;padding:6px 16px;border-radius:var(--r-pill);cursor:pointer;color:var(--ink-muted);font-weight:500;transition:all var(--motion-fast) var(--easing);text-transform:uppercase;letter-spacing:.06em}
+.metrics-panel-h .seg button.on{background:var(--ink);color:var(--bg-cream);box-shadow:var(--neu-sm)}
+.metrics-panel-h .seg button:not(.on):not(:disabled):hover{color:var(--ink)}
 .metrics-panel-h .seg button:disabled{opacity:.35;cursor:not-allowed}
-.rr-card.peach{background:#FFF8EF;border-color:#EFC5AC}
-.rr-card h3{margin:0 0 4px;font-size:15px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
+.rr-card.peach{background:var(--green-100);box-shadow:inset 0 0 0 1px var(--green-200)}
+.rr-card h3{margin:0 0 4px;font-family:var(--font-display);font-size:15px;font-weight:600;display:flex;justify-content:space-between;align-items:center;color:var(--ink)}
 .rr-card .meta{font-family:var(--font-mono);font-size:12px;color:var(--fg-tertiary);font-weight:500;margin-bottom:14px}
-.rr-card .meta strong{color:#000;font-weight:600}
-.rr-card .meta .sep{margin:0 6px;color:#cbcbcb}
+.rr-card .meta strong{color:var(--ink);font-weight:600}
+.rr-card .meta .sep{margin:0 6px;color:var(--ink-faint)}
 
-.duration-block{display:flex;align-items:baseline;gap:6px;margin-bottom:14px;padding:10px 12px;background:#fafaf8;border:1px solid var(--line);border-radius:10px}
+.duration-block{display:flex;align-items:baseline;gap:6px;margin-bottom:14px;padding:10px 12px;background:var(--bg);box-shadow:inset 0 0 0 1px var(--line);border-radius:var(--r-input)}
 .duration-block .l{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-tertiary);font-weight:500}
-.duration-block .v{font-family:var(--font-mono);font-size:18px;font-weight:600;color:#000;margin-left:auto;font-variant-numeric:tabular-nums}
-.duration-block .agent{font-family:var(--font-mono);font-size:11px;color:#4a4a4a}
+.duration-block .v{font-family:var(--font-mono);font-size:18px;font-weight:600;color:var(--ink);margin-left:auto;font-variant-numeric:tabular-nums}
+.duration-block .agent{font-family:var(--font-mono);font-size:11px;color:var(--ink-2)}
 
 /* transcript */
 .transcript{max-height:340px;overflow-y:auto;padding-right:4px;margin:0 -4px 0 0}
 .transcript::-webkit-scrollbar{width:4px}
-.transcript::-webkit-scrollbar-thumb{background:#e3e3e6;border-radius:4px}
+.transcript::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:4px}
 .turn{display:flex;gap:10px;margin-bottom:12px;font-size:13px;line-height:1.5;animation:turnIn 260ms var(--easing)}
 @keyframes turnIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-.turn .av{flex:0 0 26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:10px;font-weight:600;border:1.5px solid #000}
-.turn.user .av{background:#fff}
-.turn.bot .av{background:#DF9367}
+.turn .av{flex:0 0 26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:10px;font-weight:600;box-shadow:inset 0 0 0 1px var(--line-2)}
+.turn.user .av{background:var(--surface-neu);color:var(--ink)}
+/* Agent/bot turns use the pale green tint — the design system's status-tint
+   tier, exempt from the one-signal budget even with many turns on screen
+   at once, so a whole transcript of agent replies never reads as "many
+   green fills". */
+.turn.bot .av{background:var(--green-100);color:var(--green-800);box-shadow:none}
 .turn .body{flex:1;min-width:0}
 .turn .body .who{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-tertiary);font-weight:500;margin-bottom:2px;display:flex;align-items:center;gap:6px}
-.turn .body .txt{color:#1a1a1a;word-wrap:break-word}
+.turn .body .txt{color:var(--ink-2);word-wrap:break-word}
 .turn .body .lat{font-family:var(--font-mono);font-size:10px;color:var(--fg-tertiary);margin-top:3px}
 .turn .typing{display:inline-flex;gap:3px;align-items:center;height:18px}
-.turn .typing span{width:5px;height:5px;background:#aaa;border-radius:999px;animation:dot 1s infinite ease-in-out}
+.turn .typing span{width:5px;height:5px;background:var(--ink-faint);border-radius:999px;animation:dot 1s infinite ease-in-out}
 .turn .typing span:nth-child(2){animation-delay:.15s}
 .turn .typing span:nth-child(3){animation-delay:.3s}
 @keyframes dot{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-2px)}}
-.turn.tool .av{background:#ebf0f5}
-.turn.tool .body .who{color:#3b82f6}
-.tool-call{font-family:var(--font-mono);font-size:11px;background:#fafaf8;border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-top:4px;color:#1a1a1a;display:inline-block}
-.tool-call .k{color:#4a4a4a}
+.turn.tool .av{background:var(--silver-2);color:var(--ink-2);box-shadow:none}
+.turn.tool .body .who{color:var(--ink-muted)}
+.tool-call{font-family:var(--font-mono);font-size:11px;background:var(--bg);box-shadow:inset 0 0 0 1px var(--line);border-radius:8px;padding:6px 8px;margin-top:4px;color:var(--ink-2);display:inline-block}
+.tool-call .k{color:var(--ink-muted)}
 
 .controls{display:flex;gap:6px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
-.ctrl{flex:1;font-family:var(--font-mono);font-size:11px;font-weight:500;padding:9px 0;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all var(--motion-fast) var(--easing)}
-.ctrl:hover{background:#fafaf8}
-.ctrl.danger{border-color:#000;background:#000;color:#fff}
-.ctrl.danger:hover{background:#1a1a1a}
-.ctrl.active{background:#fff8ef;border-color:#DF9367;color:#c97a4c}
+.ctrl{flex:1;font-family:var(--font-mono);font-size:11px;font-weight:500;padding:10px 0;border:0;border-radius:var(--r-pill);background:var(--surface-neu);box-shadow:var(--neu-sm);color:var(--ink);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all var(--motion-fast) var(--easing)}
+.ctrl:hover{box-shadow:var(--neu)}
+/* Destructive (end call) is ink, never a saturated colour. */
+.ctrl.danger{background:var(--ink);color:var(--bg-cream);box-shadow:none}
+.ctrl.danger:hover{background:var(--ink-2)}
+/* "Active" toggles (mute / recording) use the pale green tint — both can
+   be on at once, so this must stay in the exempt tier, never the one
+   saturated signal fill. */
+.ctrl.active{background:var(--green-100);color:var(--green-800);box-shadow:none}
 
 /* mini lat panel */
 .lat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.latbox{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fafaf8}
+.latbox{padding:10px 12px;border-radius:var(--r-input);background:var(--bg);box-shadow:inset 0 0 0 1px var(--line)}
 .latbox .l{font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-tertiary);font-weight:500;margin-bottom:4px}
-.latbox .v{font-family:var(--font-mono);font-size:18px;font-weight:600;color:#000;font-variant-numeric:tabular-nums}
-.latbox .v .u{font-size:11px;color:#aaa;font-weight:500;margin-left:2px}
-.latbox.warn{background:#fff8ef;border-color:#EFC5AC}
-.latbox.warn .v{color:#c97a4c}
+.latbox .v{font-family:var(--font-mono);font-size:18px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.latbox .v .u{font-size:11px;color:var(--ink-faint);font-weight:500;margin-left:2px}
+/* A latency warning is a bolder ink reading, not a colour — consistent
+   with "destructive/attention states are achromatic". */
+.latbox.warn{background:var(--silver-2);box-shadow:inset 0 0 0 1px var(--ink-faint)}
+.latbox.warn .v{color:var(--ink);font-weight:700}
 
-/* latency waterfall */
+/* latency waterfall — a monochrome ink ramp (stt darkest → tts lightest),
+   matching the segment colours set inline in MetricsPanel.tsx. */
 .waterfall{margin-top:12px;display:flex;flex-direction:column;gap:6px}
 .wf-row{display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:11px}
-.wf-row .lbl{flex:0 0 56px;color:#4a4a4a}
-.wf-row .track{flex:1;height:6px;background:#fafaf8;border-radius:999px;position:relative}
-.wf-row .seg-bar{position:absolute;top:0;height:6px;border-radius:999px;background:#000}
-.wf-row .seg-bar.stt{background:#1a1a1a}
-.wf-row .seg-bar.llm{background:#DF9367}
-.wf-row .seg-bar.tts{background:#278EFF;opacity:.8}
-.wf-row .v{flex:0 0 48px;text-align:right;color:#000;font-weight:500}
-.wf-legend{display:flex;gap:12px;margin-top:8px;font-family:var(--font-mono);font-size:10px;color:#4a4a4a}
+.wf-row .lbl{flex:0 0 56px;color:var(--ink-2)}
+.wf-row .track{flex:1;height:6px;background:var(--silver-2);border-radius:999px;position:relative}
+.wf-row .seg-bar{position:absolute;top:0;height:6px;border-radius:999px;background:var(--ink)}
+.wf-row .seg-bar.stt{background:var(--ink)}
+.wf-row .seg-bar.llm{background:var(--ink-muted)}
+.wf-row .seg-bar.tts{background:var(--ink-faint)}
+.wf-row .v{flex:0 0 48px;text-align:right;color:var(--ink);font-weight:500}
+.wf-legend{display:flex;gap:12px;margin-top:8px;font-family:var(--font-mono);font-size:10px;color:var(--ink-2)}
 .wf-legend span{display:inline-flex;align-items:center;gap:4px}
 .wf-legend i{width:8px;height:8px;border-radius:2px;display:inline-block}
 
-/* cost breakdown */
+/* cost breakdown — same monochrome ink ramp; telco/llm/stt/tts colours are
+   set inline in MetricsPanel.tsx (CostView) alongside the swatches below. */
 .stack-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px}
 .stack-row:last-child{border-bottom:0;font-weight:600;padding-top:10px;margin-top:2px;border-top:1px solid var(--line)}
-.stack-row .lbl{flex:1;color:#4a4a4a;display:flex;align-items:center;gap:6px}
+.stack-row .lbl{flex:1;color:var(--ink-2);display:flex;align-items:center;gap:6px}
 .stack-row .lbl .swatch{width:8px;height:8px;border-radius:2px}
-.stack-row .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
-.stack-row .saved{color:#3b6f3b;font-family:var(--font-mono);font-size:11px;margin-left:6px;white-space:nowrap}
+.stack-row .v{font-family:var(--font-mono);font-variant-numeric:tabular-nums;color:var(--ink)}
+.stack-row .saved{color:var(--signal-ink);font-family:var(--font-mono);font-size:11px;margin-left:6px;white-space:nowrap}
 
-.cost-bar{display:flex;height:8px;border-radius:999px;overflow:hidden;margin-bottom:14px;background:#eee}
+.cost-bar{display:flex;height:8px;border-radius:999px;overflow:hidden;margin-bottom:14px;background:var(--silver-2)}
 .cost-bar i{height:100%}
 
 /* empty / placeholder */
-.empty{padding:40px 20px;text-align:center;color:#aaa;font-family:var(--font-mono);font-size:13px}
+.empty{padding:40px 20px;text-align:center;color:var(--ink-faint);font-family:var(--font-mono);font-size:13px}
 
 /* footer/status bar */
-.statusbar{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:10px 16px;background:#fff;border:1px solid var(--line);border-radius:10px;font-family:var(--font-mono);font-size:11px;color:#4a4a4a}
+.statusbar{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:10px 16px;background:var(--surface-neu);box-shadow:var(--neu-sm);border-radius:var(--r-input);font-family:var(--font-mono);font-size:11px;color:var(--ink-2)}
 .statusbar .group{display:flex;gap:18px;align-items:center}
-.statusbar .green{color:#3b6f3b}
-.statusbar .green::before{content:"";width:6px;height:6px;background:#3b6f3b;border-radius:999px;display:inline-block;margin-right:6px;vertical-align:middle}
+.statusbar .green{color:var(--signal-ink)}
+.statusbar .green::before{content:"";width:6px;height:6px;background:var(--signal-hot);border-radius:999px;display:inline-block;margin-right:6px;vertical-align:middle}
 
 /* key hint */
-.kbd{font-family:var(--font-mono);font-size:10px;background:#fafaf8;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:1px 5px;color:#4a4a4a}
+.kbd{font-family:var(--font-mono);font-size:10px;background:var(--bg);box-shadow:inset 0 0 0 1px var(--line),inset 0 -1.5px 0 var(--line-2);border-radius:5px;padding:1px 6px;color:var(--ink-2)}
 
 /* density modes */
 body.dense .metric{padding:14px}
@@ -336,166 +360,39 @@ body.dense tbody td{padding:9px 18px}
 body.dense .rr-card{padding:14px}
 body.dense .turn{margin-bottom:9px;font-size:12.5px}
 
-/* dark scheme (subtle, optional)
-   Palette lifted on 2026-05-14: page #0d0d0d → #121212, cards
-   #171717 → #1c1c1c, borders #262626 → #2a2a2a. The previous
-   pitch-black felt oppressive against the brand's cream/peach
-   accent. Two-step neutral ramp keeps cards distinct from the
-   page without contrast loss on borders. */
-body.dark{background:#121212;color:#e8e8e8}
-body.dark .top,body.dark .panel,body.dark .metric,body.dark .rr-card,body.dark .num-chip,body.dark .icon-btn,body.dark .seg,body.dark .btn,body.dark .latbox,body.dark .ctrl,body.dark .duration-block,body.dark .statusbar{background:#1c1c1c;border-color:#2a2a2a;color:#e8e8e8}
-body.dark thead th{background:#121212;color:#888;border-color:#2a2a2a}
-body.dark tbody td,body.dark .rr-card{border-color:#2a2a2a}
-body.dark tbody tr:hover{background:#222222}
-body.dark tbody tr.selected{background:#2a1d15}
-body.dark .pill.done{background:#121212;color:#a0a0a0;border-color:#2a2a2a}
-body.dark .pill.live{background:#1c1c1c;color:#fff;border-color:#fff}
-body.dark .turn .av{border-color:#888}
-body.dark .turn.user .av{background:#2a2a2a;color:#fff}
-body.dark .lat-bar{background:#2a2a2a}
-body.dark .lat-bar i{background:#e8e8e8}
-body.dark .lat-bar.warn i{background:var(--peach)}
-body.dark .stack-row{border-color:#2a2a2a}
-body.dark .panel-h .search{background:#121212;border-color:#2a2a2a}
-body.dark .panel-h .search input{color:#e8e8e8}
-body.dark .metric .val,body.dark .latbox .v,body.dark .num-cell,body.dark .duration-block .v{color:#fff}
-body.dark .duration-block .agent{color:#a8a8a8}
-body.dark .duration-block .l{color:#888}
-/* Active "pill" toggles + theme toggle: peach accent in dark mode (was stark
-   white — felt like a light-mode leftover floating on the dark page). */
-body.dark .seg button.on{background:var(--peach);color:#000;border-color:var(--peach)}
-body.dark .icon-btn{color:#e8e8e8}
-body.dark .icon-btn:hover{background:#262626;border-color:#3a3a3a}
-body.dark .icon-btn.toggle.on{background:var(--peach);border-color:var(--peach-deep);color:#000}
-body.dark .icon-btn.toggle.on:hover{background:var(--peach-deep);border-color:var(--peach-deep);color:#fff}
-body.dark .ctrl.danger{background:var(--peach);color:#000;border-color:var(--peach-deep)}
-body.dark .brand .tag{background:#1c1c1c;color:#a0a0a0;border-color:#2a2a2a}
-body.dark .metric.peach{background:#241814;border-color:#5a3a2a}
-body.dark .rr-card.peach{background:#241814;border-color:#5a3a2a}
-body.dark .duration-block,body.dark .latbox{background:#121212}
-body.dark tbody tr.selected td:first-child{box-shadow:inset 3px 0 0 #DF9367}
-
-/* ── Dark mode polish ────────────────────────────────────────────
-   Default light styles use ink (#000) for spark bars, dark grey
-   (#4a4a4a) for secondary text, and cream (#fafaf8) for chip
-   surfaces — all unreadable on a dark page. Overrides below fix
-   contrast across every surface that the screenshot revealed as
-   muddy: sparklines, kbd chip, "X inbound · X outbound" footer,
-   carrier label, page subtitle, metric delta, table empty state,
-   peach metric card, and the latency bar fill. */
-body.dark .ph h1{color:#fff}
-body.dark .ph .sub{color:#9a9a9a}
-body.dark .kbd{background:#0d0d0d;border-color:#3a3a3a;color:#cfcfcf;border-bottom-color:#262626}
-body.dark .metric .delta{color:#9a9a9a}
-body.dark .metric .lbl{color:#8a8a8a}
-body.dark .metric .footer,
-body.dark .metric .meta-foot{color:#a8a8a8}
-/* Spark bars: the default ``var(--ink)`` (#000) disappears on the
-   dark page. Use a light grey (with a subtle white-on-hover) so the
-   sparkline is legible without screaming. ``:not(.empty)`` is
-   important — without it the empty (zero-height) bars inherit the
-   light fill and become a visible grey strip at the bottom of each
-   card. */
-body.dark .metric .spark .spark-bar-static,
-body.dark .metric .spark .spark-bar:not(.empty){background:#a8a8a8;opacity:.85}
-body.dark .metric .spark .spark-bar:not(.empty):hover{background:var(--peach);opacity:1}
-body.dark .metric.peach .spark .spark-bar-static,
-body.dark .metric.peach .spark .spark-bar:not(.empty){background:var(--peach);opacity:.85}
-body.dark .metric.peach .spark .spark-bar:not(.empty):hover{background:#fff;opacity:1}
-body.dark .metric.peach .lbl,
-body.dark .metric.peach .delta{color:#c9a584}
-body.dark .car-tw{color:#a8a8a8}
-body.dark .empty{color:#666}
-body.dark .lat-bar{background:#2a2a2a}
-body.dark .lat-bar i{background:#e8e8e8}
-body.dark .lat-bar.warn i{background:var(--peach-deep)}
-body.dark .btn.primary{background:#fff;color:#000;border-color:#fff}
-body.dark .btn.primary:hover{background:#e8e8e8;border-color:#e8e8e8}
-body.dark .btn:hover{background:#1f1f1f;border-color:#3a3a3a}
-body.dark .seg{background:#0d0d0d;border-color:#262626}
-body.dark .seg button{color:#888}
-body.dark .seg button:not(.on):hover{color:#fff}
-body.dark .panel-h h3{color:#fff}
-body.dark .panel-h .sse{color:#888}
-body.dark .panel-h .search svg{color:#666}
-body.dark .panel-h .search input::placeholder{color:#666}
-body.dark .num-chip{color:#e8e8e8}
-body.dark .top-r .live-chip{color:#cfcfcf}
-body.dark .statusbar{color:#888}
-body.dark .statusbar .green{color:#76c777}
-body.dark .meta,
-body.dark .meta .sep{color:#9a9a9a}
-body.dark .pii{color:#e8e8e8}
-/* Live-call panel ctrl toggles (Recording, Mute, …): the light-peach
-   ``.ctrl.active`` state has higher specificity than the generic
-   ``body.dark .ctrl`` so we need explicit dark variants for active +
-   danger + hover or the panel sits as a cream blob on the dark page. */
-body.dark .ctrl{background:#1c1c1c;color:#e8e8e8;border-color:#2a2a2a}
-body.dark .ctrl:hover{background:#222;border-color:#3a3a3a}
-body.dark .ctrl.active{background:#2a1d15;border-color:var(--peach);color:var(--peach-light)}
-body.dark .ctrl.active:hover{background:#3a2a1f}
-body.dark .ctrl.danger{background:var(--peach);color:#000;border-color:var(--peach-deep)}
-body.dark .ctrl.danger:hover{background:var(--peach-deep);color:#fff;border-color:var(--peach-deep)}
-/* Queued / no-answer / fail pills had cool-blue / cream backgrounds. */
-body.dark .pill.queued{background:#1c1c1c;border-color:#2a2a2a;color:#9a9a9a}
-body.dark .pill.queued::before{background:#666}
-body.dark .pill.fail,
-body.dark .pill.noanswer{background:#2a1d15;border-color:#5a3a2a;color:var(--peach-light)}
-/* New-row flash animation used the light cream end-state — pick a dark
-   neutral so a freshly inserted row in dark mode doesn't flash white. */
-body.dark tbody tr.new-row{animation:slideInDark 400ms var(--easing)}
-@keyframes slideInDark{from{background:#2a1d15;transform:translateY(-4px);opacity:0}to{background:transparent;transform:translateY(0);opacity:1}}
-/* Carrier label colour drift between rows + table empty state. */
-body.dark .empty{color:#666;background:transparent}
-body.dark .car-tw{color:#a8a8a8}
-body.dark .car-dot.tx,body.dark .swatch.tx{background:#5a96f0}
-body.dark .car-dot.pl,body.dark .swatch.pl{background:#A78BFA}
-/* Selected + checked rows on the table — without these explicit dark
-   tones the warm peach overlay clashes with the lifted #1c1c1c card. */
-body.dark tbody tr.checked{background:#2a1d15}
-body.dark tbody tr.checked:hover{background:#3a2a1f}
-body.dark tbody tr.checked.selected{background:#3a2a1f}
-/* Transcript turn body text — default ``#1a1a1a`` is invisible on the
-   ``#1c1c1c`` card. Latency caption already uses ``var(--fg-tertiary)``
-   which resolves to a readable muted grey, but the actual conversation
-   text needs an explicit dark override. Also bump the avatar palette so
-   the user/agent rings stand against the lifted card surface. */
-body.dark .turn .body .txt{color:#e8e8e8}
-body.dark .turn .body .who{color:#a8a8a8}
-body.dark .turn .body .lat{color:#888}
-body.dark .turn .av{border-color:#3a3a3a}
-body.dark .turn.user .av{background:#2a2a2a;color:#fff;border-color:#3a3a3a}
-body.dark .turn.bot .av{color:#000}
-body.dark .turn.tool .av{background:#1a2436;color:#93c5fd;border-color:#264062}
-body.dark .turn.tool .body .who{color:#93c5fd}
-/* Waterfall — the light cream track + near-black STT bar + black value
-   caption all collapse to invisible/illegible on the dark card. Lift
-   them: dark track, soft-white STT, peach LLM (unchanged), cool-blue
-   TTS (unchanged), readable label/value text. */
-body.dark .wf-row .lbl{color:#a8a8a8}
-body.dark .wf-row .track{background:#2a2a2a}
-body.dark .wf-row .seg-bar{background:#e8e8e8}
-body.dark .wf-row .seg-bar.stt{background:#e8e8e8}
-body.dark .wf-row .seg-bar.llm{background:var(--peach)}
-body.dark .wf-row .seg-bar.tts{background:#5a96f0}
-body.dark .wf-row .v{color:#e8e8e8}
-body.dark .wf-legend{color:#a8a8a8}
-/* Stack rows (latency/cost breakdown) used cream-bordered dashed
-   separators; replace with the dark border palette + readable label
-   colour so the "stt / llm / tts" labels don't sink into the bg. */
-body.dark .stack-row{border-color:#2a2a2a}
-body.dark .stack-row:last-child{border-top-color:#2a2a2a}
-body.dark .stack-row .lbl{color:#a8a8a8}
-body.dark .stack-row .v{color:#e8e8e8}
-body.dark .stack-row .saved{color:#7fb787}
-/* latbox label/value were already mostly OK but the ``.warn`` variant
-   used a cream background that clashes — lift it to the warm-dark tone
-   matching the peach metric card. */
-body.dark .latbox.warn{background:#241814;border-color:#5a3a2a}
-body.dark .latbox.warn .v{color:var(--peach-light)}
-/* Patter logo SVGs inherit ``currentColor`` from the ``.brand``
-   ancestor. Force the brand colour to bright white in dark mode so the
-   black wordmark in ``light.svg`` (stroked via ``currentColor``)
-   reverses to a legible mark. */
-body.dark .brand,
-body.dark .patter-logo{color:#f4f4f4}
+/* ── Dark mode ────────────────────────────────────────────────────
+   tokens.css's body.dark block already flips --ink / --ink-2 / --line /
+   --bg-cream / --surface-neu / --surface-glass for every rule above that
+   reads them, and the ink-chip pattern (bg var(--ink), text
+   var(--bg-cream)) inverts for free. What's left here is the handful of
+   surfaces whose box-shadow *recipe* — not just colour — differs between
+   the light glass/neu treatment and the dark one, per the design system's
+   own .glass--dark / .neu--dark rules, plus the two scrollbar/selection
+   details that don't route through a variable. */
+/* .top isn't listed here: its box-shadow is already just the one bottom
+   hairline (inset 0 -1px 0 var(--line)), and --line already flips to
+   --hair-dark via the tokens.css body.dark block — no override needed. */
+body.dark .panel,
+body.dark .rr-card{
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.14),inset 0 -1px 0 rgba(0,0,0,.35),
+             inset 0 0 0 1px var(--hair-dark),var(--e2);
+}
+body.dark .metric,
+body.dark .num-chip,
+body.dark .icon-btn,
+body.dark .btn,
+body.dark .bulk-btn,
+body.dark .ctrl,
+body.dark .statusbar,
+body.dark .brand .tag{box-shadow:var(--neu-dark)}
+body.dark .metric:hover{box-shadow:var(--neu-dark)}
+body.dark .seg,
+body.dark .metrics-panel-h .seg,
+body.dark .row-check,
+body.dark .panel-h .search{box-shadow:inset 4px 4px 12px rgba(0,0,0,.6),inset -4px -4px 12px rgba(255,255,255,.05)}
+body.dark .icon-btn:hover,
+body.dark .btn:hover,
+body.dark .bulk-btn:hover:not(:disabled),
+body.dark .ctrl:hover{box-shadow:-4px -4px 12px rgba(255,255,255,.06),6px 6px 16px rgba(0,0,0,.6)}
+body.dark .transcript::-webkit-scrollbar-thumb{background:var(--hair-dark)}
+body.dark ::selection{background:var(--green-800);color:var(--frost)}

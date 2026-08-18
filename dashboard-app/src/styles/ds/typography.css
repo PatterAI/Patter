@@ -1,0 +1,6 @@
+/* Callable — type. Host Grotesk displays and speaks, DM Mono labels and numbers. */
+:root{
+  --display:"Host Grotesk",ui-sans-serif,system-ui,sans-serif;   /* @kind font  — h1..h3, stats, wordmark */
+  --font:"Host Grotesk",ui-sans-serif,system-ui,sans-serif;      /* body, UI  */
+  --mono:"DM Mono",ui-monospace,SFMono-Regular,Menlo,monospace;   /* @kind font  — kicks, tags, numbers */
+}

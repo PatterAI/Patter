@@ -1,0 +1,43 @@
+/* Callable — colour. Silver grounds, green-black slabs, one chroma: dark electric green. */
+:root{
+  /* grounds — silver, cool, drifting to lilac and sage */
+  --silver-0:#F8F9FB;  --silver-1:#EEF0F4;  --silver-2:#E2E5EB;  --silver-3:#D3D7DF;
+  --lilac:#DCDAE6;     --sage:#D9E2D8;                       /* wash stops only, never fills */
+  --ink-bg:#0B0F0C;    --ink-bg-2:#121815;                   /* green-black slabs */
+
+  /* text */
+  --ink:#0E1210;  --ink-2:#2A312D;  --ink-60:#5B655F;  --ink-40:#8A938E;
+  --frost:#EEF6F0;  --frost-64:rgba(238,246,240,.64);  --frost-40:rgba(238,246,240,.44);  /* text on ink */
+
+  /* the one chroma — dark electric green ("signal") */
+  --green-100:#E1FBEA; --green-200:#B7F5CE; --green-300:#7BEBA6; --green-400:#22D96C;
+  --green-500:#0BB552; --green-600:#00873F; --green-700:#006B33; --green-800:#05502A;
+  --green-900:#063A1F; --green-950:#031A0E;
+  --signal:var(--green-600);        /* PRIMARY FILL. white text = 4.63:1 (AA). on --silver-1 = 4.06:1 (control boundary ok) */
+  --signal-hot:var(--green-400);    /* electric: glow, live dot, kicks + links ON INK ONLY (10.3:1 on ink) */
+  --signal-deep:var(--green-700);   /* hover of the primary fill (fills DARKEN on hover in v2 — that is the neumorphic law) */
+  --signal-ink:var(--green-700);    /* inline links / event rows on light (5.9:1 on --silver-1) */
+  --on-signal:#FFFFFF;
+
+  /* glass */
+  /* Transmissive on purpose: above roughly .70 the fill stops refracting the wash and the
+     panel reads as a flat white card. The blur carries the separation instead. Body copy
+     still clears AA — --ink-2 on --glass-3 over the darkest wash stop is 11.66:1. */
+  --glass-1:rgba(255,255,255,.38);  --glass-2:rgba(255,255,255,.50);  --glass-3:rgba(255,255,255,.62);
+  --glass-dark:rgba(18,24,21,.58);
+  --glass-blur:saturate(1.7) blur(30px); /* @kind other */
+  --rim:rgba(255,255,255,.92);  --rim-lo:rgba(14,18,16,.07);
+  --hair:rgba(14,18,16,.08);    --hair-2:rgba(14,18,16,.14);   --hair-dark:rgba(238,246,240,.14);
+
+  /* neumorphism — paired light + shade, both soft */
+  --neu-light:rgba(255,255,255,.95);  --neu-shade:rgba(20,28,24,.12);
+  --neu:  -6px -6px 16px var(--neu-light), 6px 6px 16px var(--neu-shade);
+  --neu-sm:-3px -3px 8px var(--neu-light), 3px 3px 8px var(--neu-shade);
+  --neu-in: inset 3px 3px 8px var(--neu-shade), inset -3px -3px 8px var(--neu-light);
+  --neu-dark:-4px -4px 12px rgba(255,255,255,.04), 6px 6px 16px rgba(0,0,0,.55);
+
+  /* elevation — two levels + glow */
+  --e1:0 1px 2px rgba(14,18,16,.04), 0 10px 30px rgba(14,18,16,.06);
+  --e2:0 2px 4px rgba(14,18,16,.05), 0 24px 64px rgba(14,18,16,.10);
+  --glow:0 0 0 1px rgba(0,135,63,.18), 0 12px 40px rgba(34,217,108,.28);
+}
