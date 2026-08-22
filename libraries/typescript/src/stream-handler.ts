@@ -8,7 +8,7 @@
  */
 
 import { WebSocket as WSWebSocket } from 'ws';
-import { OpenAIRealtimeAdapter } from './providers/openai-realtime';
+import { OpenAIRealtimeAdapter, OpenAIRealtimeAudioFormat } from './providers/openai-realtime';
 import { ElevenLabsConvAIAdapter } from './providers/elevenlabs-convai';
 import { GeminiLiveAdapter } from './providers/gemini-live';
 import { GeminiCascadeAdapter } from './providers/gemini-cascade';
@@ -920,11 +920,13 @@ export class StreamHandler {
   /**
    * Opt-in wall-clock outbound frame pacer (``agent.pacedOutput``). Null
    * (default) ⇒ every outbound send takes the current direct/event-driven
-   * path (byte-identical). When set, ``startPacer`` (called from
-   * ``initPipeline`` once the output codec is settled) creates one per call
-   * whose ``sendFrame`` runs ``encodePipelineAudio`` + ``bridge.sendAudio``;
-   * each pipeline send-site then enqueues through it. Mirrors Python
-   * ``_pacer``.
+   * path (byte-identical). When set, one is created per call — by
+   * ``startPacer`` (from ``initPipeline``, once ``configureOutboundAudio``
+   * settled the codec) whose ``sendFrame`` runs ``encodePipelineAudio`` +
+   * ``bridge.sendAudio``, or by ``startRealtimePacer`` (from
+   * ``initRealtimeAdapter``, before the greeting) whose ``sendFrame`` writes
+   * the adapter's already-μ-law bytes straight through. Every send-site on
+   * the active path then enqueues through it. Mirrors Python ``_pacer``.
    */
   private pacer: OutboundFramePacer | null = null;
   private pacerTask: Promise<void> | null = null;
@@ -1380,6 +1382,59 @@ export class StreamHandler {
     });
   }
 
+  /**
+   * Create + launch the outbound frame pacer for a REALTIME-engine call. No-op
+   * unless ``pacedOutput`` is enabled and the adapter is one whose outbound
+   * bytes are already carrier-native μ-law 8 kHz
+   * (``realtimePacingEligible``). Called from ``initRealtimeAdapter`` once the
+   * adapter (and therefore the outbound codec / PCM24→μ-law8 transcode) is
+   * settled and BEFORE the ``firstMessage`` greeting is requested, so the
+   * 20 ms wall-clock grid is already running — emitting silence — when the
+   * first greeting frame arrives.
+   *
+   * Without this the realtime engines burst-dump a whole model turn into the
+   * carrier socket far faster than realtime, leaving seconds of backlog in the
+   * carrier playout FIFO that the SDK cannot see: barge-in clears land late
+   * and the caller talks into the backlog.
+   */
+  private startRealtimePacer(): void {
+    if (!this.deps.agent.pacedOutput || this.pacer) return;
+    if (!this.realtimePacingEligible()) return;
+    // The realtime engines hand us μ-law 8 kHz on both Twilio and Telnyx
+    // (Telnyx negotiates stream_bidirectional_codec=PCMU), so the framing is
+    // unconditionally 160 B / 20 ms — no carrier fork like ``startPacer``.
+    this.pacerBytesPerMs = 8;
+    this.pacerSilence = mulawSilenceFrame();
+    this.pacer = new OutboundFramePacer({
+      frameBytes: 160,
+      silenceFrame: this.pacerSilence,
+      sendFrame: async (frame) => this.pacedSendRealtimeFrame(frame),
+    });
+    this.pacerTask = this.pacer.run().catch((err) => {
+      getLogger().debug(`realtime outbound pacer loop error: ${String(err)}`);
+    });
+  }
+
+  /**
+   * True when the active realtime adapter emits carrier-native μ-law 8 kHz on
+   * the shared ``onAdapterAudio`` send site, so the 160 B / 20 ms framing the
+   * pacer imposes is correct. That is the OpenAI-GA family
+   * (``OpenAIRealtime2Adapter`` and its ``XaiRealtimeAdapter`` subclass, which
+   * transcode PCM24 → μ-law 8 internally) plus the v1
+   * ``OpenAIRealtimeAdapter`` on its default ``g711_ulaw`` session format.
+   * Every other realtime adapter (Gemini Live, Gemini Cascade, ElevenLabs
+   * ConvAI) keeps the unpaced direct send — their output format is not pinned
+   * to μ-law 8 kHz, so re-framing them at 160 B would corrupt the wire.
+   */
+  private realtimePacingEligible(): boolean {
+    const adapter = this.adapter;
+    if (!(adapter instanceof OpenAIRealtimeAdapter)) return false;
+    // ``audioFormat`` is protected on the adapter; narrow to the one field
+    // this gate reads rather than widening the adapter's public surface.
+    const format = (adapter as unknown as { audioFormat?: string }).audioFormat;
+    return format === OpenAIRealtimeAudioFormat.G711_ULAW;
+  }
+
   /** Stop + await the pacer loop (idempotent; safe at teardown). */
   private async stopPacer(): Promise<void> {
     const pacer = this.pacer;
@@ -1399,18 +1454,39 @@ export class StreamHandler {
   /**
    * Pacer ``sendFrame`` callback: hand one paced frame to the carrier via the
    * unchanged per-carrier transcode/envelope (``encodePipelineAudio`` +
-   * ``bridge.sendAudio``). Real (audio-bearing) frames advance the emitted-
-   * playback cursor and anchor ``firstAudioSentAt``; the gap-filling silence
-   * frame (identity-compared) does neither.
+   * ``bridge.sendAudio``). See ``notePacedFrame`` for the per-frame
+   * bookkeeping.
    */
   private async pacedSendFrame(frame: Buffer): Promise<void> {
     const encoded = this.encodePipelineAudio(frame);
     this.deps.bridge.sendAudio(this.ws, encoded, this.streamSid);
-    if (frame !== this.pacerSilence) {
-      this.pacedEmittedMs += FRAME_MS;
-      this.refreshPacedBacklog();
-      this.markFirstAudioSent();
-    }
+    this.notePacedFrame(frame);
+  }
+
+  /**
+   * Pacer ``sendFrame`` callback for the REALTIME engines: the adapter has
+   * already produced carrier-native μ-law 8 kHz (see
+   * ``OpenAIRealtime2Adapter.translateGaAudioDelta``), so the frame is
+   * base64-enveloped and written straight through — no
+   * ``encodePipelineAudio`` transcode, exactly as the unpaced realtime send
+   * site does. Bookkeeping is shared with the pipeline pacer.
+   */
+  private async pacedSendRealtimeFrame(frame: Buffer): Promise<void> {
+    this.deps.bridge.sendAudio(this.ws, frame.toString('base64'), this.streamSid);
+    this.notePacedFrame(frame);
+  }
+
+  /**
+   * Per-frame bookkeeping shared by both pacer ``sendFrame`` callbacks. Real
+   * (audio-bearing) frames advance the emitted-playback cursor and anchor
+   * ``firstAudioSentAt``; the gap-filling silence frame (identity-compared)
+   * does neither.
+   */
+  private notePacedFrame(frame: Buffer): void {
+    if (frame === this.pacerSilence) return;
+    this.pacedEmittedMs += FRAME_MS;
+    this.refreshPacedBacklog();
+    this.markFirstAudioSent();
   }
 
   /**
@@ -6350,6 +6426,13 @@ export class StreamHandler {
       }
     }
 
+    // Opt-in wall-clock pacing: launch the outbound frame pacer now that the
+    // adapter — and with it the outbound codec / PCM24→μ-law8 transcode — is
+    // settled, and BEFORE the greeting below is requested so the 20 ms grid is
+    // already running (emitting silence) when the first greeting frame lands.
+    // No-op when ``pacedOutput`` is off or the adapter is not μ-law-native.
+    this.startRealtimePacer();
+
     if (this.deps.agent.firstMessage) {
       // Start measuring latency for the first turn (firstMessage → first audio byte)
       this.metricsAcc.startTurn();
@@ -6521,6 +6604,13 @@ export class StreamHandler {
     // input), start a new turn now so latency is still measured.
     if (!this.responseAudioStarted) {
       this.responseAudioStarted = true;
+      // Fresh agent turn under pacing — re-anchor the paced playback cursors.
+      // This is the realtime analogue of ``beginSpeaking``'s per-turn reset on
+      // the pipeline path (realtime never calls ``beginSpeaking``).
+      if (this.pacer) {
+        this.turnPlaybackTotalMs = 0;
+        this.pacedEmittedMs = 0;
+      }
       if (this.metricsAcc.turnActive === false) this.metricsAcc.startTurn();
       this.metricsAcc.recordTtsFirstByte();
       // Speech-event: first wire-time chunk of this agent turn.
@@ -6555,8 +6645,17 @@ export class StreamHandler {
       );
     }
     const outAudio = eventData;
-    this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
-    this.markFirstAudioSent();
+    if (this.pacer) {
+      // Paced (``pacedOutput`` + a μ-law-native realtime adapter): queue the
+      // chunk and let the wall-clock loop meter it onto the wire in 20 ms
+      // frames. ``enqueuePaced`` advances ``turnPlaybackTotalMs``;
+      // ``notePacedFrame`` advances ``pacedEmittedMs`` and anchors
+      // ``firstAudioSentAt`` as each real frame actually leaves.
+      this.enqueuePaced(outAudio);
+    } else {
+      this.deps.bridge.sendAudio(this.ws, outAudio.toString('base64'), this.streamSid);
+      this.markFirstAudioSent();
+    }
     // Send mark for barge-in accuracy.
     this.chunkCount++;
     this.deps.bridge.sendMark(this.ws, `audio_${this.chunkCount}`, this.streamSid);
@@ -6954,6 +7053,19 @@ export class StreamHandler {
       }
     }
     this.deps.bridge.sendClear(this.ws, this.streamSid);
+    // Under pacing the not-yet-emitted backlog sits in the pacer's own queue,
+    // which ``sendClear`` cannot reach — drop it in the same beat so no stale
+    // (now-cancelled) audio is emitted after the clear, and re-anchor the
+    // enqueue cursor to what was actually emitted. ``pacedEmittedMs`` is then
+    // the exact heard position and bounds ``conversation.item.truncate``'s
+    // ``audio_end_ms`` more tightly than the adapter's wall-clock cap.
+    let pacedHeardMs: number | undefined;
+    if (this.pacer) {
+      pacedHeardMs = this.pacedEmittedMs;
+      this.pacer.clear();
+      this.turnPlaybackTotalMs = this.pacedEmittedMs;
+      this.refreshPacedBacklog();
+    }
     if (clientManaged) {
       // LEGACY client-managed barge-in. Stamp barge-in detection (mirrors the
       // pipeline path) so the post-barge-in hygiene gate in _computeTurnLatency
@@ -6961,7 +7073,7 @@ export class StreamHandler {
       // the FULL cancel (truncate + response.cancel) because
       // ``interrupt_response: false`` means the server won't cancel for us.
       this.metricsAcc.recordBargeinDetected();
-      (this.adapter as OpenAIRealtimeAdapter).cancelResponse();
+      (this.adapter as OpenAIRealtimeAdapter).cancelResponse(pacedHeardMs);
     } else if (isEngine) {
       // SERVER-MANAGED barge-in. ``interrupt_response: true`` → the server
       // already cancelled the response on its own ``speech_started``; sending
@@ -6971,7 +7083,7 @@ export class StreamHandler {
       // assistant text doesn't linger on the conversation. NO gate, NO
       // recordBargeinDetected, NO anchorUserSpeechStart (the engine turn stays
       // anchored at speech_stopped).
-      (this.adapter as OpenAIRealtimeAdapter).truncate();
+      (this.adapter as OpenAIRealtimeAdapter).truncate(pacedHeardMs);
     }
     // ConvAI (and any non-engine adapter): sendClear only, already done above.
     this.metricsAcc.recordTurnInterrupted();

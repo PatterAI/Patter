@@ -1110,14 +1110,19 @@ export interface AgentOptions {
    */
   readonly contextTokenBudget?: number;
   /**
-   * Opt-in wall-clock outbound frame pacing (pipeline mode). Omitted /
-   * `false` (default) keeps the event-driven send: each TTS/pipeline chunk
+   * Opt-in wall-clock outbound frame pacing (pipeline mode and the OpenAI-GA
+   * realtime engines — `openai_realtime`, `openai_realtime_2`, `xai_realtime`
+   * — whose adapters emit carrier-native mu-law 8 kHz). Omitted / `false`
+   * (default) keeps the event-driven send: each TTS/pipeline/realtime chunk
    * is written to the carrier the instant it is produced (bursty). When
    * `true`, outbound audio is re-framed into fixed 20 ms frames and emitted
    * on a monotonic wall-clock grid (silence fills the gaps), which keeps the
-   * carrier jitter buffer primed and the playback cursor exact. Byte-identical
-   * to prior behaviour when `false` — the pacer is never engaged. Mirrors
-   * Python `Agent.paced_output`. See `OutboundFramePacer`.
+   * carrier jitter buffer primed and the playback cursor exact — so a
+   * barge-in `clear` lands against a backlog the SDK can actually see. Other
+   * realtime adapters (Gemini Live, Gemini Cascade, ElevenLabs ConvAI) keep
+   * the direct send regardless. Byte-identical to prior behaviour when
+   * `false` — the pacer is never engaged. Mirrors Python
+   * `Agent.paced_output`. See `OutboundFramePacer`.
    */
   readonly pacedOutput?: boolean;
   /**

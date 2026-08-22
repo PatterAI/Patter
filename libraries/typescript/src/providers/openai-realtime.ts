@@ -818,8 +818,15 @@ export class OpenAIRealtimeAdapter {
    * No-op when no response is in flight, keeping it idempotent across stale
    * callers. Resets per-response tracking so post-truncate late frames and
    * the next response start clean.
+   *
+   * @param playedMs Optional caller-supplied heard position (ms) that bounds
+   *   `audio_end_ms` more tightly than the wall-clock cap. Under
+   *   `agent.pacedOutput` the stream handler knows exactly how many ms of
+   *   REAL audio the frame pacer emitted this turn, which is stricter than
+   *   elapsed wall-clock (the pacer emits silence across generation gaps).
+   *   Omitted (default) keeps the byte-identical prior bounding.
    */
-  truncate(): void {
+  truncate(playedMs?: number): void {
     if (!this.ws) return;
     if (!this.currentResponseItemId) {
       // No response in flight — nothing to truncate.
@@ -829,6 +836,9 @@ export class OpenAIRealtimeAdapter {
     if (this.currentResponseFirstAudioAt !== null) {
       const elapsedMs = Date.now() - this.currentResponseFirstAudioAt;
       audioEndMs = Math.min(audioEndMs, Math.max(elapsedMs, 0));
+    }
+    if (playedMs !== undefined) {
+      audioEndMs = Math.min(audioEndMs, Math.max(playedMs, 0));
     }
     try {
       this.ws.send(JSON.stringify({
@@ -858,9 +868,10 @@ export class OpenAIRealtimeAdapter {
    * extra ``response.cancel`` would be redundant / rejected.
    *
    * Truncation bounding semantics are identical to {@link truncate}; see its
-   * doc comment for the ``audio_end_ms`` wall-clock cap rationale.
+   * doc comment for the ``audio_end_ms`` wall-clock cap rationale and for
+   * ``playedMs``, which is forwarded unchanged.
    */
-  cancelResponse(): void {
+  cancelResponse(playedMs?: number): void {
     if (!this.ws) return;
     // No response in flight — nothing to cancel. OpenAI Realtime GA rejects an
     // unconditional ``response.cancel`` with ``response_cancel_not_active``,
@@ -873,7 +884,7 @@ export class OpenAIRealtimeAdapter {
     }
     // Truncate first (emits conversation.item.truncate and resets tracking),
     // then send the explicit cancel.
-    this.truncate();
+    this.truncate(playedMs);
     this.ws.send(JSON.stringify({ type: 'response.cancel' }));
   }
 
