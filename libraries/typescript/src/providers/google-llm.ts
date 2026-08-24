@@ -25,19 +25,29 @@ import {
 import { getLogger } from '../logger';
 import { PatterConnectionError } from '../errors';
 
-/** Known Google Gemini chat models. */
+/**
+ * Known Google Gemini chat models.
+ *
+ * Catalog verified against https://ai.google.dev/gemini-api/docs/models as of
+ * 2026-08-24. `gemini-2.0-flash`, `gemini-2.0-flash-lite`,
+ * `gemini-2.0-flash-exp`, `gemini-1.5-flash`, and `gemini-1.5-pro` are shut
+ * down and intentionally not listed.
+ */
 export const GoogleModel = {
+  GEMINI_3_7_FLASH: 'gemini-3.7-flash',
+  GEMINI_3_6_FLASH: 'gemini-3.6-flash',
+  GEMINI_3_5_FLASH: 'gemini-3.5-flash',
+  GEMINI_3_5_FLASH_LITE: 'gemini-3.5-flash-lite',
+  GEMINI_3_1_FLASH_LITE: 'gemini-3.1-flash-lite',
+  GEMINI_3_1_PRO_PREVIEW: 'gemini-3.1-pro-preview',
+  GEMINI_3_FLASH_PREVIEW: 'gemini-3-flash-preview',
   GEMINI_2_5_FLASH: 'gemini-2.5-flash',
   GEMINI_2_5_PRO: 'gemini-2.5-pro',
-  GEMINI_2_0_FLASH: 'gemini-2.0-flash',
-  GEMINI_2_0_FLASH_LITE: 'gemini-2.0-flash-lite',
-  GEMINI_1_5_FLASH: 'gemini-1.5-flash',
-  GEMINI_1_5_PRO: 'gemini-1.5-pro',
 } as const;
 /** Union of {@link GoogleModel} string values. */
 export type GoogleModel = (typeof GoogleModel)[keyof typeof GoogleModel];
 
-const DEFAULT_MODEL: string = GoogleModel.GEMINI_2_5_FLASH;
+const DEFAULT_MODEL: string = GoogleModel.GEMINI_3_5_FLASH_LITE;
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 /** Constructor options for {@link GoogleLLMProvider}. */

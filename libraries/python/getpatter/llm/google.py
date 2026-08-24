@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import ClassVar
 
+from getpatter.providers.google_llm import _DEFAULT_MODEL
 from getpatter.providers.google_llm import GoogleLLMProvider as _GoogleLLM
 
 __all__ = ["LLM"]
@@ -27,7 +28,7 @@ class LLM(_GoogleLLM):
         self,
         api_key: str | None = None,
         *,
-        model: str = "gemini-2.5-flash",
+        model: str = _DEFAULT_MODEL,
         **kwargs,
     ) -> None:
         # Prefer ``GEMINI_API_KEY`` (more specific), fall back to

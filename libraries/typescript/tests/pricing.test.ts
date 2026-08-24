@@ -10,6 +10,7 @@ import {
   calculateLlmCost,
   llmPricing,
 } from '../src/pricing';
+import { GoogleModel, GoogleLLMProvider } from '../src/providers/google-llm';
 
 describe('DEFAULT_PRICING', () => {
   it('includes all expected providers', () => {
@@ -446,5 +447,76 @@ describe('LLM cost billing — Cerebras + Groq silent under-billing regression',
     expect(specCost).toBeCloseTo(0.99, 6);
     expect(verCost).toBeCloseTo(0.79, 6);
     expect(specCost).toBeGreaterThan(verCost);
+  });
+});
+
+describe('Google Gemini LLM pricing — 3.x catalog refresh', () => {
+  // 2026-08-24: Gemini 3.x GA wave (3.7/3.6/3.5/3.5-lite/3.1-lite/3.1-pro-
+  // preview/3-flash-preview) replaces the retired 2.0/1.5 family in
+  // GoogleModel. Rates verified against
+  // https://ai.google.dev/gemini-api/docs/pricing (2026-08-24).
+
+  it('every GoogleModel enum value has a pricing entry (no $0 holes)', () => {
+    // Mirrors libraries/typescript/src/providers/google-llm.ts GoogleModel.
+    const googleModels = Object.values(GoogleModel);
+    for (const model of googleModels) {
+      const cost = calculateLlmCost('google', model, 10_000, 10_000);
+      expect(cost, `google model ${model} silently billed $0`).toBeGreaterThan(0);
+      expect(llmPricing.google[model], `missing rate for ${model}`).toBeDefined();
+    }
+  });
+
+  it('default model is gemini-3.5-flash-lite', () => {
+    expect(GoogleModel.GEMINI_3_5_FLASH_LITE).toBe('gemini-3.5-flash-lite');
+  });
+
+  it('GoogleLLMProvider resolves to gemini-3.5-flash-lite when no model is passed', () => {
+    const provider = new GoogleLLMProvider({ apiKey: 'test-key' });
+    expect(provider.model).toBe(GoogleModel.GEMINI_3_5_FLASH_LITE);
+  });
+
+  it('removed models (2.0/1.5 family) are no longer GoogleModel enum values', () => {
+    const values: readonly string[] = Object.values(GoogleModel);
+    expect(values).not.toContain('gemini-2.0-flash');
+    expect(values).not.toContain('gemini-2.0-flash-lite');
+    expect(values).not.toContain('gemini-2.0-flash-exp');
+    expect(values).not.toContain('gemini-1.5-flash');
+    expect(values).not.toContain('gemini-1.5-pro');
+  });
+
+  it('gemini-3.1-flash-live-preview text rate is corrected to 0.75/4.50 (was wrongly 0.30/2.50)', () => {
+    const cost = calculateLlmCost(
+      'google',
+      'gemini-3.1-flash-live-preview',
+      1_000_000,
+      1_000_000,
+    );
+    expect(cost).toBeCloseTo(0.75 + 4.5, 6);
+  });
+
+  it('gemini-2.5-flash-native-audio-preview dated snapshots resolve via longest-prefix match', () => {
+    const cost09 = calculateLlmCost(
+      'google',
+      'gemini-2.5-flash-native-audio-preview-09-2025',
+      1_000_000,
+      0,
+    );
+    const cost12 = calculateLlmCost(
+      'google',
+      'gemini-2.5-flash-native-audio-preview-12-2025',
+      1_000_000,
+      0,
+    );
+    expect(cost09).toBeCloseTo(0.5, 6);
+    expect(cost12).toBeCloseTo(0.5, 6);
+  });
+
+  it('gemini_cascade Live-leg rate is corrected to 0.75/4.50 (was wrongly 0.30/2.50)', () => {
+    const cascade = DEFAULT_PRICING.gemini_cascade;
+    expect(cascade.text_input_per_token).toBeCloseTo(0.00000075, 12);
+    expect(cascade.text_output_per_token).toBeCloseTo(0.0000045, 12);
+    const liveLeg = cascade.models?.['gemini-3.1-flash-live-preview'];
+    expect(liveLeg?.text_input_per_token).toBeCloseTo(0.00000075, 12);
+    expect(liveLeg?.text_output_per_token).toBeCloseTo(0.0000045, 12);
   });
 });

@@ -110,14 +110,19 @@ Pricing in USD per 1M tokens.
 
 | Model | Input | Output | Notes |
 |---|---|---|---|
-| `gemini-2.5-flash` (default) | $0.30 | $2.50 | Best price/perf for voice. |
-| `gemini-2.5-pro` | $1.25 | $10.00 | Highest quality. |
-| `gemini-2.0-flash` | n/a | n/a | Older fast model. |
-| `gemini-2.0-flash-lite` | n/a | n/a | Lightweight 2.0. |
-| `gemini-1.5-flash` | n/a | n/a | Legacy fast model. |
-| `gemini-1.5-pro` | n/a | n/a | Legacy pro model. |
+| `gemini-3.7-flash` | $0.75 | $3.75 | Latest, most capable Flash — GA 2026-08-13. Steps up to $1.50 / $7.50 on 2027-01-01. |
+| `gemini-3.6-flash` | $0.75 | $3.75 | Same rate card as 3.7-flash. Steps up to $1.50 / $7.50 on 2027-01-01. |
+| `gemini-3.5-flash` | $1.50 | $9.00 | |
+| `gemini-3.5-flash-lite` (default) | $0.30 | $2.50 | Best price/perf for voice. |
+| `gemini-3.1-flash-lite` | $0.25 | $1.50 | |
+| `gemini-3.1-pro-preview` | $2.00 | $12.00 | Preview. Rate for prompts ≤200k tokens. |
+| `gemini-3-flash-preview` | $0.50 | $3.00 | Preview. |
+| `gemini-2.5-flash` | $0.30 | $2.50 | |
+| `gemini-2.5-pro` | $1.25 | $10.00 | Highest quality. Rate for prompts ≤200k tokens. |
 
-For the speech-to-speech variant `gemini-live-2.5-flash-native-audio` (input $0.30 / output $2.50), see the [Engines](/typescript-sdk/engines) page — it is a separate Realtime adapter, not a chat-completions model.
+`gemini-2.0-flash`, `gemini-2.0-flash-lite`, `gemini-1.5-flash`, and `gemini-1.5-pro` are shut down and no longer supported.
+
+For the speech-to-speech variants — `gemini-3.1-flash-live-preview` (text in $0.75 / out $4.50, audio in $3.00/1M tokens = $0.005/min / out $12.00/1M tokens = $0.018/min) and `gemini-2.5-flash-native-audio-preview` (text in $0.50 / out $2.00, audio in $3.00 / out $12.00) — see the [Engines](/typescript-sdk/engines) page; they are separate Realtime adapters, not chat-completions models.
 
 ## Environment variables
 
@@ -131,7 +136,7 @@ For the speech-to-speech variant `gemini-live-2.5-flash-native-audio` (input $0.
 | Option | Default | Notes |
 |---|---|---|
 | `apiKey` / `api_key` | `undefined` | Reads `GEMINI_API_KEY`, then `GOOGLE_API_KEY`. |
-| `model` | `"gemini-2.5-flash"` | Any Gemini chat model id. |
+| `model` | `"gemini-3.5-flash-lite"` | Any Gemini chat model id. |
 | `baseUrl` / `base_url` | unset | Override the Generative Language API endpoint (rarely needed). |
 | `temperature` | unset | Optional sampling temperature. |
 | `maxOutputTokens` / `max_output_tokens` | unset | Output token cap. |

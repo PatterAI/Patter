@@ -2,6 +2,31 @@
 
 ### Added
 
+- **Google Gemini model catalog refreshed to the 3.x generation, `GeminiLiveModel` default
+  moved to `gemini-3.1-flash-live-preview`, and pricing corrected across both SDKs**
+  (`GoogleModel` / `GoogleLLM` in `libraries/{python,typescript}/getpatter/providers/google_llm.*`,
+  `GeminiLiveModel` / `GeminiLiveAdapter` in `.../providers/gemini_live.*`, `pricing.py` /
+  `pricing.ts`):
+  - **`GoogleModel`** now lists `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`,
+    `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-3.1-pro-preview`, and
+    `gemini-3-flash-preview` alongside `gemini-2.5-flash` / `gemini-2.5-pro`. **Behaviour
+    change:** the default chat model for `GoogleLLM` moves from `gemini-2.5-flash` to
+    `gemini-3.5-flash-lite`. `gemini-2.0-flash`, `gemini-2.0-flash-lite`,
+    `gemini-2.0-flash-exp`, `gemini-1.5-flash`, and `gemini-1.5-pro` are shut down upstream
+    and **removed** from the enum in both SDKs.
+  - **`GeminiLiveModel`** gains `NATIVE_AUDIO_PREVIEW_12_2025`
+    (`gemini-2.5-flash-native-audio-preview-12-2025`). **Behaviour change:** the default
+    `GeminiLiveAdapter` model moves from the dated `gemini-2.5-flash-native-audio-preview-09-2025`
+    preview to `gemini-3.1-flash-live-preview`. `LIVE_2_0_FLASH_EXP`
+    (`gemini-2.0-flash-exp`) is **removed** — it was retired upstream in Dec 2024.
+  - **Pricing corrected**: `gemini-3.1-flash-live-preview`'s text rate was wrongly
+    `$0.30`/`$2.50` per 1M tokens (and absent from the Python table entirely) — now
+    `$0.75`/`$4.50`, matching the TS `gemini_cascade` Live-leg default. New chat-model rows
+    added for every 3.x id with `cache_read` rates; audio-modality Live API rates remain
+    unmodelled (text-only cost shape, flagged in code comments as a pre-existing gap).
+  - Docs (`docs/{python,typescript}-sdk/{llm,providers/google,providers/gemini-live}.mdx`)
+    updated with the new defaults, catalog, and pricing tables.
+
 - **xAI (Grok) voice catalog wired into both SDKs** — the 26 built-in Grok
   voices (`eve` default, `ara`, `rex`, `sal`, `leo`, `carina`, ...) are now a
   typed, immutable catalog instead of docs-only prose:

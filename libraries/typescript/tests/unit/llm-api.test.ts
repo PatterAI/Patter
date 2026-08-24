@@ -163,6 +163,11 @@ describe("llm/google", () => {
     expect(() => new googleLlm.LLM()).toThrow(/GEMINI_API_KEY/);
     expect(() => new googleLlm.LLM()).toThrow(/GOOGLE_API_KEY/);
   });
+
+  it("LLM defaults to gemini-3.5-flash-lite when no model is passed (3.x catalog refresh)", () => {
+    const llm = new googleLlm.LLM({ apiKey: "AIza-explicit" });
+    expect(llm.model).toBe("gemini-3.5-flash-lite");
+  });
 });
 
 // ---------------------------------------------------------------------------

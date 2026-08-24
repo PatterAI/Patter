@@ -201,3 +201,12 @@ async def test_non_flash_live_declaration_has_no_behavior(monkeypatch) -> None:
     # 2.5 native-audio is byte-identical on the wire — no behavior key.
     assert "behavior" not in decls[0]
     await adapter.close()
+
+
+@pytest.mark.unit
+def test_default_model_is_gemini_3_1_flash_live_preview() -> None:
+    """3.x catalog refresh (2026-08-24): no explicit model resolves to the
+    current audio-to-audio Live model, not the retired 2.5 dated preview."""
+    adapter = GeminiLiveAdapter(api_key="test-key")
+    assert adapter.model == GeminiLiveModel.LIVE_3_1_FLASH_PREVIEW
+    assert adapter.model == "gemini-3.1-flash-live-preview"

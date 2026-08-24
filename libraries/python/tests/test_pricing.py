@@ -13,6 +13,7 @@ from getpatter.pricing import (
     calculate_tts_cost,
     merge_pricing,
 )
+from getpatter.providers.google_llm import GoogleLLMProvider, GoogleModel
 
 
 class TestMergePricing:
@@ -501,3 +502,56 @@ class TestLLMCostBilling:
         assert spec_cost == pytest.approx(0.99)
         assert ver_cost == pytest.approx(0.79)
         assert spec_cost > ver_cost
+
+
+class TestGoogleGeminiPricingCatalogRefresh:
+    """Gemini 3.x catalog refresh (2026-08-24).
+
+    Rates verified against https://ai.google.dev/gemini-api/docs/pricing;
+    model catalog verified against
+    https://ai.google.dev/gemini-api/docs/models. 3.7/3.6/3.5/3.5-lite/
+    3.1-lite/3.1-pro-preview/3-flash-preview replace the retired 2.0/1.5
+    family in ``GoogleModel``.
+    """
+
+    def test_every_google_model_enum_value_has_a_pricing_entry(self):
+        """Every model in the GoogleModel enum has a pricing entry (no $0 holes)."""
+        for model in GoogleModel:
+            cost = calculate_llm_cost("google", model.value, 10_000, 10_000)
+            assert cost > 0.0, f"google model {model.value!r} silently billed $0"
+            assert model.value in LLM_PRICING["google"], f"missing rate for {model.value!r}"
+
+    def test_default_model_is_gemini_3_5_flash_lite(self):
+        assert GoogleModel.GEMINI_3_5_FLASH_LITE.value == "gemini-3.5-flash-lite"
+
+    def test_google_llm_provider_resolves_to_default_when_no_model_passed(self):
+        provider = GoogleLLMProvider(api_key="test-key")
+        assert provider._model == GoogleModel.GEMINI_3_5_FLASH_LITE
+
+    def test_removed_models_are_no_longer_enum_values(self):
+        """2.0/1.5 family and the shut-down 3-pro-preview must not resurface."""
+        values = {m.value for m in GoogleModel}
+        assert "gemini-2.0-flash" not in values
+        assert "gemini-2.0-flash-lite" not in values
+        assert "gemini-2.0-flash-exp" not in values
+        assert "gemini-1.5-flash" not in values
+        assert "gemini-1.5-pro" not in values
+        assert "gemini-3-pro-preview" not in values
+
+    def test_gemini_3_1_flash_live_preview_text_rate_corrected(self):
+        """Was wrongly 0.30/2.50 (and absent from Python entirely); now 0.75/4.50."""
+        cost = calculate_llm_cost(
+            "google", "gemini-3.1-flash-live-preview", 1_000_000, 1_000_000
+        )
+        assert cost == pytest.approx(0.75 + 4.50)
+
+    def test_gemini_2_5_flash_native_audio_preview_dated_snapshots_resolve(self):
+        """Both dated Live-API snapshots resolve via longest-prefix match."""
+        cost_09 = calculate_llm_cost(
+            "google", "gemini-2.5-flash-native-audio-preview-09-2025", 1_000_000, 0
+        )
+        cost_12 = calculate_llm_cost(
+            "google", "gemini-2.5-flash-native-audio-preview-12-2025", 1_000_000, 0
+        )
+        assert cost_09 == pytest.approx(0.50)
+        assert cost_12 == pytest.approx(0.50)

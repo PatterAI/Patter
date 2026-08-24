@@ -52,6 +52,10 @@ const INBOUND_GAIN = 2;
 /** Model ID for Gemini 3.1 Flash Live (audio-in → audio-out, emotion-aware). */
 export const GEMINI_LIVE_3_1_FLASH_PREVIEW = 'gemini-3.1-flash-live-preview';
 
+/** Model ID for the newer dated native-audio Live snapshot (released 2025-12-12). */
+export const GEMINI_LIVE_NATIVE_AUDIO_PREVIEW_12_2025 =
+  'gemini-2.5-flash-native-audio-preview-12-2025';
+
 /**
  * Whether a Gemini Live model must be addressed on the `v1alpha` channel.
  *
@@ -206,10 +210,11 @@ export class GeminiLiveAdapter {
     this.options = options;
     // gemini-2.0-flash-exp was experimental preview retired Dec 2024.
     // gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
-    // Current native-audio live model (v1alpha-only) is the dated preview.
+    // Current audio-to-audio Live model (v1alpha-only) is gemini-3.1-flash-
+    // live-preview, released 2026-03-26 (preview) — verified against
+    // https://ai.google.dev/gemini-api/docs/changelog as of 2026-08-24.
     // Callers can override via GeminiLive({ model: ... }).
-    // Default model — see https://ai.google.dev/gemini-api/docs/live
-    this.model = options.model ?? 'gemini-2.5-flash-native-audio-preview-09-2025';
+    this.model = options.model ?? GEMINI_LIVE_3_1_FLASH_PREVIEW;
     this.voice = options.voice ?? 'Puck';
     this.instructions = options.instructions ?? '';
     this.language = options.language ?? 'en-US';

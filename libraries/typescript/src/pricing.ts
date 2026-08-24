@@ -15,6 +15,10 @@
  *
  *     new Patter({ pricing: { elevenlabs: { models: { my_custom: { price: 0.075 } } } } })
  */
+// TODO(pricing-split): module is 887 lines, already over the 800-line file
+// cap (856 lines pre-catalog-refresh). Split by provider group before the
+// next pricing addition -- deferred here because a real split touches many
+// import sites, out of scope for a catalog refresh.
 
 /** Pricing table version identifier, updated in lockstep with the Python SDK. */
 export const PRICING_VERSION = '2026.3';
@@ -407,20 +411,20 @@ export const DEFAULT_PRICING: Record<string, ProviderPricing> = {
   },
   // Gemini Cascade — two-leg architecture: Live leg (text in/out per token)
   // and TTS leg (text-in / audio-out per token). Rates per 1M tokens (USD).
-  // Sources: Google AI Studio pricing page (verified 2026-06-18).
-  //   gemini-3.1-flash-live-preview: $0.30/M text input, $2.50/M text output.
+  // Sources: https://ai.google.dev/gemini-api/docs/pricing (verified 2026-08-24).
+  //   gemini-3.1-flash-live-preview: $0.75/M text input, $4.50/M text output.
   //   gemini-3.1-flash-tts-preview:  $1.00/M text input, $20.00/M audio output.
   // Provider defaults represent the Live leg; TTS leg rates are per-model.
   gemini_cascade: {
     unit: PricingUnit.TOKEN,
     // Live leg defaults (gemini-3.1-flash-live-preview): text in/out only.
-    text_input_per_token: 0.00000030,   // $0.30 per 1M text input tokens
-    text_output_per_token: 0.0000025,   // $2.50 per 1M text output tokens
+    text_input_per_token: 0.00000075,   // $0.75 per 1M text input tokens
+    text_output_per_token: 0.0000045,   // $4.50 per 1M text output tokens
     models: {
       // Live STT+brain leg (TEXT modality — no audio output from this leg).
       'gemini-3.1-flash-live-preview': {
-        text_input_per_token: 0.00000030,
-        text_output_per_token: 0.0000025,
+        text_input_per_token: 0.00000075,
+        text_output_per_token: 0.0000045,
       },
       // TTS voice-synthesis leg: text in → audio out.
       'gemini-3.1-flash-tts-preview': {
@@ -748,11 +752,42 @@ export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
       cache_write: 1.25,
     },
   },
+  // Google Gemini — chat/completion LLM per-1M-token rates (input / output /
+  // cache_read = context-caching read rate). Source:
+  // https://ai.google.dev/gemini-api/docs/pricing (verified 2026-08-24).
+  // gemini-2.0-flash, gemini-2.0-flash-lite, gemini-2.0-flash-exp,
+  // gemini-1.5-flash, and gemini-1.5-pro are shut down and intentionally
+  // absent — see https://ai.google.dev/gemini-api/docs/models.
   google: {
-    'gemini-2.5-pro': { input: 1.25, output: 10.0 },
-    'gemini-2.5-flash': { input: 0.30, output: 2.50 },
+    // 3.7-flash and 3.6-flash list a two-tier rate: current tier below,
+    // stepping up to input 1.50 / output 7.50 / cache_read 0.15 on 2027-01-01.
+    'gemini-3.7-flash': { input: 0.75, output: 3.75, cache_read: 0.075 },
+    'gemini-3.6-flash': { input: 0.75, output: 3.75, cache_read: 0.075 },
+    'gemini-3.5-flash': { input: 1.50, output: 9.00, cache_read: 0.15 },
+    'gemini-3.5-flash-lite': { input: 0.30, output: 2.50, cache_read: 0.03 },
+    'gemini-3.1-flash-lite': { input: 0.25, output: 1.50, cache_read: 0.025 },
+    // <=200k-token prompts; >200k steps up to 4.00 / 18.00 / 0.40. Prompt
+    // length isn't threaded into calculateLlmCost, so only the <=200k tier
+    // is modelled.
+    'gemini-3.1-pro-preview': { input: 2.00, output: 12.00, cache_read: 0.20 },
+    'gemini-3-flash-preview': { input: 0.50, output: 3.00, cache_read: 0.05 },
+    'gemini-2.5-pro': { input: 1.25, output: 10.0, cache_read: 0.125 },
+    'gemini-2.5-flash': { input: 0.30, output: 2.50, cache_read: 0.03 },
+    // Pre-existing entry — no known model id matches or prefix-matches this
+    // key; left untouched (dead/unreachable via calculateLlmCost, out of
+    // this refresh's scope).
     'gemini-live-2.5-flash-native-audio': { input: 0.30, output: 2.50 },
-    'gemini-3.1-flash-live-preview': { input: 0.30, output: 2.50 },
+    // Live API TEXT rate for the audio-to-audio model (used if chat-style
+    // usage is ever metered against this model id). AUDIO-modality rates
+    // ($3.00/1M in = $0.005/min, $12.00/1M out = $0.018/min) have no slot
+    // here: LlmModelPricing is text-only, and metrics.ts _computeCost has no
+    // gemini_live cost branch (GeminiLiveAdapter never surfaces usage either)
+    // — gap, not plumbed by this refresh. Was wrongly 0.30/2.50 before.
+    'gemini-3.1-flash-live-preview': { input: 0.75, output: 4.50 },
+    // Native-audio Live model (both dated snapshots resolve here via
+    // longest-prefix match). TEXT rate only — same audio-modality gap as
+    // above (audio in 3.00 / audio out 12.00 per 1M tokens unmodelled).
+    'gemini-2.5-flash-native-audio-preview': { input: 0.50, output: 2.00 },
   },
   groq: {
     // Rates as of 2026-05-08; verify against groq.com/pricing.

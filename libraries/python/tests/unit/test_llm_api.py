@@ -151,6 +151,14 @@ class TestProviderWrappers:
         with pytest.raises(ValueError, match="GEMINI_API_KEY"):
             GoogleLLM()
 
+    @_skip_if_no_google
+    def test_google_default_model_is_gemini_3_5_flash_lite(self, monkeypatch) -> None:
+        """3.x catalog refresh (2026-08-24): no explicit model resolves to
+        the new default, not the retired gemini-2.5-flash."""
+        monkeypatch.setenv("GEMINI_API_KEY", "AIza-default-check")
+        llm = GoogleLLM()
+        assert llm._model == "gemini-3.5-flash-lite"
+
 
 # ---------------------------------------------------------------------------
 # phone.agent(llm=...)
