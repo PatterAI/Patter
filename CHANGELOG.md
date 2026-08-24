@@ -2,6 +2,27 @@
 
 ### Added
 
+- **xAI (Grok) voice catalog wired into both SDKs** — the 26 built-in Grok
+  voices (`eve` default, `ara`, `rex`, `sal`, `leo`, `carina`, ...) are now a
+  typed, immutable catalog instead of docs-only prose:
+  - **`XAI_VOICES` / `XAI_VOICE_IDS` / `XAI_DEFAULT_VOICE`** plus
+    `isXaiBuiltinVoice` / `normalizeXaiVoice` / `getXaiVoice` (TS) and
+    `is_xai_builtin_voice` / `normalize_xai_voice` / `get_xai_voice` (Python),
+    exported from the package root. Built-in ids are trimmed + lowercased
+    before they reach xAI; custom cloned `voice_id`s stay opaque and are
+    never rejected.
+  - **`XaiTTS` and `XaiRealtimeAdapter`** normalize the voice they send
+    (REST `voice_id`, `session.update` voice); `XAI_REALTIME_DEFAULT_VOICE`
+    stays exported as an alias.
+  - **Config helpers** `xai()` (TTS, key `xai_tts`) and `xaiAsr()` /
+    `xai_asr()` (STT, key `xai`) in `providers`, and the Python
+    `TTSConfig` / `STTConfig` factories in `telephony/common.py` now resolve
+    those keys to `XaiTTS` / `XaiSTT`.
+  - **`patter init`** lists xAI in both the STT and TTS provider tables
+    (`XAI_API_KEY`).
+  - Docs: `xai-tts.mdx` Voices section links the catalog and helpers in
+    both SDKs.
+
 - **Fish Audio voice provider suite** — TTS (S2.1-Pro / S2-Pro) and ASR land in
   both SDKs, wired end-to-end with real pricing. One `FISH_AUDIO_API_KEY`
   covers both directions of the call:

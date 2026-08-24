@@ -135,6 +135,12 @@ PIPELINE_STT: dict[str, dict] = {
         "env": ("FISH_AUDIO_API_KEY",),
         "extra": "fish_audio",
     },
+    "xai": {
+        "class": "XaiSTT",
+        "label": "xAI Grok",
+        "env": ("XAI_API_KEY",),
+        "extra": "xai",
+    },
 }
 DEFAULT_STT = "deepgram"
 
@@ -216,6 +222,12 @@ PIPELINE_TTS: dict[str, dict] = {
         "label": "Fish Audio (s2.1-pro)",
         "env": ("FISH_AUDIO_API_KEY",),
         "extra": "fish_audio",
+    },
+    "xai": {
+        "class": "XaiTTS",
+        "label": "xAI Grok",
+        "env": ("XAI_API_KEY",),
+        "extra": "xai",
     },
 }
 DEFAULT_TTS = "elevenlabs"

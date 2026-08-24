@@ -107,7 +107,7 @@ asyncio.run(phone.serve(agent))
 
 ## Voices
 
-xAI ships a roster of 26 built-in voices, each with a distinct personality. `eve` is the default; voice IDs are **case-insensitive** (`eve`, `Eve`, and `EVE` all work). Tone and suggested use cases below are from the [xAI Voice Overview](https://docs.x.ai/developers/model-capabilities/audio/voice); preview samples for each voice in the [xAI console playground](https://console.x.ai/).
+xAI ships a roster of built-in voices, each with a distinct personality — the full set ships as the `XAI_VOICES` catalog (ids alone as `XAI_VOICE_IDS`). `eve` is the default (`XAI_DEFAULT_VOICE`); voice IDs are **case-insensitive** (`eve`, `Eve`, and `EVE` all work) — Patter normalizes case for you before the request goes out. Tone and suggested use cases below are from the [xAI Voice Overview](https://docs.x.ai/developers/model-capabilities/audio/voice); preview samples for each voice in the [xAI console playground](https://console.x.ai/).
 
 | Voice | Tone | Suggested use cases |
 |---|---|---|
@@ -137,6 +137,32 @@ xAI ships a roster of 26 built-in voices, each with a distinct personality. `eve
 | `ursa` | Friendly, warm, and steadfast | Assistant, Podcast |
 | `zagan` | Powerful, dramatic, and unmistakable | Characters, Narration |
 | `zenith` | Sharp, focused, and driven | Sales, Advertising |
+
+### Looking up voices in code
+
+Import the catalog instead of hardcoding voice ids or a count — `isXaiBuiltinVoice` is case-insensitive and returns `false` (never throws) for a custom cloned voice id, so it is safe to use as a plain guard:
+
+```typescript
+import { XAI_VOICES, isXaiBuiltinVoice, XaiTTS } from "getpatter";
+
+for (const v of XAI_VOICES) {
+  console.log(v.id, v.tone, v.useCases);
+}
+
+isXaiBuiltinVoice("EVE");           // true — built-in ids are case-insensitive
+isXaiBuiltinVoice("my-cloned-id");  // false — not a preset, but still a legal voice
+
+const tts = new XaiTTS({ voice: "Leo" }); // normalized to "leo" before it is sent
+```
+
+The same catalog backs the `xai()` / `xaiAsr()` config-envelope helpers, for code that builds provider config from data rather than constructing adapters directly:
+
+```typescript
+import { xai, xaiAsr } from "getpatter";
+
+const ttsConfig = xai({ apiKey: "...", voice: "eve" });   // provider: "xai_tts"
+const sttConfig = xaiAsr({ apiKey: "...", language: "en" }); // provider: "xai"
+```
 
 ### Custom voices
 

@@ -138,6 +138,28 @@ def fish_audio_asr(
     )
 
 
+def xai(api_key: str, voice: str = "eve") -> TTSConfig:
+    """Config helper for xAI (Grok) TTS (requires the ``xai`` optional extra).
+
+    ``voice`` is a built-in roster id (see ``getpatter.XAI_VOICES`` /
+    ``is_xai_builtin_voice``; case-insensitive) or a custom cloned
+    ``voice_id`` from ``xai_create_custom_voice``. Defaults to ``"eve"``,
+    xAI's documented default voice.
+    """
+    return TTSConfig(provider="xai_tts", api_key=api_key, voice=voice)
+
+
+def xai_asr(api_key: str, language: str = "en") -> STTConfig:
+    """Config helper for xAI (Grok) STT (requires the ``xai`` optional extra).
+
+    Named ``_asr`` rather than ``_stt`` on purpose: a helper called
+    ``xai_stt`` would be shadowed by the ``providers.xai_stt`` submodule as
+    soon as the factory imports it — the same trap ``fish_audio_asr`` (above)
+    and ``soniox_tts`` (below) already document and guard against.
+    """
+    return STTConfig(provider="xai", api_key=api_key, language=language)
+
+
 def soniox_tts(
     api_key: str,
     voice: str = "Adrian",
@@ -244,6 +266,8 @@ __all__ = [
     "inworld",
     "fish_audio",
     "fish_audio_asr",
+    "xai",
+    "xai_asr",
     "soniox_tts",
     "sarvam",
     "AnthropicLLMProvider",

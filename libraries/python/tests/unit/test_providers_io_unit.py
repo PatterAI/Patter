@@ -1394,6 +1394,20 @@ class TestCreateSTTFromConfig:
         assert stt is not None
         assert stt.__class__.__name__ == "WhisperSTT"
 
+    def test_xai_via_providers_helper(self) -> None:
+        # Regression test: ``providers.xai_asr()`` builds an ``STTConfig`` with
+        # ``provider="xai"`` — this must actually be wired into the factory,
+        # not just accepted by the config helper.
+        from getpatter.telephony.common import _create_stt_from_config
+        from getpatter.providers import xai_asr
+
+        config = xai_asr(api_key="xai-key", language="es")
+        stt = _create_stt_from_config(config)
+        assert stt is not None
+        assert stt.__class__.__name__ == "XaiSTT"
+        assert stt.api_key == "xai-key"
+        assert stt.language == "es"
+
     def test_unknown_provider(self) -> None:
         from getpatter.telephony.common import _create_stt_from_config
         from getpatter.models import STTConfig
@@ -1424,6 +1438,20 @@ class TestCreateTTSFromConfig:
         tts = _create_tts_from_config(config)
         assert tts is not None
         assert tts.__class__.__name__ == "OpenAITTS"
+
+    def test_xai_via_providers_helper(self) -> None:
+        # Regression test: ``providers.xai()`` builds a ``TTSConfig`` with
+        # ``provider="xai_tts"`` — this must actually be wired into the
+        # factory, not just accepted by the config helper.
+        from getpatter.telephony.common import _create_tts_from_config
+        from getpatter.providers import xai
+
+        config = xai(api_key="xai-key", voice="leo")
+        tts = _create_tts_from_config(config)
+        assert tts is not None
+        assert tts.__class__.__name__ == "XaiTTS"
+        assert tts.api_key == "xai-key"
+        assert tts.voice == "leo"
 
     def test_unknown_provider(self) -> None:
         from getpatter.telephony.common import _create_tts_from_config

@@ -50,6 +50,17 @@ def test_explicit_model_and_voice_win_over_defaults() -> None:
     assert a.voice == "ara"
 
 
+def test_builtin_voice_is_normalized_before_session_update() -> None:
+    a = _adapter(voice=" EVE ")
+    assert a.voice == "eve"
+    assert a._build_ga_session_config()["audio"]["output"]["voice"] == "eve"
+
+
+def test_custom_voice_id_is_left_untouched_besides_trim() -> None:
+    a = _adapter(voice=" CustomVoice_1 ")
+    assert a.voice == "CustomVoice_1"
+
+
 # ---------------------------------------------------------------------------
 # session.update grafting — keys PRESENT when set
 # ---------------------------------------------------------------------------

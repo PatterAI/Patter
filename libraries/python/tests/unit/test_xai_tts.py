@@ -134,6 +134,28 @@ class TestPayloadAndAuth:
         assert "optimize_streaming_latency" not in body
         assert "text_normalization" not in body
 
+    async def test_voice_is_normalized_to_lowercase_before_send(self) -> None:
+        fake = _FakeSession(_FakeResponse(200, []))
+        tts = XaiTTS(
+            api_key="xai-test-key", session=fake, voice=" EVE "  # type: ignore[arg-type]
+        )
+        assert tts.voice == "eve"
+        async for _ in tts.synthesize("hi"):
+            pass
+        assert fake.last_json["voice_id"] == "eve"
+
+    async def test_custom_voice_id_is_sent_untouched_besides_trim(self) -> None:
+        fake = _FakeSession(_FakeResponse(200, []))
+        tts = XaiTTS(
+            api_key="xai-test-key",
+            session=fake,  # type: ignore[arg-type]
+            voice=" CustomVoice_1 ",
+        )
+        assert tts.voice == "CustomVoice_1"
+        async for _ in tts.synthesize("hi"):
+            pass
+        assert fake.last_json["voice_id"] == "CustomVoice_1"
+
     async def test_optional_fields_only_added_when_set(self) -> None:
         fake = _FakeSession(_FakeResponse(200, []))
         tts = XaiTTS(
