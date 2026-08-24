@@ -501,3 +501,59 @@ class TestLLMCostBilling:
         assert spec_cost == pytest.approx(0.99)
         assert ver_cost == pytest.approx(0.79)
         assert spec_cost > ver_cost
+
+
+class TestAnthropicLLMCostBilling:
+    """Claude 5 catalog pricing — new entries plus the Opus 4.7 price fix.
+
+    Verified against https://platform.claude.com/docs/en/about-claude/pricing
+    as of 2026-08-24.
+    """
+
+    def test_every_current_anthropic_model_billed(self):
+        """Every current AnthropicModel alias has a pricing entry (no $0 holes)."""
+        # Mirrors libraries/python/getpatter/providers/anthropic_llm.py AnthropicModel.
+        anthropic_models = (
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+        )
+        for model in anthropic_models:
+            cost = calculate_llm_cost("anthropic", model, 10_000, 10_000)
+            assert cost > 0.0, f"anthropic model {model!r} silently billed $0"
+            assert model in LLM_PRICING["anthropic"], f"missing rate for {model!r}"
+
+    def test_opus_4_7_billed_at_its_own_tier_not_the_retired_opus_4_1_rate(self):
+        """``claude-opus-4-7`` bills at $5/$25, not Opus 4.1's retired $15/$75.
+
+        Regression: before the 2026-08-24 pricing-page verification this
+        entry carried 15.0/75.0/1.5/18.75 — Opus 4.1's retired rate, not
+        Opus 4.7's actual $5/$25 tier (shared with Opus 4.8/4.6/4.5).
+        """
+        cost = calculate_llm_cost("anthropic", "claude-opus-4-7", 1_000_000, 1_000_000)
+        # 1M in @ $5/M + 1M out @ $25/M.
+        assert cost == pytest.approx(5.0 + 25.0)
+
+    def test_haiku_pinned_snapshot_resolves_to_the_alias_rate(self):
+        """The pinned default ``claude-haiku-4-5-20251001`` prices like its alias."""
+        pinned = calculate_llm_cost("anthropic", "claude-haiku-4-5-20251001", 1_000_000, 0)
+        alias = calculate_llm_cost("anthropic", "claude-haiku-4-5", 1_000_000, 0)
+        assert pinned == pytest.approx(alias)
+        assert pinned == pytest.approx(1.0)
+
+    def test_cache_read_and_cache_write_follow_pricing_page_multipliers(self):
+        """``claude-opus-5`` cache rates are 10% (read) / 125% (write) of input."""
+        # $5/MTok base input -> cache_read $0.50/MTok, cache_write $6.25/MTok.
+        cost = calculate_llm_cost(
+            "anthropic",
+            "claude-opus-5",
+            0,
+            0,
+            cache_read_tokens=1_000_000,
+            cache_write_tokens=1_000_000,
+        )
+        assert cost == pytest.approx(0.5 + 6.25)

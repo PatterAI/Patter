@@ -27,7 +27,7 @@ export interface LiteLLMLLMOptions {
   apiKey?: string;
   /** LiteLLM proxy base URL. Falls back to ``LITELLM_BASE_URL`` env, then ``http://localhost:4000/v1``. */
   baseUrl?: string;
-  /** Model identifier routed by the LiteLLM proxy (e.g. ``"gpt-4o"``, ``"anthropic/claude-sonnet-4-6"``). */
+  /** Model identifier routed by the LiteLLM proxy (e.g. ``"gpt-4o"``, ``"anthropic/claude-sonnet-5"``). */
   model?: string;
   /** Per-request timeout in seconds. Default ``60``. */
   timeout?: number;
@@ -62,7 +62,7 @@ export interface LiteLLMLLMOptions {
  * ```ts
  * import * as litellm from "getpatter/llm/litellm";
  * const llm = new litellm.LLM({ model: "gpt-4o" });
- * const llm = new litellm.LLM({ model: "anthropic/claude-sonnet-4-6" });
+ * const llm = new litellm.LLM({ model: "anthropic/claude-sonnet-5" });
  * ```
  */
 export class LLM extends OpenAICompatibleLLMProvider {
