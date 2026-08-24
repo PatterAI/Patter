@@ -1432,6 +1432,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         *,
         openai_key: str,
         xai_key: str = "",
+        inworld_key: str = "",
         transfer_fn=None,
         hangup_fn=None,
         on_transcript=None,
@@ -1462,6 +1463,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._openai_key = openai_key
         # xAI Grok Voice Agent key (used when ``agent.provider == "xai_realtime"``).
         self._xai_key = xai_key
+        # Inworld Realtime key (used when ``agent.provider == "inworld_realtime"``).
+        self._inworld_key = inworld_key
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._audio_format = audio_format
@@ -1880,13 +1883,24 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
         # xAI's Grok Voice Agent is OpenAI-Realtime-GA-compatible, so its adapter
         # subclasses the GA one; select it (and its key) when the engine is xAI.
-        _is_xai = getattr(self.agent, "provider", None) == "xai_realtime"
+        _provider = getattr(self.agent, "provider", None)
+        _is_xai = _provider == "xai_realtime"
+        # Inworld's Realtime API is OpenAI-Realtime-V1-compatible, so its
+        # adapter subclasses the v1 adapter (g711_ulaw pass-through, no
+        # transcode) rather than the GA one.
+        _is_inworld = _provider == "inworld_realtime"
         if _is_xai:
             from getpatter.providers.xai_realtime import (  # type: ignore[import]
                 XaiRealtimeAdapter,
             )
 
             _adapter_cls = XaiRealtimeAdapter
+        elif _is_inworld:
+            from getpatter.providers.inworld_realtime import (  # type: ignore[import]
+                InworldRealtimeAdapter,
+            )
+
+            _adapter_cls = InworldRealtimeAdapter
         else:
             _adapter_cls = OpenAIRealtime2Adapter
 
@@ -1990,6 +2004,14 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             # adapter's defaults stay authoritative otherwise.
             adapter_kwargs["api_key"] = self._xai_key or self._openai_key
             for _k, _v in (getattr(self.agent, "xai_realtime", None) or {}).items():
+                if _v is not None:
+                    adapter_kwargs[_k] = _v
+        elif _is_inworld:
+            # Inworld uses its own key and its own session knobs (carried on
+            # ``agent.inworld_realtime``); forward only the keys that were set
+            # so the adapter's defaults stay authoritative otherwise.
+            adapter_kwargs["api_key"] = self._inworld_key or self._openai_key
+            for _k, _v in (getattr(self.agent, "inworld_realtime", None) or {}).items():
                 if _v is not None:
                     adapter_kwargs[_k] = _v
         self._adapter = _adapter_cls(**adapter_kwargs)

@@ -113,7 +113,8 @@
                       "python-sdk/providers/gemini-live",
                       "python-sdk/providers/ultravox-realtime",
                       "python-sdk/providers/elevenlabs-convai",
-                      "python-sdk/providers/xai-realtime"
+                      "python-sdk/providers/xai-realtime",
+                      "python-sdk/providers/inworld-realtime"
                     ]
                   },
                   {

@@ -14,6 +14,7 @@ Patter ships several engine classes:
 - [`OpenAIRealtime2`](#openairealtime2) — OpenAI's GA Realtime API (`gpt-realtime-2`), separate marker because the GA endpoint speaks a different `session.update` wire shape
 - [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
 - [`XaiRealtime`](#xairealtime) — xAI Grok Voice Agent (OpenAI-GA-compatible)
+- [`InworldRealtime`](#inworldrealtime) — Inworld Realtime (OpenAI-Realtime-compatible)
 
 Each class ships as both a **flat alias** (`from getpatter import OpenAIRealtime`) and a **namespaced** class (`from getpatter.engines import openai` → `openai.Realtime()`). They are equivalent.
 
@@ -202,6 +203,51 @@ For the full session-option surface — VAD tuning, language hint, keyterms, pro
 
 <Note>
 **Beta** — spec-validated, not yet live-call-validated.
+</Note>
+
+## InworldRealtime
+
+Inworld's **Realtime API** — an OpenAI-Realtime-compatible speech-to-speech engine on Inworld voices. It negotiates `g711_ulaw` @ 8 kHz, the carrier-native format, so telephony audio is forwarded pass-through.
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, InworldRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+
+agent = phone.agent(
+    engine=InworldRealtime(voice="Ashley"),                     # INWORLD_API_KEY from env
+    system_prompt="You are a friendly receptionist.",
+    first_message="Hello, how can I help?",
+)
+
+async def main():
+    await phone.serve(agent)
+
+asyncio.run(main())
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | Inworld Realtime key. Reads from `INWORLD_API_KEY` when empty. |
+| `model` | `str` | `"inworld-realtime"` | Passed through as the `?model=` query parameter. Override with your dashboard's model id. |
+| `voice` | `str` | `"Ashley"` | Inworld voice name, e.g. `"Ashley"`, `"Olivia"`. |
+| `base_url` | `str \| None` | `None` | Override the WebSocket base URL. `None` keeps `wss://api.inworld.ai/v1/realtime`. |
+
+Namespaced form:
+
+```python
+from getpatter.engines import inworld
+
+engine = inworld.InworldRealtime()                    # reads INWORLD_API_KEY
+engine = inworld.InworldRealtime(voice="Olivia", transcription_language="it")
+```
+
+For the full session-option surface — base URL override, transcription language, turn detection, and response gating — see [Inworld Realtime — full reference](/python-sdk/providers/inworld-realtime).
+
+<Note>
+**Beta** — spec-validated, not yet live-call-validated. Inworld sessions are not
+parked during ringing, so the first word arrives on the cold connect path.
 </Note>
 
 ## What's Next

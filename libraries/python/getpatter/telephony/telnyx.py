@@ -276,6 +276,7 @@ async def telnyx_stream_bridge(
     agent,
     openai_key: str,
     xai_key: str = "",
+    inworld_key: str = "",
     on_call_start=None,
     on_call_end=None,
     on_transcript=None,
@@ -437,6 +438,7 @@ async def telnyx_stream_bridge(
                 _input_is_mulaw = getattr(agent, "provider", "openai_realtime") in (
                     "openai_realtime",
                     "openai_realtime_2",
+                    "inworld_realtime",
                 )
                 audio_sender = TelnyxAudioSender(
                     websocket, input_is_mulaw_8k=_input_is_mulaw
@@ -674,6 +676,7 @@ async def telnyx_stream_bridge(
                         metrics=metrics,
                         openai_key=openai_key,
                         xai_key=xai_key,
+                        inworld_key=inworld_key,
                         transfer_fn=_telnyx_transfer,
                         hangup_fn=_telnyx_hangup,
                         on_transcript=on_transcript,

@@ -34,7 +34,11 @@ logger = logging.getLogger("getpatter")
 # ``types.ts``. Tightened from a free ``str`` so editors autocomplete and
 # typos surface at type-check time instead of at call time.
 ProviderMode = Literal[
-    "openai_realtime", "xai_realtime", "elevenlabs_convai", "pipeline"
+    "openai_realtime",
+    "xai_realtime",
+    "inworld_realtime",
+    "elevenlabs_convai",
+    "pipeline",
 ]
 
 
@@ -775,6 +779,14 @@ class Agent:
     # server_tools) that the stream-handler forwards to
     # ``providers.xai_realtime.XaiRealtimeAdapter``. Only set keys are present.
     xai_realtime: dict | None = None
+    # Inworld Realtime — engine-supplied session tuning threaded through from
+    # ``engines.inworld.InworldRealtime(...)``. ``None`` (default) when the
+    # agent is not an Inworld realtime engine; otherwise a dict of the
+    # Inworld-specific knobs (base_url, transcription_language) that the
+    # stream-handler forwards to
+    # ``providers.inworld_realtime.InworldRealtimeAdapter``. Only set keys are
+    # present.
+    inworld_realtime: dict | None = None
     # Opt-in barge-in confirmation strategies (pipeline mode). With the
     # default empty tuple the SDK falls back to the legacy "interrupt
     # immediately on VAD speech_start" behaviour. When at least one

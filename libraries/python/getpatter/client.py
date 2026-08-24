@@ -2016,9 +2016,13 @@ class Patter:
         openai_engine_key: str = ""
         elevenlabs_engine_key: str = ""
         xai_engine_key: str = ""
+        inworld_engine_key: str = ""
         # Engine-supplied xAI Grok Voice Agent session tuning (dict of only the
         # set knobs), forwarded to ``XaiRealtimeAdapter`` by the stream-handler.
         xai_realtime_config: dict | None = None
+        # Engine-supplied Inworld Realtime session tuning (dict of only the set
+        # knobs), forwarded to ``InworldRealtimeAdapter`` by the stream-handler.
+        inworld_realtime_config: dict | None = None
         # Engine-supplied OpenAI Realtime extras propagated to Agent so the
         # stream-handler can forward them to ``OpenAIRealtimeAdapter``.
         openai_realtime_reasoning_effort: str | None = None
@@ -2070,6 +2074,31 @@ class Patter:
                     for k, v in engine_fields.items()
                     if k not in ("api_key", "voice", "model") and v is not None
                 }
+            elif engine_kind == "inworld_realtime":
+                inworld_engine_key = engine_fields.get("api_key", "")
+                # Explicit agent() kwargs win over the engine marker value.
+                if realtime_turn_detection is None:
+                    realtime_turn_detection = engine_fields.get("turn_detection")
+                if realtime_gate_response_on_transcript is None:
+                    realtime_gate_response_on_transcript = engine_fields.get(
+                        "gate_response_on_transcript"
+                    )
+                # Carry only the SET Inworld session knobs (drop None) —
+                # voice/model are already applied to the top-level slots above,
+                # and turn-detection / gating ride the generic Agent fields.
+                inworld_realtime_config = {
+                    k: v
+                    for k, v in engine_fields.items()
+                    if k
+                    not in (
+                        "api_key",
+                        "voice",
+                        "model",
+                        "turn_detection",
+                        "gate_response_on_transcript",
+                    )
+                    and v is not None
+                }
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
         elif provider is not None:
@@ -2100,6 +2129,10 @@ class Patter:
             )
         if xai_engine_key and not self._local_config.xai_key:
             self._local_config = replace(self._local_config, xai_key=xai_engine_key)
+        if inworld_engine_key and not self._local_config.inworld_key:
+            self._local_config = replace(
+                self._local_config, inworld_key=inworld_engine_key
+            )
 
         if (
             provider in ("openai_realtime", "openai_realtime_2")
@@ -2338,6 +2371,7 @@ class Patter:
             realtime_turn_detection=realtime_turn_detection,
             realtime_gate_response_on_transcript=realtime_gate_response_on_transcript,
             xai_realtime=xai_realtime_config,
+            inworld_realtime=inworld_realtime_config,
             tool_call_preambles=tool_call_preambles,
             preemptive_generation=preemptive_generation,
             preemptive_min_stable_ms=preemptive_min_stable_ms,
@@ -2352,8 +2386,19 @@ class Patter:
         from getpatter.engines.elevenlabs import ConvAI as _ConvAI
         from getpatter.engines.openai import Realtime as _Realtime
         from getpatter.engines.openai_realtime_2 import Realtime2 as _Realtime2
+        from getpatter.engines.inworld import InworldRealtime as _InworldRealtime
         from getpatter.engines.xai import XaiRealtime as _XaiRealtime
 
+        if isinstance(engine, _InworldRealtime):
+            return "inworld_realtime", {
+                "api_key": engine.api_key,
+                "voice": engine.voice,
+                "model": engine.model,
+                "base_url": engine.base_url,
+                "transcription_language": engine.transcription_language,
+                "turn_detection": engine.turn_detection,
+                "gate_response_on_transcript": engine.gate_response_on_transcript,
+            }
         if isinstance(engine, _XaiRealtime):
             return "xai_realtime", {
                 "api_key": engine.api_key,
@@ -2403,7 +2448,8 @@ class Patter:
             }
         raise TypeError(
             "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), "
-            "XaiRealtime(...), or ElevenLabsConvAI(...) instance, got "
+            "XaiRealtime(...), InworldRealtime(...), or ElevenLabsConvAI(...) "
+            "instance, got "
             f"{type(engine).__name__}"
         )
 

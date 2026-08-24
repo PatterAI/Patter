@@ -21,6 +21,7 @@ class LocalConfig:
     speechmatics_key: str = ""
     assemblyai_key: str = ""
     xai_key: str = ""
+    inworld_key: str = ""
     fish_audio_key: str = ""
     phone_number: str = ""
     webhook_url: str = ""
