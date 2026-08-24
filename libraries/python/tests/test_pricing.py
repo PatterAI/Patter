@@ -525,6 +525,9 @@ class TestGoogleGeminiPricingCatalogRefresh:
         assert GoogleModel.GEMINI_3_5_FLASH_LITE.value == "gemini-3.5-flash-lite"
 
     def test_google_llm_provider_resolves_to_default_when_no_model_passed(self):
+        # Constructing the provider imports google-genai, which is an optional
+        # extra; the base CI matrix runs without it.
+        pytest.importorskip("google.genai")
         provider = GoogleLLMProvider(api_key="test-key")
         assert provider._model == GoogleModel.GEMINI_3_5_FLASH_LITE
 
