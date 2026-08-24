@@ -60,6 +60,7 @@ _VENDOR_ALIASES: dict[str, str] = {
     "soniox_tts": "soniox",
     "xai_tts": "xai",
     "xai_realtime": "xai",
+    "gemini_live": "google",
     "fish_audio_stt": "fish_audio",
     "telnyx_stt": "telnyx",
     "telnyx_tts": "telnyx",

@@ -2,6 +2,32 @@
 
 ### Added
 
+- **`GeminiLive` engine wired end-to-end in the Python SDK, matching the
+  existing TypeScript marker** — `phone.agent(engine=GeminiLive(...))` now
+  builds a real Gemini Live call instead of only being reachable via the raw
+  `GeminiLiveAdapter`:
+  - **`getpatter.engines.gemini.GeminiLive`** marker, re-exported flat as
+    `GeminiLive` / `GeminiLiveAdapter`. Defaults: `model="gemini-3.1-flash-live-preview"`
+    (the **engine** default — the bare `GeminiLiveAdapter(...)` keeps its
+    older `gemini-2.5-flash-native-audio-preview-09-2025` default), `voice="Puck"`,
+    `language=None`, `temperature=None`, `input_sample_rate=16000`,
+    `output_sample_rate=24000`. `api_key` reads `GEMINI_API_KEY` then
+    `GOOGLE_API_KEY`; a missing key fails fast at `Patter.agent()` build time.
+  - New `ProviderMode` value `"gemini_live"` and `Agent.gemini_live: dict | None`
+    (`models.py`), threaded through `_unpack_engine` (`client.py`) and
+    `LocalConfig.gemini_key` (`local_config.py`).
+  - **`providers/gemini_live_bridge.py`**: the carrier-codec shim that builds
+    a `GeminiLiveAdapter` from an `Agent` and mulaw-encodes/decodes at the
+    8 kHz ↔ Gemini PCM boundary, wired into `OpenAIRealtimeStreamHandler` and
+    all three carrier bridges (Twilio, Telnyx, Plivo).
+  - `CallMetricsAccumulator` gets an explicit `gemini_live` branch reporting
+    `$0` STT/TTS/LLM cost — **Gemini Live calls are not yet metered** (the
+    adapter doesn't surface `usage_metadata`), same known gap as TypeScript.
+  - Docs: `docs/python-sdk/engines.mdx` and `providers/gemini-live.mdx` cover
+    the marker, its defaults, the `TypeError` on passing a raw adapter to
+    `engine=`, and the cost/multi-agent-handoff limitations.
+  `libraries/python/getpatter/engines/gemini.py`, `tests/unit/test_gemini_live_engine.py` (19 tests).
+
 - **xAI (Grok) voice catalog wired into both SDKs** — the 26 built-in Grok
   voices (`eve` default, `ara`, `rex`, `sal`, `leo`, `carina`, ...) are now a
   typed, immutable catalog instead of docs-only prose:

@@ -1432,6 +1432,7 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         *,
         openai_key: str,
         xai_key: str = "",
+        gemini_key: str = "",
         transfer_fn=None,
         hangup_fn=None,
         on_transcript=None,
@@ -1462,6 +1463,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         self._openai_key = openai_key
         # xAI Grok Voice Agent key (used when ``agent.provider == "xai_realtime"``).
         self._xai_key = xai_key
+        # Google AI Studio key (used when ``agent.provider == "gemini_live"``).
+        self._gemini_key = gemini_key
         self._transfer_fn = transfer_fn
         self._hangup_fn = hangup_fn
         self._audio_format = audio_format
@@ -1880,7 +1883,13 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
 
         # xAI's Grok Voice Agent is OpenAI-Realtime-GA-compatible, so its adapter
         # subclasses the GA one; select it (and its key) when the engine is xAI.
-        _is_xai = getattr(self.agent, "provider", None) == "xai_realtime"
+        _provider = getattr(self.agent, "provider", None)
+        _is_xai = _provider == "xai_realtime"
+        # Gemini Live is NOT OpenAI-Realtime-shaped (different constructor, PCM
+        # instead of the carrier codec), so it is built by its own boundary
+        # shim below rather than from ``adapter_kwargs``. Mirrors the dedicated
+        # ``provider === 'gemini_live'`` branch in the TS ``buildAIAdapter``.
+        _is_gemini = _provider == "gemini_live"
         if _is_xai:
             from getpatter.providers.xai_realtime import (  # type: ignore[import]
                 XaiRealtimeAdapter,
@@ -1992,7 +2001,20 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
             for _k, _v in (getattr(self.agent, "xai_realtime", None) or {}).items():
                 if _v is not None:
                     adapter_kwargs[_k] = _v
-        self._adapter = _adapter_cls(**adapter_kwargs)
+        if _is_gemini:
+            from getpatter.providers.gemini_live_bridge import (  # type: ignore[import]
+                build_gemini_live_adapter,
+            )
+
+            self._adapter = build_gemini_live_adapter(
+                agent=self.agent,
+                api_key=self._gemini_key,
+                instructions=adapter_kwargs["instructions"],
+                tools=openai_tools,
+                audio_format=self._audio_format,
+            )
+        else:
+            self._adapter = _adapter_cls(**adapter_kwargs)
 
         # Try to adopt a Realtime WebSocket parked during the ringing
         # window. When present we skip the cold ``connect()`` — the
@@ -2073,8 +2095,8 @@ class OpenAIRealtimeStreamHandler(StreamHandler):
         if not adopt_ok:
             await self._adapter.connect()
         logger.debug(
-            "OpenAI Realtime connected (adapter=%s)",
-            getattr(_adapter_cls, "__name__", repr(_adapter_cls)),
+            "Realtime session connected (adapter=%s)",
+            type(self._adapter).__name__,
         )
 
         if self.agent.first_message:

@@ -21,6 +21,10 @@ class LocalConfig:
     speechmatics_key: str = ""
     assemblyai_key: str = ""
     xai_key: str = ""
+    # Google AI Studio key for the Gemini Live engine. Backfilled by
+    # ``Patter.agent()`` from ``GeminiLive(api_key=...)`` or, failing that,
+    # ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY``.
+    gemini_key: str = ""
     fish_audio_key: str = ""
     phone_number: str = ""
     webhook_url: str = ""

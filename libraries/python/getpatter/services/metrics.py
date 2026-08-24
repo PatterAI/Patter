@@ -1134,6 +1134,16 @@ class CallMetricsAccumulator:
             stt_cost = 0.0
             tts_cost = 0.0
             llm_cost = 0.0  # ElevenLabs doesn't expose per-token pricing
+        elif self.provider_mode == "gemini_live":
+            # Gemini Live: NOT METERED YET (parity gap — the TypeScript SDK has
+            # no cost path either). Gemini bills per token, but the adapter does
+            # not surface ``usage_metadata`` from the Live stream, so there is
+            # no usage to price. This explicit branch exists so the mode reports
+            # a clean zero instead of silently falling through to the pipeline
+            # branch, which would price it against unset STT/TTS providers.
+            stt_cost = 0.0
+            tts_cost = 0.0
+            llm_cost = 0.0
         else:
             # Pipeline mode: separate providers
             # Prefer actual STT cost from provider API over estimate

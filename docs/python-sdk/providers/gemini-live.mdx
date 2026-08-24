@@ -64,20 +64,21 @@ const adapter = new GeminiLiveAdapter(process.env.GEMINI_API_KEY!, {
 ```
 </CodeGroup>
 
-## Usage
+## Engine usage
 
-Pass the adapter as the `engine` on `phone.agent(...)`:
+Pass the `GeminiLive` engine marker to `phone.agent(...)`. Patter builds the adapter
+server-side at call time and transcodes the carrier's mulaw 8 kHz to and from Gemini's
+PCM16 for you:
 
 <CodeGroup>
 ```python Python
 import asyncio
-from getpatter import Patter, Twilio
-from getpatter.providers.gemini_live import GeminiLiveAdapter
+from getpatter import Patter, Twilio, GeminiLive
 
 phone = Patter(carrier=Twilio(), phone_number="+15550001234")
 
 agent = phone.agent(
-    engine=GeminiLiveAdapter(api_key="", voice="Puck"),
+    engine=GeminiLive(voice="Puck"),                 # GEMINI_API_KEY / GOOGLE_API_KEY from env
     system_prompt="You are a helpful assistant.",
     first_message="Hi! How can I help today?",
 )
@@ -86,12 +87,12 @@ asyncio.run(phone.serve(agent))
 ```
 
 ```typescript TypeScript
-import { Patter, Twilio, GeminiLiveAdapter } from "getpatter";
+import { Patter, Twilio, GeminiLive } from "getpatter";
 
 const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
 
 const agent = phone.agent({
-  engine: new GeminiLiveAdapter(process.env.GEMINI_API_KEY!, { voice: "Puck" }),
+  engine: new GeminiLive({ voice: "Puck" }),
   systemPrompt: "You are a helpful assistant.",
   firstMessage: "Hi! How can I help today?",
 });
@@ -100,13 +101,51 @@ await phone.serve({ agent });
 ```
 </CodeGroup>
 
+| Marker parameter | Type | Default | Description |
+|------------------|------|---------|-------------|
+| `api_key` | `str` | `""` | Google AI Studio key. Reads `GEMINI_API_KEY`, then `GOOGLE_API_KEY`. |
+| `model` | `str` | `"gemini-3.1-flash-live-preview"` | Gemini Live model ID. |
+| `voice` | `str` | `"Puck"` | `Puck` / `Charon` / `Kore` / `Fenrir` / `Aoede`. |
+| `language` | `str \| None` | `None` | BCP-47 reply language. |
+| `temperature` | `float \| None` | `None` | `None` keeps the adapter default (`0.8`). |
+| `input_sample_rate` | `int` | `16000` | PCM16 mono rate sent to Gemini. |
+| `output_sample_rate` | `int` | `24000` | PCM16 mono rate Gemini returns. |
+
+The TypeScript marker additionally exposes `affectiveDialog`, `proactiveAudio`, `vad`,
+`thinking`, `thinkingBudget`, and `apiVersion`. The Python adapter has no constructor
+argument for those, so the Python marker omits them rather than accepting a silent
+no-op. The Python adapter pins `v1alpha`, which is where native-audio models are served.
+
+## Adapter usage
+
+`phone.agent(engine=...)` takes the `GeminiLive` **marker**, not an adapter instance —
+passing `GeminiLiveAdapter(...)` raises a `TypeError`. Drive the adapter directly only
+when you are wiring your own audio transport:
+
+```python
+import asyncio
+from getpatter.providers.gemini_live import GeminiLiveAdapter
+
+adapter = GeminiLiveAdapter(api_key="...", voice="Puck")
+
+async def main():
+    await adapter.connect()
+    await adapter.send_audio(pcm16_mono_16khz)          # your own audio source
+    async for event_type, payload in adapter.receive_events():
+        ...
+    await adapter.close()
+
+asyncio.run(main())
+```
+
 Tools work the same way as on OpenAI Realtime — pass `tools=[Tool(...)]` on `phone.agent(...)` and Patter forwards function calls to Gemini's `function_declarations` shape.
 
 ## Models
 
 | Model | Notes |
 |-------|-------|
-| `"gemini-2.5-flash-native-audio-preview-09-2025"` (default) | Native-audio preview, `v1alpha` only. Current production target. |
+| `"gemini-3.1-flash-live-preview"` (engine default) | Flash Live preview, `v1alpha` only. What `GeminiLive()` selects. |
+| `"gemini-2.5-flash-native-audio-preview-09-2025"` (adapter default) | Native-audio preview, `v1alpha` only. What a bare `GeminiLiveAdapter(...)` selects. |
 | `"gemini-live-2.5-flash-preview"` | Earlier preview, shut down on 2025-12-09. |
 | `"gemini-2.0-flash-exp"` | Experimental preview, retired Dec 2024. |
 
@@ -125,7 +164,13 @@ The defaults change as Google promotes native audio to GA. The `GeminiLiveModel`
 ## Notes
 
 - Barge-in is implicit: Gemini Live runs server-side VAD and interrupts on user speech. `cancel_response()` / `cancelResponse()` is a no-op for compatibility.
-- The adapter resamples nothing — pass PCM16 mono at `input_sample_rate` Hz. Patter's telephony layer resamples 8 kHz mulaw up to 16 kHz before this point.
+- The adapter itself resamples nothing — pass PCM16 mono at `input_sample_rate` Hz. On the
+  `engine=GeminiLive(...)` path Patter inserts a carrier-codec shim that decodes the carrier's
+  mulaw 8 kHz up to `input_sample_rate` and mulaw-encodes `output_sample_rate` PCM back down.
+- Cost is not metered: the adapter does not surface Gemini's token usage, so Gemini Live calls
+  report `$0` AI cost. Telephony cost is unaffected. Same gap in the TypeScript SDK.
+- Gemini Live fixes the prompt and tool list at connect time. Multi-agent `handoff_to` therefore
+  logs a warning and keeps the original agent instead of swapping it.
 - `google-genai` (Python) and `@google/genai` (Node) are imported lazily, so default installs of `getpatter` do not pay the load cost.
 
 ## What's Next

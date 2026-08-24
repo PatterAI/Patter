@@ -34,7 +34,7 @@ logger = logging.getLogger("getpatter")
 # ``types.ts``. Tightened from a free ``str`` so editors autocomplete and
 # typos surface at type-check time instead of at call time.
 ProviderMode = Literal[
-    "openai_realtime", "xai_realtime", "elevenlabs_convai", "pipeline"
+    "openai_realtime", "xai_realtime", "gemini_live", "elevenlabs_convai", "pipeline"
 ]
 
 
@@ -775,6 +775,13 @@ class Agent:
     # server_tools) that the stream-handler forwards to
     # ``providers.xai_realtime.XaiRealtimeAdapter``. Only set keys are present.
     xai_realtime: dict | None = None
+    # Gemini Live — engine-supplied session tuning threaded through from
+    # ``engines.gemini.GeminiLive(...)``. ``None`` (default) when the agent is
+    # not a Gemini Live engine; otherwise a dict of the Gemini-specific knobs
+    # (language, temperature, input_sample_rate, output_sample_rate) that the
+    # stream-handler forwards to ``providers.gemini_live.GeminiLiveAdapter``
+    # through the carrier-codec shim. Only set keys are present.
+    gemini_live: dict | None = None
     # Opt-in barge-in confirmation strategies (pipeline mode). With the
     # default empty tuple the SDK falls back to the legacy "interrupt
     # immediately on VAD speech_start" behaviour. When at least one
