@@ -123,3 +123,13 @@ describe('[mocked] GeminiLiveAdapter — async tool-call mode (3.1 flash-live we
     await adapter.close();
   });
 });
+
+describe('[unit] GeminiLiveAdapter — default model (3.x catalog refresh)', () => {
+  it('defaults to gemini-3.1-flash-live-preview when no model is passed', () => {
+    // Construction only — no connect(), so no @google/genai mock is needed.
+    const adapter = new GeminiLiveAdapter('test-key');
+    const a = adapter as unknown as Record<string, unknown>;
+    expect(a['model']).toBe(GEMINI_LIVE_3_1_FLASH_PREVIEW);
+    expect(a['model']).toBe('gemini-3.1-flash-live-preview');
+  });
+});

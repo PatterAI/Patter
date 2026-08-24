@@ -33,7 +33,7 @@ Set `GEMINI_API_KEY` in your environment.
 import { GeminiLiveAdapter } from "getpatter";
 
 const adapter = new GeminiLiveAdapter(process.env.GEMINI_API_KEY!, {
-  model: "gemini-2.5-flash-native-audio-preview-09-2025",    // default
+  model: "gemini-3.1-flash-live-preview",                    // default
   voice: "Puck",                                             // Puck | Charon | Kore | Fenrir | Aoede
   instructions: "You are a helpful, concise voice assistant.",
   language: "en-US",
@@ -52,7 +52,7 @@ from getpatter.providers.gemini_live import (
 
 adapter = GeminiLiveAdapter(
     api_key="",
-    model=GeminiLiveModel.NATIVE_AUDIO_PREVIEW_09_2025,
+    model=GeminiLiveModel.LIVE_3_1_FLASH_PREVIEW,
     voice=GeminiLiveVoice.PUCK,
     instructions="You are a helpful, concise voice assistant.",
     language="en-US",
@@ -105,11 +105,12 @@ Tools work the same way as on OpenAI Realtime — pass `tools: [...]` on `phone.
 
 | Model | Notes |
 |-------|-------|
-| `"gemini-2.5-flash-native-audio-preview-09-2025"` (default) | Native-audio preview, `v1alpha` only. Current production target. |
+| `"gemini-3.1-flash-live-preview"` (default) | Audio-to-audio Live model, `v1alpha` only. Released 2026-03-26 (preview). Current production target. |
+| `"gemini-2.5-flash-native-audio-preview-12-2025"` | Newer dated native-audio snapshot. |
+| `"gemini-2.5-flash-native-audio-preview-09-2025"` | Older dated native-audio snapshot, still served. |
 | `"gemini-live-2.5-flash-preview"` | Earlier preview, shut down on 2025-12-09. |
-| `"gemini-2.0-flash-exp"` | Experimental preview, retired Dec 2024. |
 
-The defaults change as Google promotes native audio to GA.
+`gemini-2.0-flash-exp` was experimental preview, retired Dec 2024, and is no longer supported. The defaults change as Google promotes native audio to GA.
 
 ## Voices
 

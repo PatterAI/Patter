@@ -25,12 +25,20 @@ logger = logging.getLogger("getpatter.gemini_live")
 
 
 class GeminiLiveModel(StrEnum):
-    """Known Gemini Live (v1alpha) realtime models."""
+    """Known Gemini Live (v1alpha) realtime models.
+
+    Catalog verified against https://ai.google.dev/gemini-api/docs/models and
+    https://ai.google.dev/gemini-api/docs/changelog as of 2026-08-24.
+    ``gemini-2.0-flash-exp`` was experimental preview, retired Dec 2024, and
+    has been removed. ``gemini-live-2.5-flash-preview`` was shut down
+    2025-12-09 but is kept for reference/back-compat — it is still a valid
+    string for any existing caller code that already pins it.
+    """
 
     NATIVE_AUDIO_PREVIEW_09_2025 = "gemini-2.5-flash-native-audio-preview-09-2025"
+    NATIVE_AUDIO_PREVIEW_12_2025 = "gemini-2.5-flash-native-audio-preview-12-2025"
     LIVE_3_1_FLASH_PREVIEW = "gemini-3.1-flash-live-preview"
     LIVE_2_5_FLASH_PREVIEW = "gemini-live-2.5-flash-preview"
-    LIVE_2_0_FLASH_EXP = "gemini-2.0-flash-exp"
 
 
 class GeminiLiveVoice(StrEnum):
@@ -104,12 +112,13 @@ class GeminiLiveAdapter:
         api_key: str,
         # gemini-2.0-flash-exp was experimental preview retired Dec 2024.
         # gemini-live-2.5-flash-preview was shut down Dec 9, 2025.
-        # Current native-audio live model (v1alpha only) is the dated preview.
+        # Current audio-to-audio Live model (v1alpha only) is
+        # gemini-3.1-flash-live-preview, released 2026-03-26 (preview) — verified against
+        # https://ai.google.dev/gemini-api/docs/changelog as of 2026-08-24.
         # Override via GeminiLive(model=...) if needed.
-        # TODO verify against Google docs: https://ai.google.dev/gemini-api/docs/live
         model: Union[
             GeminiLiveModel, str
-        ] = GeminiLiveModel.NATIVE_AUDIO_PREVIEW_09_2025,
+        ] = GeminiLiveModel.LIVE_3_1_FLASH_PREVIEW,
         voice: Union[GeminiLiveVoice, str] = GeminiLiveVoice.PUCK,
         instructions: str = "",
         language: str = "en-US",
