@@ -32,14 +32,14 @@ const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 
 /** Canonical Anthropic Claude model identifiers and aliases. */
 export const AnthropicModel = {
+  CLAUDE_FABLE_5: 'claude-fable-5',
+  CLAUDE_OPUS_5: 'claude-opus-5',
+  CLAUDE_SONNET_5: 'claude-sonnet-5',
   CLAUDE_HAIKU_4_5_ALIAS: 'claude-haiku-4-5',
+  CLAUDE_OPUS_4_8_ALIAS: 'claude-opus-4-8',
   CLAUDE_SONNET_4_6_ALIAS: 'claude-sonnet-4-6',
   CLAUDE_OPUS_4_7_ALIAS: 'claude-opus-4-7',
-  CLAUDE_3_5_SONNET_ALIAS: 'claude-3-5-sonnet-latest',
-  CLAUDE_3_5_HAIKU_ALIAS: 'claude-3-5-haiku-latest',
   CLAUDE_HAIKU_4_5_20251001: 'claude-haiku-4-5-20251001',
-  CLAUDE_3_5_SONNET_20241022: 'claude-3-5-sonnet-20241022',
-  CLAUDE_3_5_HAIKU_20241022: 'claude-3-5-haiku-20241022',
 } as const;
 /** Union of {@link AnthropicModel} string values. */
 export type AnthropicModel = (typeof AnthropicModel)[keyof typeof AnthropicModel];

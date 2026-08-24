@@ -21,7 +21,7 @@ class LLM(_LiteLLM):
         from getpatter.llm import litellm
 
         llm = litellm.LLM(model="gpt-4o")
-        llm = litellm.LLM(model="anthropic/claude-sonnet-4-6", api_key="sk-ant-...")
+        llm = litellm.LLM(model="anthropic/claude-sonnet-5", api_key="sk-ant-...")
         llm = litellm.LLM(model="ollama/llama3")
     """
 

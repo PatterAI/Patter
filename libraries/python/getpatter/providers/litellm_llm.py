@@ -39,7 +39,7 @@ class LiteLLMProvider:
             ``LITELLM_API_KEY`` is read from the environment (or the
             provider-specific env var is used by LiteLLM automatically).
         model: LiteLLM model identifier (e.g. ``"gpt-4o"``,
-            ``"anthropic/claude-sonnet-4-6"``, ``"ollama/llama3"``).
+            ``"anthropic/claude-sonnet-5"``, ``"ollama/llama3"``).
         api_base: Optional base URL override (e.g. for a self-hosted
             LiteLLM proxy or Azure endpoint).
         drop_params: Silently drop provider-unsupported kwargs instead

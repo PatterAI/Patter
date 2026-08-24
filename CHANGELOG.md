@@ -2,6 +2,36 @@
 
 ### Added
 
+- **Anthropic Claude 5 model catalog and corrected pricing, both SDKs** —
+  `AnthropicModel` gains four new aliases and drops four retired ones; the
+  Opus 4.7 rate card is fixed to its real tier.
+  - **New aliases**: `CLAUDE_FABLE_5` (`claude-fable-5`), `CLAUDE_OPUS_5`
+    (`claude-opus-5`), `CLAUDE_OPUS_4_8_ALIAS` (`claude-opus-4-8`), and
+    `CLAUDE_SONNET_5` (`claude-sonnet-5`) in `AnthropicModel`
+    (`libraries/python/getpatter/providers/anthropic_llm.py`,
+    `libraries/typescript/src/providers/anthropic-llm.ts`), each with a
+    matching `LLM_PRICING["anthropic"]` / `llmPricing.anthropic` entry.
+  - **Removed enum members** (breaking for direct references):
+    `CLAUDE_3_5_SONNET_ALIAS`, `CLAUDE_3_5_HAIKU_ALIAS`,
+    `CLAUDE_3_5_SONNET_20241022`, `CLAUDE_3_5_HAIKU_20241022`. Claude 3.5
+    Sonnet/Haiku are no longer part of the catalog; callers passing those
+    id strings directly still work, callers referencing the removed enum
+    members will fail to import/compile.
+  - **Pricing fix, behaviour change**: `claude-opus-4-7` was billed at
+    $15.00/$75.00 (input/output) with $1.50/$18.75 cache read/write — the
+    retired Opus 4.1 rate. Corrected to $5.00/$25.00 with $0.50/$6.25
+    cache read/write, the tier it actually shares with Opus 4.8/4.6/4.5.
+    Any caller pricing `claude-opus-4-7` calls sees a ~3x lower computed
+    cost after this change.
+  - Default model is unchanged (`claude-haiku-4-5-20251001`); only the
+    docstring example in `llm/litellm.py` / `llm/litellm.ts` moved from
+    `claude-sonnet-4-6` to `claude-sonnet-5`. Docs tables updated in both
+    `docs/*-sdk/providers/anthropic.mdx`.
+  - 4 new tests per SDK in `test_pricing.py`
+    (`TestAnthropicLLMCostBilling`) / `pricing.test.ts` covering full
+    catalog coverage, the Opus 4.7 regression, pinned-snapshot
+    resolution, and cache-rate multipliers.
+
 - **xAI (Grok) voice catalog wired into both SDKs** — the 26 built-in Grok
   voices (`eve` default, `ara`, `rex`, `sal`, `leo`, `carina`, ...) are now a
   typed, immutable catalog instead of docs-only prose:

@@ -448,3 +448,48 @@ describe('LLM cost billing — Cerebras + Groq silent under-billing regression',
     expect(specCost).toBeGreaterThan(verCost);
   });
 });
+
+describe('LLM cost billing — Anthropic Claude 5 catalog', () => {
+  // Verified against https://platform.claude.com/docs/en/about-claude/pricing
+  // as of 2026-08-24.
+
+  it('every current AnthropicModel alias has a pricing entry (no $0 holes)', () => {
+    // Mirrors libraries/typescript/src/providers/anthropic-llm.ts AnthropicModel.
+    const anthropicModels = [
+      'claude-fable-5',
+      'claude-opus-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
+      'claude-sonnet-5',
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5',
+    ];
+    for (const model of anthropicModels) {
+      const cost = calculateLlmCost('anthropic', model, 10_000, 10_000);
+      expect(cost, `anthropic model ${model} silently billed $0`).toBeGreaterThan(0);
+      expect(llmPricing.anthropic[model], `missing rate for ${model}`).toBeDefined();
+    }
+  });
+
+  it('claude-opus-4-7 is billed at its own $5/$25 tier, not the retired Opus 4.1 rate', () => {
+    // Regression: before the 2026-08-24 pricing-page verification this entry
+    // carried 15.0/75.0/1.5/18.75 — Opus 4.1's retired rate, not Opus 4.7's
+    // actual $5/$25 tier (shared with Opus 4.8/4.6/4.5).
+    const cost = calculateLlmCost('anthropic', 'claude-opus-4-7', 1_000_000, 1_000_000);
+    // 1M in @ $5/M + 1M out @ $25/M.
+    expect(cost).toBeCloseTo(5.0 + 25.0, 6);
+  });
+
+  it('claude-haiku-4-5-20251001 (pinned default) resolves to the claude-haiku-4-5 rate', () => {
+    const pinned = calculateLlmCost('anthropic', 'claude-haiku-4-5-20251001', 1_000_000, 0);
+    const alias = calculateLlmCost('anthropic', 'claude-haiku-4-5', 1_000_000, 0);
+    expect(pinned).toBeCloseTo(alias, 6);
+    expect(pinned).toBeCloseTo(1.0, 6);
+  });
+
+  it('cache_read and cache_write follow the pricing-page 10% / 125% multipliers on claude-opus-5', () => {
+    // $5/MTok base input -> cache_read $0.50/MTok (10%), cache_write $6.25/MTok (125%).
+    const cost = calculateLlmCost('anthropic', 'claude-opus-5', 0, 0, 1_000_000, 1_000_000);
+    expect(cost).toBeCloseTo(0.5 + 6.25, 6);
+  });
+});

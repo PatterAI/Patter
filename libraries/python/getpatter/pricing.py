@@ -648,12 +648,42 @@ LLM_PRICING: dict[str, dict[str, dict[str, float]]] = {
         "o3": {"input": 2.00, "output": 8.00, "cache_read": 0.50},
         "o4-mini": {"input": 1.10, "output": 4.40, "cache_read": 0.275},
     },
+    # Rates verified against https://platform.claude.com/docs/en/about-claude/pricing
+    # as of 2026-08-24. cache_read = 10% of base input; cache_write = 125% of
+    # base input (5-minute cache, the tier Patter's caching header requests).
     "anthropic": {
+        "claude-fable-5": {
+            "input": 10.0,
+            "output": 50.0,
+            "cache_read": 1.0,
+            "cache_write": 12.5,
+        },
+        "claude-opus-5": {
+            "input": 5.0,
+            "output": 25.0,
+            "cache_read": 0.5,
+            "cache_write": 6.25,
+        },
+        "claude-opus-4-8": {
+            "input": 5.0,
+            "output": 25.0,
+            "cache_read": 0.5,
+            "cache_write": 6.25,
+        },
+        # Corrected 2026-08-24: was 15.0/75.0/1.5/18.75 (Opus 4.1's retired
+        # rate, not Opus 4.7's) — the pricing page lists Opus 4.7 at the same
+        # $5/$25 tier as Opus 4.8/4.6/4.5, not $15/$75.
         "claude-opus-4-7": {
-            "input": 15.0,
-            "output": 75.0,
-            "cache_read": 1.5,
-            "cache_write": 18.75,
+            "input": 5.0,
+            "output": 25.0,
+            "cache_read": 0.5,
+            "cache_write": 6.25,
+        },
+        "claude-sonnet-5": {
+            "input": 2.0,
+            "output": 10.0,
+            "cache_read": 0.2,
+            "cache_write": 2.5,
         },
         "claude-sonnet-4-6": {
             "input": 3.0,
