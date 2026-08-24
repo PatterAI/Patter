@@ -141,6 +141,12 @@ PIPELINE_STT: dict[str, dict] = {
         "env": ("XAI_API_KEY",),
         "extra": "xai",
     },
+    "gemini": {
+        "class": "GeminiSTT",
+        "label": "Google Gemini (turn-based — transcript + tone)",
+        "env": ("GEMINI_API_KEY",),
+        "extra": "gemini",
+    },
 }
 DEFAULT_STT = "deepgram"
 
@@ -228,6 +234,12 @@ PIPELINE_TTS: dict[str, dict] = {
         "label": "xAI Grok",
         "env": ("XAI_API_KEY",),
         "extra": "xai",
+    },
+    "gemini": {
+        "class": "GeminiTTS",
+        "label": "Google Gemini (gemini-3.1-flash-tts-preview)",
+        "env": ("GEMINI_API_KEY",),
+        "extra": "gemini",
     },
 }
 DEFAULT_TTS = "elevenlabs"

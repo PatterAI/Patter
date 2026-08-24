@@ -1,0 +1,150 @@
+---
+title: "Gemini STT"
+description: "Google Gemini multimodal transcription — one turn per request, returning the transcript plus the caller's vocal tone."
+icon: "google"
+---
+
+# Gemini STT
+
+`GeminiSTT` transcribes with a multimodal Gemini model (`gemini-2.5-flash`) instead of a dedicated speech recogniser. It buffers the caller's audio for the whole turn and, at VAD speech-end, sends the utterance as audio. The model returns the transcript **and** its judgement of how the caller sounded:
+
+```
+[tone: tired] yeah I have been on hold for twenty minutes
+```
+
+The tone prefix flows downstream to the LLM, so the agent can mirror mood — something a words-only transcriber cannot supply.
+
+<Warning>
+**Turn-based, not streaming.** There are no interim partials, and the
+transcript for a turn arrives one model round-trip after speech-end. Prefer
+[Deepgram](/python-sdk/providers/deepgram), [Soniox](/python-sdk/providers/soniox),
+or [AssemblyAI](/python-sdk/providers/assemblyai) when turn latency matters more
+than tone.
+</Warning>
+
+<Note>
+**Beta.** The adapter is validated against the Google Gen AI SDK surface; it has
+not yet been exercised against a live phone call.
+</Note>
+
+## Install
+
+<CodeGroup>
+```bash Python
+pip install "getpatter[gemini]"
+```
+
+```bash TypeScript
+npm install getpatter @google/genai
+```
+</CodeGroup>
+
+## Authentication
+
+```bash
+export GEMINI_API_KEY="<your-gemini-api-key>"
+```
+
+`GEMINI_API_KEY` is read automatically when `api_key` / `apiKey` is omitted, with `GOOGLE_API_KEY` as the second fallback.
+
+## Usage
+
+<Note>
+  Use the namespaced import (`getpatter.stt.gemini`) or the flat re-export
+  (`GeminiSTT`). Both auto-resolve the key from the environment.
+</Note>
+
+<CodeGroup>
+```python Python
+# Namespaced import (pipeline mode)
+from getpatter.stt import gemini
+
+stt = gemini.STT()                                      # reads GEMINI_API_KEY
+stt = gemini.STT(api_key="...", model="gemini-2.5-flash")
+
+# Flat alias (equivalent)
+from getpatter import GeminiSTT
+
+stt = GeminiSTT()
+```
+
+```typescript TypeScript
+// Namespaced import (pipeline mode)
+import * as gemini from "getpatter/stt/gemini";
+
+const stt = new gemini.STT();                           // reads GEMINI_API_KEY
+const stt2 = new gemini.STT({ apiKey: "...", model: "gemini-2.5-flash" });
+
+// Flat alias (equivalent)
+import { GeminiSTT } from "getpatter";
+
+const stt3 = new GeminiSTT();
+```
+</CodeGroup>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, GeminiSTT, GeminiTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=GeminiSTT(),                                    # GEMINI_API_KEY from env
+    tts=GeminiTTS(),                                    # same key
+    system_prompt=(
+        "You are Acme's receptionist. Each transcript starts with the caller's "
+        "tone in brackets. Match it: slow down for a tired caller, get to the "
+        "point for a rushed one. Never read the tag aloud."
+    ),
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, GeminiSTT, GeminiTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new GeminiSTT({}),                               // GEMINI_API_KEY from env
+  tts: new GeminiTTS({}),                               // same key
+  systemPrompt:
+    "You are Acme's receptionist. Each transcript starts with the caller's tone " +
+    "in brackets. Match it, and never read the tag aloud.",
+});
+
+await phone.serve({ agent });
+```
+
+</CodeGroup>
+
+## Turn semantics
+
+- `send_audio` only buffers. Nothing is uploaded mid-turn.
+- `finalize()` — fired by the pipeline on VAD speech-end — uploads the whole utterance as a WAV and produces exactly one transcript with `is_final` and `speech_final` set.
+- `close()` flushes a turn that never got a speech-end, so trailing words are not lost.
+- One request per turn is deliberate: tone is judged over the full utterance, and a windowed upload would split one utterance across requests.
+
+## Failure behaviour
+
+A model error or an unreachable host is logged at ERROR and yields **no transcript** — it never raises into the call. A live call degrades to a missed turn rather than dropping.
+
+## Options
+
+| Python | TypeScript | Default | Notes |
+|---|---|---|---|
+| `api_key` | `apiKey` | — | Reads `GEMINI_API_KEY`, then `GOOGLE_API_KEY`. |
+| `model` | `model` | `"gemini-2.5-flash"` | Any multimodal Gemini model that accepts audio. |
+| `sample_rate` | `sampleRate` | `16000` | Inbound PCM16 rate from the pipeline. |
+
+There is no `language` option: the model reads the language from the audio itself.
+
+## Pricing
+
+Gemini bills audio input at **$1.00 per 1M tokens** (roughly 32 tokens per second of audio) plus text output at **$2.50 per 1M tokens**. Patter records a flat **$0.001 per minute** preview estimate for this provider. See the [Gemini API pricing page](https://ai.google.dev/gemini-api/docs/pricing) for the authoritative numbers.

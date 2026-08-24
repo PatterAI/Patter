@@ -2,6 +2,38 @@
 
 ### Added
 
+- **Gemini TTS and Gemini STT pipeline adapters land in Python** (Beta),
+  porting the existing TypeScript adapters (`src/providers/gemini-{tts,stt}.ts`)
+  so both SDKs cover Google Gemini in pipeline mode:
+  - **`GeminiTTS`** (`getpatter.providers.gemini_tts`, flat alias
+    `getpatter.tts.gemini.TTS`) streams `gemini-3.1-flash-tts-preview` via
+    `generate_content_stream`, default voice `Kore`. Native output is PCM16
+    @ 24 kHz, resampled to `target_sample_rate` (default 16000; 8000 or the
+    native 24000 also accepted, 24000 skips resampling). Inline
+    square-bracket delivery tags (`[warm]`, `[sigh]`) shape prosody instead
+    of being spoken.
+  - **`GeminiSTT`** (`getpatter.providers.gemini_stt`, flat alias
+    `getpatter.stt.gemini.STT`) sends the buffered utterance to
+    `gemini-2.5-flash` as audio at VAD speech-end and returns a single final
+    transcript prefixed with a `[tone: ...]` tag judged from delivery, not
+    just words. Turn-based only — no interim partials — so it trades latency
+    for the tone signal; the docstring recommends Deepgram/Soniox/AssemblyAI
+    when turn latency matters more.
+  - **`patter init`** lists `gemini` in both the STT and TTS provider tables
+    (`GEMINI_API_KEY`); `telephony/common.py` resolves config keys
+    `gemini_stt` / `gemini_tts` to the two adapters. Existing `deepgram` /
+    `elevenlabs` defaults are unchanged.
+  - **Pricing**: `gemini_stt` at $0.001/minute and `gemini_tts` at
+    $0.034/1k characters (with a per-model override for
+    `gemini-3.1-flash-tts-preview`) — both flat estimates derived from
+    Gemini's token-metered preview pricing, marked for re-verification at GA.
+  - New `[gemini]` extra (`google-genai>=1.55`) installs both adapters
+    without pulling in the realtime `gemini-live` engine.
+  `libraries/python/getpatter/providers/gemini_{tts,stt}.py`,
+  `libraries/python/getpatter/{tts,stt}/gemini.py`, `pricing.py`,
+  `telephony/common.py`, `init/cli.py`, `pyproject.toml`,
+  `docs/python-sdk/providers/gemini-{tts,stt}.mdx`.
+
 - **xAI (Grok) voice catalog wired into both SDKs** — the 26 built-in Grok
   voices (`eve` default, `ara`, `rex`, `sal`, `leo`, `carina`, ...) are now a
   typed, immutable catalog instead of docs-only prose:

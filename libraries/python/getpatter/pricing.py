@@ -149,6 +149,14 @@ DEFAULT_PRICING: dict[str, dict] = {
     # Previous $0.0173 reflected a retired Standard tier; users were
     # being over-billed ~4.3x.
     "speechmatics": {"unit": PricingUnit.MINUTE, "price": 0.004},
+    # Gemini multimodal STT (gemini-2.5-flash, audio in -> text out). Audio
+    # input is $1.00 / 1M tokens at ~32 tokens/sec of audio, i.e. ~$0.0019/min
+    # before the text output tokens. The table carries the TypeScript SDK's
+    # rounded flat preview estimate so both SDKs report the same number; move
+    # them together (and off "preview") when Gemini publishes GA speech
+    # pricing. Source: https://ai.google.dev/gemini-api/docs/pricing
+    # (as of 2026-08-24).
+    "gemini_stt": {"unit": PricingUnit.MINUTE, "price": 0.001},
     # TTS — per 1,000 characters synthesized.
     # Source: https://elevenlabs.io/pricing/api (verified 2026-05-11). The
     # per-1K-character API/overage rate is flat across all plan tiers (Free
@@ -244,6 +252,17 @@ DEFAULT_PRICING: dict[str, dict] = {
     "soniox_tts": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.013},
     # xAI TTS: $15.00 / 1M chars = $0.015 / 1k chars.
     "xai_tts": {"unit": PricingUnit.THOUSAND_CHARS, "price": 0.015},
+    # Gemini TTS (gemini-3.1-flash-tts-preview): $1.00 / 1M text-input tokens
+    # plus $20.00 / 1M audio-output tokens (~25 audio tokens/sec) ≈ $0.034 per
+    # 1k characters spoken. Preview pricing — re-verify before GA. Source:
+    # https://ai.google.dev/gemini-api/docs/pricing (as of 2026-08-24).
+    "gemini_tts": {
+        "unit": PricingUnit.THOUSAND_CHARS,
+        "price": 0.034,
+        "models": {
+            "gemini-3.1-flash-tts-preview": {"price": 0.034},
+        },
+    },
     # Fish Audio TTS: $15.00 / 1M UTF-8 BYTES = $0.015 / 1k bytes. Fish meters
     # bytes, not characters, so the adapter reports UTF-8 byte length as the
     # "chars" figure — exact for latin scripts, and correctly ~3x higher for
