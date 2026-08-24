@@ -2,6 +2,41 @@
 
 ### Added
 
+- **`InworldRealtime` engine (Python only)** — a speech-to-speech engine for
+  Inworld's Realtime API, which Inworld documents as OpenAI-Realtime-compatible:
+  - **`getpatter.engines.inworld.InworldRealtime`** (flat alias `InworldRealtime`
+    from the package root) is a frozen config marker — `api_key` (falls back to
+    `INWORLD_API_KEY`), `voice` (default `"Ashley"`), `model` (default
+    `"inworld-realtime"`), `base_url`, `transcription_language`,
+    `turn_detection`, `gate_response_on_transcript`.
+  - **`getpatter.providers.inworld_realtime.InworldRealtimeAdapter`** subclasses
+    the v1 `OpenAIRealtimeAdapter` and overrides only the WebSocket endpoint
+    (`wss://api.inworld.ai/v1/realtime`) and `provider_key` (`"inworld"`);
+    `warmup()` is a no-op and `open_parked_connection()` raises, so Inworld
+    sessions are never parked during ringing — the first turn always pays the
+    cold-connect cost, unlike the OpenAI realtime modes.
+  - **`ProviderMode`** gains a new member, `"inworld_realtime"` (no members
+    removed). `Agent.inworld_realtime: dict | None = None` carries the
+    engine-supplied session knobs through to the stream-handler.
+  - Telephony bridges (`twilio.py`, `telnyx.py`, `plivo.py`) and
+    `stream_handler.py` gain an `inworld_key` parameter (default `""`, additive)
+    and treat `inworld_realtime` as g711_ulaw pass-through, same as the OpenAI
+    realtime modes.
+  - **Cost telemetry**: `CallMetricsAccumulator` reports zero AI cost for
+    `inworld_realtime` deliberately, not by omission — Inworld publishes no
+    Realtime/speech-to-speech rate as of 2026-08-24, and the change also
+    excludes this mode from the OpenAI-rate-table token accounting it would
+    otherwise fall into.
+  - **Python only** — no TypeScript changes in this PR; violates `sdk-parity`
+    pending a follow-up TS port.
+  `libraries/python/getpatter/engines/inworld.py`,
+  `libraries/python/getpatter/providers/inworld_realtime.py`,
+  `libraries/python/getpatter/{client,models,server,stream_handler,local_config}.py`,
+  `libraries/python/getpatter/services/metrics.py`,
+  `libraries/python/getpatter/telephony/{twilio,telnyx,plivo}.py`,
+  `libraries/python/tests/unit/test_inworld_realtime.py`,
+  `docs/python-sdk/engines.mdx`, `docs/python-sdk/providers/inworld-realtime.mdx`.
+
 - **xAI (Grok) voice catalog wired into both SDKs** — the 26 built-in Grok
   voices (`eve` default, `ara`, `rex`, `sal`, `leo`, `carina`, ...) are now a
   typed, immutable catalog instead of docs-only prose:

@@ -1,0 +1,143 @@
+---
+title: "Inworld Realtime"
+description: "Inworld's OpenAI-Realtime-compatible speech-to-speech engine — one WebSocket for STT, LLM, and TTS."
+icon: "bolt"
+---
+
+# Inworld Realtime
+
+`InworldRealtime` selects [Inworld's Realtime API](https://docs.inworld.ai/) (`wss://api.inworld.ai/v1/realtime`) as an end-to-end speech-to-speech engine. Pass it as the `engine` on `phone.agent(...)` and Patter wires the audio stream straight through — no separate STT or TTS.
+
+Inworld's Realtime API is OpenAI-Realtime-compatible: Inworld documents an "OpenAI Realtime migration" path where the event schema, the session structure, and the client/server events match OpenAI's Realtime API, so migrating is a matter of swapping the endpoint and the credentials. Under the hood `InworldRealtime` reuses Patter's v1 realtime adapter and overrides only the endpoint and the defaults, so every feature gate in the call handler — barge-in, truncate, tool calling, first message, reassurance — fires for Inworld with no per-provider branches.
+
+<Note>
+**Beta.** The engine is validated against the OpenAI-compatible Realtime session
+shape; it has not yet been exercised against a live phone call. Confirm the exact
+model id and audio formats your Inworld account accepts before going to
+production.
+</Note>
+
+## Install
+
+<CodeGroup>
+```bash Python
+pip install getpatter
+```
+
+```bash TypeScript
+npm install getpatter
+```
+</CodeGroup>
+
+Set `INWORLD_API_KEY` in your environment (or pass `api_key`). This is the Inworld Realtime key, sent as `Authorization: Bearer <key>`.
+
+## Constructor
+
+<CodeGroup>
+```python Python
+from getpatter import InworldRealtime
+
+engine = InworldRealtime(
+    model="inworld-realtime",        # default — override with your dashboard's model id
+    voice="Ashley",                  # default
+    transcription_language="en",     # pin input transcription to one language
+)
+```
+
+```typescript TypeScript
+import { InworldRealtime } from "getpatter";
+
+const engine = new InworldRealtime({
+  model: "inworld-realtime",        // default — override with your dashboard's model id
+  voice: "Ashley",                  // default
+  transcriptionLanguage: "en",      // pin input transcription to one language
+});
+```
+</CodeGroup>
+
+## Usage
+
+Pass the engine as the `engine` on `phone.agent(...)`:
+
+<CodeGroup>
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, InworldRealtime
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    engine=InworldRealtime(voice="Ashley"),                # INWORLD_API_KEY from env
+    system_prompt="You are a friendly receptionist.",
+    first_message="Hello, how can I help?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```typescript TypeScript
+// npx tsx example.ts
+import { Patter, Twilio, InworldRealtime } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  engine: new InworldRealtime({ voice: "Ashley" }),        // INWORLD_API_KEY from env
+  systemPrompt: "You are a friendly receptionist.",
+  firstMessage: "Hello, how can I help?",
+});
+
+await phone.serve({ agent });
+```
+</CodeGroup>
+
+## Session options
+
+All optional with safe defaults; unset knobs are omitted from the wire so Inworld applies its own server defaults.
+
+| Python | TypeScript | Default | Notes |
+|---|---|---|---|
+| `api_key` | `apiKey` | — | Reads `INWORLD_API_KEY` when omitted. Required. |
+| `model` | `model` | `"inworld-realtime"` | Passed through as the `?model=` query parameter. Override with the exact id from your Inworld dashboard. |
+| `voice` | `voice` | `"Ashley"` | An Inworld voice name, e.g. `"Ashley"`, `"Olivia"`. |
+| `base_url` | `baseUrl` | `"wss://api.inworld.ai/v1/realtime"` | Override the WebSocket base URL (no query string) to point at an alternate or on-prem deployment, or to supply a session-scoped URL if your account requires it. Trailing slashes are trimmed. |
+| `transcription_language` | `transcriptionLanguage` | `None` | ISO-639-1 hint pinning input transcription to one language instead of auto-detecting per utterance. Display-only — it feeds the transcript, not the model's comprehension. |
+| `turn_detection` | `turnDetection` | `None` | Server-VAD tuning. Raise the threshold, or switch to `semantic_vad` with `eagerness="low"`, to stop speakerphone noise from triggering false barge-ins. See [`RealtimeTurnDetection`](/python-sdk/providers/openai-realtime#speakerphone-noise-turn-detection). |
+| `gate_response_on_transcript` | `gateResponseOnTranscript` | `None` | `False` (default) — the model responds on speech-stop, independent of the transcript. `True` restores the legacy transcript-gated path. |
+
+## Tool calling
+
+Function tools declared on `phone.agent(tools=[...])` work exactly as they do on OpenAI Realtime — Patter's tool bridge forwards the model's `response.function_call_arguments.done` events and returns your results as `conversation.item.create` + `response.create`. The built-in `transfer_call` and `end_call` tools are auto-injected into every agent, so an Inworld agent can hand off or hang up out of the box.
+
+## Telephony audio
+
+The engine negotiates `g711_ulaw` @ 8 kHz in both directions, which is the native Twilio / Telnyx / Plivo wire format, so carrier audio is forwarded pass-through with no resample chain. If your Inworld deployment only accepts PCM, construct the adapter with `audio_format="pcm16"`.
+
+## Not wired into prewarm
+
+Unlike the OpenAI engines, Inworld sessions are **not** parked during the ringing window: `warmup()` is a no-op and `open_parked_connection()` raises, so a call always takes the cold `connect()` path. Expect the first audible word roughly 300 ms later than an equivalent prewarmed OpenAI Realtime call.
+
+## When to use Inworld Realtime vs alternatives
+
+| Use Inworld Realtime when… | Use [OpenAI Realtime](/python-sdk/providers/openai-realtime) when… | Use [pipeline mode](/python-sdk/llm#pipeline-mode) when… |
+|---|---|---|
+| You are already on Inworld voices and want one vendor for the whole loop. | You need prewarm, the broadest tool-calling ecosystem, and GA reasoning tiers. | You need provider-by-provider control, e.g. `DeepgramSTT` + `AnthropicLLM` + [`InworldTTS`](/python-sdk/providers/inworld). |
+
+## Rates
+
+Inworld publishes no separate Realtime rate on [inworld.ai/pricing](https://inworld.ai/pricing) (checked 2026-08-24), so the adapter meters against the same `inworld` pricing key as [Inworld TTS](/python-sdk/providers/inworld) — the On-Demand character rate. Override it per project with `Patter(pricing={"inworld": {"price": ...}})` once your account's Realtime rate is known. See [Metrics](/python-sdk/metrics) for the full rate table.
+
+## Notes
+
+- **Beta** — spec-validated, not yet live-call-validated. Pin the exact model id from your Inworld dashboard in production.
+- The default `inworld-realtime` model id is a placeholder for the OpenAI-compatible endpoint; Inworld does not publish a canonical Realtime model id.
+- Input transcription defaults to the OpenAI-compatible `whisper-1` field value. If your Inworld deployment rejects it, pass a different `input_audio_transcription_model` to the adapter.
+
+## What's Next
+
+<CardGroup cols={2}>
+  <Card title="Engines" icon="bolt" href="/python-sdk/engines">All engines side by side.</Card>
+  <Card title="Inworld TTS" icon="waveform-lines" href="/python-sdk/providers/inworld">The pipeline-mode Inworld voice.</Card>
+  <Card title="Agents" icon="user-gear" href="/python-sdk/agents">System prompts, tools, first messages.</Card>
+  <Card title="Tools" icon="screwdriver-wrench" href="/python-sdk/tools">Function calling inside a realtime session.</Card>
+</CardGroup>

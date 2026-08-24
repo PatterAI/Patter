@@ -351,6 +351,7 @@ async def plivo_stream_bridge(
     agent,
     openai_key: str,
     xai_key: str = "",
+    inworld_key: str = "",
     on_call_start=None,
     on_call_end=None,
     on_transcript=None,
@@ -536,7 +537,11 @@ async def plivo_stream_bridge(
                 # OpenAI Realtime emits g711_ulaw @ 8 kHz directly (see below),
                 # so for that provider we skip the PCM→mulaw transcode path.
                 # Pipeline / ConvAI produce PCM16 @ 16 kHz.
-                _input_is_mulaw = provider in ("openai_realtime", "openai_realtime_2")
+                _input_is_mulaw = provider in (
+                    "openai_realtime",
+                    "openai_realtime_2",
+                    "inworld_realtime",
+                )
                 audio_sender = PlivoAudioSender(
                     websocket, stream_id or "", input_is_mulaw_8k=_input_is_mulaw
                 )
@@ -669,6 +674,7 @@ async def plivo_stream_bridge(
                         metrics=metrics,
                         openai_key=openai_key,
                         xai_key=xai_key,
+                        inworld_key=inworld_key,
                         transfer_fn=_plivo_transfer,
                         hangup_fn=_plivo_hangup,
                         on_transcript=on_transcript,

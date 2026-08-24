@@ -1598,6 +1598,7 @@ class EmbeddedServer:
                     pop_prewarmed_connections=self.pop_prewarmed_connections,
                     openai_key=self.config.openai_key,
                     xai_key=self.config.xai_key,
+                    inworld_key=self.config.inworld_key,
                     # SECURITY (#204): validate the <Parameter>-borne token
                     # (start.customParameters) against the token minted for this
                     # call_id BEFORE the provider session opens. Fail-closed by
@@ -2090,6 +2091,7 @@ class EmbeddedServer:
                     speech_events=getattr(self, "speech_events", None),
                     openai_key=self.config.openai_key,
                     xai_key=self.config.xai_key,
+                    inworld_key=self.config.inworld_key,
                     on_call_start=_start,
                     on_call_end=_end,
                     on_transcript=_transcript,
@@ -2361,6 +2363,7 @@ class EmbeddedServer:
                     pop_prewarmed_connections=self.pop_prewarmed_connections,
                     openai_key=self.config.openai_key,
                     xai_key=self.config.xai_key,
+                    inworld_key=self.config.inworld_key,
                     # SECURITY (#204): validate the X-Patter-Stream-Token
                     # extra-header against the token minted for this call_id
                     # BEFORE the provider session opens. Fail-closed by default.

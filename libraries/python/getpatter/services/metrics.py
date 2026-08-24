@@ -734,11 +734,17 @@ class CallMetricsAccumulator:
         time (``self.realtime_model``); pass an explicit value to override
         per-call (the ``response.done`` payload carries the model used).
         """
-        # Per-minute realtime engines (e.g. xAI Grok Voice Agent) are billed on
-        # session duration in ``_compute_cost``, NOT on token usage — skip the
-        # token accounting so no bogus per-token cost / cached-savings figure
-        # is attributed to them.
-        if self.provider_mode == "xai_realtime":
+        # Engines that are NOT token-billed against the OpenAI Realtime rate
+        # table must skip this accounting entirely: ``calculate_realtime_cost``
+        # defaults to ``provider="openai_realtime"``, so feeding their usage
+        # through it attributes OpenAI's per-token prices to them and yields a
+        # bogus cost / cached-savings figure that ``_compute_cost`` then throws
+        # away anyway (it reads ``_total_llm_cost`` for these modes).
+        #   xai_realtime     - billed per session MINUTE in ``_compute_cost``.
+        #   inworld_realtime - Inworld publishes no Realtime rate at all, and
+        #     its adapter is OpenAI-Realtime-compatible, so its ``response.done``
+        #     can carry a usage payload that would otherwise be priced as OpenAI.
+        if self.provider_mode in ("xai_realtime", "inworld_realtime"):
             return
         resolved_model = model or self.realtime_model or None
         self._total_realtime_cost += calculate_realtime_cost(
@@ -1129,6 +1135,19 @@ class CallMetricsAccumulator:
                 provider="xai_realtime",
                 duration_seconds=duration_seconds,
             )
+        elif self.provider_mode == "inworld_realtime":
+            # Inworld Realtime: zero AI cost DELIBERATELY, not by omission.
+            # Inworld publishes no Realtime / speech-to-speech rate
+            # (https://inworld.ai/pricing, as of 2026-08-24, lists only TTS-2,
+            # TTS-2-Flash, STT-1, LLM and subscription tiers), so there is no
+            # rate to meter and inventing one would misreport spend. This branch
+            # exists so an Inworld call is distinguishable from an unset-provider
+            # pipeline call instead of silently falling through to the pipeline
+            # else-branch. Meter it here once Inworld publishes a rate and a
+            # matching ``pricing.py`` entry exists.
+            stt_cost = 0.0
+            tts_cost = 0.0
+            llm_cost = 0.0
         elif self.provider_mode == "elevenlabs_convai":
             # ElevenLabs ConvAI: bundled pricing, estimate from duration
             stt_cost = 0.0

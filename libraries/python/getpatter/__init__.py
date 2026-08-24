@@ -104,8 +104,10 @@ from getpatter.engines.openai import Realtime as OpenAIRealtime
 from getpatter.engines.openai_realtime_2 import Realtime2 as OpenAIRealtime2
 from getpatter.engines.elevenlabs import ConvAI as ElevenLabsConvAI
 from getpatter.engines.xai import XaiRealtime
+from getpatter.engines.inworld import InworldRealtime
 from getpatter.providers.openai_realtime_2 import OpenAIRealtime2Adapter
 from getpatter.providers.xai_realtime import XaiRealtimeAdapter
+from getpatter.providers.inworld_realtime import InworldRealtimeAdapter
 
 # STT flat aliases — parity with libraries/typescript/src/index.ts.
 from getpatter.stt.deepgram import STT as DeepgramSTT
@@ -536,6 +538,8 @@ __all__ = [
     "OpenAIRealtime2Adapter",
     "XaiRealtime",
     "XaiRealtimeAdapter",
+    "InworldRealtime",
+    "InworldRealtimeAdapter",
     "ElevenLabsConvAI",
     "DeepgramSTT",
     "WhisperSTT",
