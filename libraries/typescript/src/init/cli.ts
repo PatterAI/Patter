@@ -125,6 +125,12 @@ const PIPELINE_STT: Record<string, ProviderEntry> = {
     env: ['FISH_AUDIO_API_KEY'],
     extra: 'fish_audio',
   },
+  xai: {
+    cls: 'XaiSTT',
+    label: 'xAI Grok (streaming)',
+    env: ['XAI_API_KEY'],
+    extra: 'xai',
+  },
 };
 const DEFAULT_STT = 'deepgram';
 
@@ -206,6 +212,12 @@ const PIPELINE_TTS: Record<string, ProviderEntry> = {
     label: 'Fish Audio (s2.1-pro)',
     env: ['FISH_AUDIO_API_KEY'],
     extra: 'fish_audio',
+  },
+  xai: {
+    cls: 'XaiTTS',
+    label: 'xAI Grok (eve default)',
+    env: ['XAI_API_KEY'],
+    extra: 'xai',
   },
 };
 const DEFAULT_TTS = 'elevenlabs';

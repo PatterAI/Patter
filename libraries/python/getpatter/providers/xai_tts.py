@@ -26,6 +26,7 @@ import os
 from typing import Any, AsyncIterator, ClassVar, Optional
 
 from getpatter.providers.base import TTSProvider
+from getpatter.providers.xai_voices import XAI_DEFAULT_VOICE, normalize_xai_voice
 
 logger = logging.getLogger("getpatter.providers.xai_tts")
 
@@ -41,9 +42,10 @@ XAI_TTS_REST_URL = "https://api.x.ai/v1/tts"
 # Custom-voice creation endpoint (multipart upload of a reference clip).
 XAI_CUSTOM_VOICES_URL = "https://api.x.ai/v1/custom-voices"
 
-# xAI's default voice. The full 26-voice roster is shared with the Voice Agent
-# API; ``eve`` is the documented default.
-XAI_DEFAULT_VOICE = "eve"
+# ``XAI_DEFAULT_VOICE`` re-exported (imported above) from
+# ``getpatter.providers.xai_voices`` — see ``XAI_VOICES`` there for the full
+# built-in roster, shared with the Voice Agent API — so existing
+# ``from .xai_tts import XAI_DEFAULT_VOICE`` imports keep working.
 
 # Pipeline-friendly defaults when the caller leaves codec / sample_rate unset:
 # raw PCM-16-LE @ 16 kHz (NOT xAI's own mp3 default, which the pipeline can't
@@ -106,7 +108,10 @@ class XaiTTS(TTSProvider):
             )
 
         self.api_key = resolved_key
-        self.voice = voice
+        # Normalize before it is ever sent: built-in ids are case-insensitive
+        # on the xAI side (trim + lowercase); a custom cloned voice_id is an
+        # arbitrary opaque string and is left untouched apart from trimming.
+        self.voice = normalize_xai_voice(voice)
         self.language = language
         self.speed = speed
         self.optimize_streaming_latency = optimize_streaming_latency

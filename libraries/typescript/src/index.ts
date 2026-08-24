@@ -70,6 +70,8 @@ export {
   sarvam,
   fishAudio,
   fishAudioAsr,
+  xai,
+  xaiAsr,
   ultravox,
   geminiLive,
 } from "./providers";
@@ -155,6 +157,17 @@ export type {
 // xAI TTS custom-voice helper + codec enum.
 export { xaiCreateCustomVoice, XaiTTSCodec } from "./providers/xai-tts";
 export type { XaiCreateCustomVoiceOptions } from "./providers/xai-tts";
+// xAI built-in voice catalog — shared by TTS, Realtime and the `xai()` /
+// `xaiAsr()` config helpers above.
+export {
+  XAI_VOICE_IDS,
+  XAI_VOICES,
+  XAI_DEFAULT_VOICE,
+  isXaiBuiltinVoice,
+  normalizeXaiVoice,
+  getXaiVoice,
+} from "./providers/xai-voices";
+export type { XaiVoiceId, XaiVoiceInfo } from "./providers/xai-voices";
 export { scheduleCron, scheduleOnce, scheduleInterval } from "./scheduler";
 export type { ScheduleHandle, JobCallback } from "./scheduler";
 // Provider adapter types (re-exported for advanced users who build custom

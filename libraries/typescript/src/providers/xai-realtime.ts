@@ -35,13 +35,14 @@ import {
   type OpenAIRealtimeOptions,
 } from './openai-realtime';
 import { OpenAIRealtime2Adapter } from './openai-realtime-2';
+import { XAI_DEFAULT_VOICE, normalizeXaiVoice } from './xai-voices';
 
 /** Default xAI Voice Agent WebSocket base URL (no query string). */
 export const XAI_REALTIME_WS_URL = 'wss://api.x.ai/v1/realtime';
 /** Default model — `grok-voice-latest` always points at the newest voice model. */
 export const XAI_REALTIME_DEFAULT_MODEL = 'grok-voice-latest';
-/** Default voice — xAI's built-in `eve` (case-insensitive). */
-export const XAI_REALTIME_DEFAULT_VOICE = 'eve';
+/** Default voice — xAI's built-in `eve` (case-insensitive). Alias of {@link XAI_DEFAULT_VOICE}. */
+export const XAI_REALTIME_DEFAULT_VOICE = XAI_DEFAULT_VOICE;
 /**
  * xAI's input-transcription model. Setting it keeps the session xAI-valid —
  * the GA base defaults to OpenAI's `whisper-1`, which the xAI endpoint rejects.
@@ -190,7 +191,9 @@ export class XaiRealtimeAdapter extends OpenAIRealtime2Adapter {
     super(
       apiKey,
       opts.model ?? XAI_REALTIME_DEFAULT_MODEL,
-      opts.voice ?? XAI_REALTIME_DEFAULT_VOICE,
+      // Normalized before it reaches the base adapter so the eventual
+      // `session.update`'s `audio.output.voice` is already wire-correct.
+      normalizeXaiVoice(opts.voice ?? XAI_REALTIME_DEFAULT_VOICE),
       opts.instructions ?? '',
       opts.tools,
       opts.audioFormat ?? OpenAIRealtimeAudioFormat.G711_ULAW,

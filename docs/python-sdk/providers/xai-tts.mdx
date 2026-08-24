@@ -138,6 +138,24 @@ xAI ships a roster of 26 built-in voices, each with a distinct personality. `eve
 | `zagan` | Powerful, dramatic, and unmistakable | Characters, Narration |
 | `zenith` | Sharp, focused, and driven | Sales, Advertising |
 
+### Programmatic access
+
+The table above is also available in code as `XAI_VOICES`, along with `is_xai_builtin_voice` for telling a built-in id apart from a custom cloned one (both are case-insensitive), and the `xai()` / `xai_asr()` helpers for building a pipeline-mode `TTSConfig` / `STTConfig`:
+
+```python Python
+from getpatter import XAI_VOICES, is_xai_builtin_voice
+from getpatter.providers import xai, xai_asr
+
+for voice in XAI_VOICES:
+    print(voice.id, voice.tone, voice.use_cases)
+
+is_xai_builtin_voice("EVE")           # True  — built-in ids are case-insensitive
+is_xai_builtin_voice("my-cloned-id")  # False — a custom voice, left untouched
+
+tts_config = xai(api_key="...", voice="eve")
+stt_config = xai_asr(api_key="...", language="en")
+```
+
 ### Custom voices
 
 Clone a voice from a short reference clip (WAV, ≤120 s) with the custom-voices helper. It returns a `voice_id` usable as the `voice` on both `XaiTTS` and the [xAI Realtime engine](/python-sdk/providers/xai-realtime):

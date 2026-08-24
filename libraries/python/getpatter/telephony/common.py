@@ -206,10 +206,28 @@ def _create_stt_from_config(config, for_twilio: bool = False):
         kwargs = {k: v for k, v in opts.items() if k in allowed}
         return FishAudioSTT(api_key=config.api_key, language=config.language, **kwargs)
 
+    if provider == "xai":
+        from getpatter.providers.xai_stt import XaiSTT  # type: ignore[import]
+
+        allowed = {
+            "encoding",
+            "sample_rate",
+            "interim_results",
+            "endpointing_ms",
+            "smart_turn",
+            "smart_turn_timeout_ms",
+            "keyterms",
+            "diarize",
+            "filler_words",
+            "base_url",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        return XaiSTT(api_key=config.api_key, language=config.language, **kwargs)
+
     raise ValueError(
         f"Unknown STT provider '{provider}'. "
         "Supported: deepgram, whisper, cartesia, soniox, speechmatics, "
-        "assemblyai, fish_audio."
+        "assemblyai, fish_audio, xai."
     )
 
 
@@ -376,8 +394,24 @@ def _create_tts_from_config(config):
             api_key=config.api_key, voice=config.voice or None, **kwargs
         )
 
+    if provider == "xai_tts":
+        from getpatter.providers.xai_tts import XaiTTS  # type: ignore[import]
+
+        allowed = {
+            "language",
+            "speed",
+            "optimize_streaming_latency",
+            "text_normalization",
+            "codec",
+            "sample_rate",
+            "bit_rate",
+            "base_url",
+        }
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        return XaiTTS(api_key=config.api_key, voice=config.voice, **kwargs)
+
     raise ValueError(
         f"Unknown TTS provider '{provider}'. "
         "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld, "
-        "soniox_tts, sarvam, fish_audio."
+        "soniox_tts, sarvam, fish_audio, xai_tts."
     )

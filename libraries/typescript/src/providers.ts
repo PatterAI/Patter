@@ -1,4 +1,5 @@
 import type { STTConfig, TTSConfig } from "./types";
+import { XAI_DEFAULT_VOICE, normalizeXaiVoice } from "./providers/xai-voices";
 
 /**
  * Config envelope for realtime / ConvAI pipelines — mirrors the wire-level
@@ -187,6 +188,34 @@ export function fishAudio(opts: { apiKey: string; voice?: string }): TTSConfig {
  */
 export function fishAudioAsr(opts: { apiKey: string; language?: string }): STTConfig {
   return new STTConfigImpl("fish_audio", opts.apiKey, opts.language ?? "en");
+}
+
+/**
+ * xAI (Grok) TTS config helper (parity with Python ``getpatter.providers.xai``).
+ *
+ * ``voice`` is a built-in xAI voice id (see ``XAI_VOICES`` / ``isXaiBuiltinVoice``
+ * from ``getpatter``) or a custom cloned ``voice_id``; built-in ids are
+ * case-insensitive and normalized here, defaulting to ``"eve"``. For pipeline
+ * use the documented path is the direct adapter ``new XaiTTS({...})`` from
+ * ``getpatter``. Provider key ``"xai_tts"`` matches ``XaiTTS.providerKey`` and
+ * the ``DEFAULT_PRICING`` entry it bills against.
+ */
+export function xai(opts: { apiKey: string; voice?: string }): TTSConfig {
+  return new TTSConfigImpl(
+    "xai_tts",
+    opts.apiKey,
+    normalizeXaiVoice(opts.voice ?? XAI_DEFAULT_VOICE),
+  );
+}
+
+/**
+ * xAI (Grok) streaming STT config helper (parity with Python
+ * ``getpatter.providers.xai_asr``). Shares the ``XAI_API_KEY`` credential
+ * family with xAI TTS and Realtime. Provider key ``"xai"`` matches
+ * ``XaiSTT.providerKey`` and the ``DEFAULT_PRICING`` entry it bills against.
+ */
+export function xaiAsr(opts: { apiKey: string; language?: string }): STTConfig {
+  return new STTConfigImpl("xai", opts.apiKey, opts.language ?? "en");
 }
 
 // ---------------------------------------------------------------------------

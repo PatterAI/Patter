@@ -28,6 +28,7 @@
  */
 
 import { getLogger } from '../logger';
+import { XAI_DEFAULT_VOICE, normalizeXaiVoice } from './xai-voices';
 
 /** xAI one-shot TTS REST endpoint. */
 export const XAI_TTS_REST_URL = 'https://api.x.ai/v1/tts';
@@ -36,9 +37,6 @@ export const XAI_CUSTOM_VOICES_URL = 'https://api.x.ai/v1/custom-voices';
 // WebSocket streaming endpoint (documented for reference; not used by this
 // HTTP-bytes adapter).
 export const XAI_TTS_WS_URL = 'wss://api.x.ai/v1/tts';
-
-/** xAI default voice — the built-in `eve` (case-insensitive). */
-const XAI_DEFAULT_VOICE = 'eve';
 
 /**
  * Output codecs accepted by the xAI `output_format.codec` field. `MULAW` /
@@ -119,7 +117,10 @@ export class XaiTTS {
       throw new Error('xAI TTS: apiKey is required');
     }
     this.apiKey = apiKey;
-    this.voice = opts.voice ?? XAI_DEFAULT_VOICE;
+    // Normalized here (not just at send time) so `this.voice` always reflects
+    // exactly what goes on the wire — built-in ids lowercase, custom
+    // `voice_id`s trimmed but otherwise untouched.
+    this.voice = normalizeXaiVoice(opts.voice ?? XAI_DEFAULT_VOICE);
     this.language = opts.language ?? 'auto';
     this.codec = opts.codec ?? XaiTTSCodec.PCM;
     this.sampleRate = opts.sampleRate ?? XaiTTSSampleRate.HZ_16000;

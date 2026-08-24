@@ -31,12 +31,16 @@ from __future__ import annotations
 from typing import Any, ClassVar, Mapping, Sequence
 
 from getpatter.providers.openai_realtime_2 import OpenAIRealtime2Adapter
+from getpatter.providers.xai_voices import XAI_DEFAULT_VOICE, normalize_xai_voice
 
 # Default Grok voice model. ``grok-voice-latest`` tracks the current flagship
 # (``grok-voice-think-fast-1.0`` at time of writing).
 XAI_REALTIME_URL = "wss://api.x.ai/v1/realtime"
 XAI_DEFAULT_MODEL = "grok-voice-latest"
-XAI_DEFAULT_VOICE = "eve"
+# ``XAI_DEFAULT_VOICE`` re-exported (imported above) from
+# ``getpatter.providers.xai_voices`` — see ``XAI_VOICES`` there for the full
+# built-in roster, shared with the TTS REST endpoint — so existing
+# ``from .xai_realtime import XAI_DEFAULT_VOICE`` imports keep working.
 # xAI's input-transcription model. Setting it enables the
 # ``conversation.item.input_audio_transcription.updated`` events (display-only);
 # omitting the OpenAI-only ``whisper-1`` default keeps the session xAI-valid.
@@ -75,6 +79,12 @@ class XaiRealtimeAdapter(OpenAIRealtime2Adapter):
         # explicit model/voice/transcription-model always wins.
         kwargs.setdefault("model", XAI_DEFAULT_MODEL)
         kwargs.setdefault("voice", XAI_DEFAULT_VOICE)
+        # Normalize before it is ever sent in ``session.update``: built-in ids
+        # are case-insensitive on the xAI side (trim + lowercase); a custom
+        # cloned voice_id is an opaque string and is left untouched apart from
+        # trimming. ``self.voice`` (set by the parent from this kwarg) is what
+        # ``_build_ga_session_config`` — inherited from the GA adapter — reads.
+        kwargs["voice"] = normalize_xai_voice(kwargs["voice"])
         kwargs.setdefault("input_audio_transcription_model", XAI_TRANSCRIPTION_MODEL)
         # xAI-specific session knobs (grafted in ``_build_ga_session_config``).
         # ``reasoning_effort`` and ``silence_duration_ms`` are reused from the

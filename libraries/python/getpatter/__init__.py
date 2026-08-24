@@ -140,6 +140,15 @@ from getpatter.tts.soniox import TTS as SonioxTTS
 from getpatter.tts.sarvam import TTS as SarvamTTS
 from getpatter.tts.xai import TTS as XaiTTS
 from getpatter.providers.xai_tts import create_custom_voice as xai_create_custom_voice
+from getpatter.providers.xai_voices import (
+    XaiVoice,
+    XAI_VOICES,
+    XAI_VOICE_IDS,
+    XAI_DEFAULT_VOICE,
+    is_xai_builtin_voice,
+    normalize_xai_voice,
+    get_xai_voice,
+)
 from getpatter.tts.fish_audio import TTS as FishAudioTTS
 from getpatter.tts.fish_audio import WebSocketTTS as FishAudioWebSocketTTS
 
@@ -552,6 +561,13 @@ __all__ = [
     "SarvamTTS",
     "XaiTTS",
     "xai_create_custom_voice",
+    "XaiVoice",
+    "XAI_VOICES",
+    "XAI_VOICE_IDS",
+    "XAI_DEFAULT_VOICE",
+    "is_xai_builtin_voice",
+    "normalize_xai_voice",
+    "get_xai_voice",
     "FishAudioTTS",
     "FishAudioWebSocketTTS",
     "OpenAILLM",

@@ -83,6 +83,16 @@ describe('[mocked] xAI TTS — request + streaming', () => {
     });
   });
 
+  it('normalizes the voice before it is sent: trims + lowercases a built-in, only trims a custom id', async () => {
+    const builtin = new XaiTTS('xai-test-key', { voice: ' LEO ' });
+    await builtin.synthesize('hi');
+    expect(lastBody).toMatchObject({ voice_id: 'leo' });
+
+    const custom = new XaiTTS('xai-test-key', { voice: '  CustomVoice_1  ' });
+    await custom.synthesize('hi');
+    expect(lastBody).toMatchObject({ voice_id: 'CustomVoice_1' });
+  });
+
   it('nests an MP3 bit_rate under output_format when set (omitted otherwise)', async () => {
     const tts = new XaiTTS('xai-test-key', {
       codec: 'mp3',
