@@ -23,4 +23,5 @@ __all__ = [
     "sarvam",
     "xai",
     "fish_audio",
+    "gemini",
 ]

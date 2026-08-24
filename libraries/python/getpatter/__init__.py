@@ -117,6 +117,7 @@ from getpatter.stt.speechmatics import STT as SpeechmaticsSTT
 from getpatter.stt.assemblyai import STT as AssemblyAISTT
 from getpatter.stt.xai import STT as XaiSTT
 from getpatter.stt.fish_audio import STT as FishAudioSTT
+from getpatter.stt.gemini import STT as GeminiSTT
 from getpatter.providers.xai_stt import (
     XaiTranscription,
     XaiWord,
@@ -151,6 +152,7 @@ from getpatter.providers.xai_voices import (
 )
 from getpatter.tts.fish_audio import TTS as FishAudioTTS
 from getpatter.tts.fish_audio import WebSocketTTS as FishAudioWebSocketTTS
+from getpatter.tts.gemini import TTS as GeminiTTS
 
 # LLM flat aliases — parity with libraries/typescript/src/index.ts and mirror of STT/TTS layout.
 from getpatter.llm.openai import LLM as OpenAILLM
@@ -549,6 +551,7 @@ __all__ = [
     "XaiWord",
     "xai_transcribe",
     "FishAudioSTT",
+    "GeminiSTT",
     "ElevenLabsTTS",
     "ElevenLabsWebSocketTTS",
     "ElevenLabsRestTTS",
@@ -570,6 +573,7 @@ __all__ = [
     "get_xai_voice",
     "FishAudioTTS",
     "FishAudioWebSocketTTS",
+    "GeminiTTS",
     "OpenAILLM",
     "AnthropicLLM",
     "GroqLLM",

@@ -169,6 +169,12 @@ sarvam = ["aiohttp>=3.10"]
 gemini-live = [
     "google-genai>=1.55",
 ]
+# Gemini TTS (gemini-3.1-flash-tts-preview) + Gemini multimodal STT. Same
+# vendor SDK as ``[gemini-live]`` / ``[google]``; kept as its own extra so the
+# pipeline adapters can be installed without implying the realtime engine.
+gemini = [
+    "google-genai>=1.55",
+]
 ultravox = [
     "aiohttp>=3.10",
 ]

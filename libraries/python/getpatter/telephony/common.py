@@ -224,10 +224,19 @@ def _create_stt_from_config(config, for_twilio: bool = False):
         kwargs = {k: v for k, v in opts.items() if k in allowed}
         return XaiSTT(api_key=config.api_key, language=config.language, **kwargs)
 
+    if provider == "gemini_stt":
+        from getpatter.providers.gemini_stt import GeminiSTT  # type: ignore[import]
+
+        # ``config.language`` is dropped on purpose: the Gemini adapter takes
+        # its language from the audio itself, so there is no language knob.
+        allowed = {"model", "sample_rate"}
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        return GeminiSTT(api_key=config.api_key, **kwargs)
+
     raise ValueError(
         f"Unknown STT provider '{provider}'. "
         "Supported: deepgram, whisper, cartesia, soniox, speechmatics, "
-        "assemblyai, fish_audio, xai."
+        "assemblyai, fish_audio, xai, gemini_stt."
     )
 
 
@@ -410,8 +419,24 @@ def _create_tts_from_config(config):
         kwargs = {k: v for k, v in opts.items() if k in allowed}
         return XaiTTS(api_key=config.api_key, voice=config.voice, **kwargs)
 
+    if provider == "gemini_tts":
+        from getpatter.providers.gemini_tts import (  # type: ignore[import]
+            GEMINI_TTS_DEFAULT_VOICE,
+            GeminiTTS,
+        )
+
+        allowed = {"model", "target_sample_rate"}
+        kwargs = {k: v for k, v in opts.items() if k in allowed}
+        # An empty ``voice`` means "leave the default" — Gemini has no
+        # "model's own voice" concept, so it must resolve to a real voice name.
+        return GeminiTTS(
+            api_key=config.api_key,
+            voice=config.voice or GEMINI_TTS_DEFAULT_VOICE,
+            **kwargs,
+        )
+
     raise ValueError(
         f"Unknown TTS provider '{provider}'. "
         "Supported: elevenlabs, openai, cartesia, rime, lmnt, inworld, "
-        "soniox_tts, sarvam, fish_audio, xai_tts."
+        "soniox_tts, sarvam, fish_audio, xai_tts, gemini_tts."
     )

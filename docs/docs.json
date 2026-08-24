@@ -129,7 +129,8 @@
                       "python-sdk/providers/speechmatics",
                       "python-sdk/providers/telnyx-stt",
                       "python-sdk/providers/xai-stt",
-                      "python-sdk/providers/fish-audio-stt"
+                      "python-sdk/providers/fish-audio-stt",
+                      "python-sdk/providers/gemini-stt"
                     ]
                   },
                   {
@@ -157,7 +158,8 @@
                       "python-sdk/providers/inworld",
                       "python-sdk/providers/telnyx-tts",
                       "python-sdk/providers/xai-tts",
-                      "python-sdk/providers/fish-audio-tts"
+                      "python-sdk/providers/fish-audio-tts",
+                      "python-sdk/providers/gemini-tts"
                     ]
                   },
                   {
