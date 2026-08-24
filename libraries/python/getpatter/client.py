@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 logger = logging.getLogger("getpatter")
 
+from getpatter.engines.gemini import GEMINI_API_KEY_ENV_VARS
 from getpatter.exceptions import PatterConnectionError
 from getpatter.local_config import LocalConfig
 from getpatter.models import (
@@ -2016,9 +2017,13 @@ class Patter:
         openai_engine_key: str = ""
         elevenlabs_engine_key: str = ""
         xai_engine_key: str = ""
+        gemini_engine_key: str = ""
         # Engine-supplied xAI Grok Voice Agent session tuning (dict of only the
         # set knobs), forwarded to ``XaiRealtimeAdapter`` by the stream-handler.
         xai_realtime_config: dict | None = None
+        # Engine-supplied Gemini Live session tuning (dict of only the set
+        # knobs), forwarded to ``GeminiLiveAdapter`` by the stream-handler.
+        gemini_live_config: dict | None = None
         # Engine-supplied OpenAI Realtime extras propagated to Agent so the
         # stream-handler can forward them to ``OpenAIRealtimeAdapter``.
         openai_realtime_reasoning_effort: str | None = None
@@ -2070,6 +2075,15 @@ class Patter:
                     for k, v in engine_fields.items()
                     if k not in ("api_key", "voice", "model") and v is not None
                 }
+            elif engine_kind == "gemini_live":
+                gemini_engine_key = engine_fields.get("api_key", "")
+                # Carry only the SET Gemini session knobs (drop None) —
+                # voice/model are already applied to the top-level slots above.
+                gemini_live_config = {
+                    k: v
+                    for k, v in engine_fields.items()
+                    if k not in ("api_key", "voice", "model") and v is not None
+                }
             elif engine_kind == "elevenlabs_convai":
                 elevenlabs_engine_key = engine_fields.get("api_key", "")
         elif provider is not None:
@@ -2100,6 +2114,34 @@ class Patter:
             )
         if xai_engine_key and not self._local_config.xai_key:
             self._local_config = replace(self._local_config, xai_key=xai_engine_key)
+        if gemini_engine_key and not self._local_config.gemini_key:
+            self._local_config = replace(
+                self._local_config, gemini_key=gemini_engine_key
+            )
+
+        if provider == "gemini_live" and not self._local_config.gemini_key:
+            # The marker deliberately does not raise on a missing key (so
+            # ``GeminiLive()`` stays constructible); this is where a keyless
+            # Gemini Live agent fails fast, at build time rather than mid-call.
+            _env_gemini_key = next(
+                (
+                    os.environ[name]
+                    for name in GEMINI_API_KEY_ENV_VARS
+                    if os.environ.get(name)
+                ),
+                "",
+            )
+            if _env_gemini_key:
+                self._local_config = replace(
+                    self._local_config, gemini_key=_env_gemini_key
+                )
+            else:
+                self._record_config_incomplete("llm_key")
+                raise ValueError(
+                    "Gemini Live mode requires a Google API key. Pass "
+                    "engine=GeminiLive(api_key='...') or set GEMINI_API_KEY "
+                    "(or GOOGLE_API_KEY) in the environment."
+                )
 
         if (
             provider in ("openai_realtime", "openai_realtime_2")
@@ -2338,6 +2380,7 @@ class Patter:
             realtime_turn_detection=realtime_turn_detection,
             realtime_gate_response_on_transcript=realtime_gate_response_on_transcript,
             xai_realtime=xai_realtime_config,
+            gemini_live=gemini_live_config,
             tool_call_preambles=tool_call_preambles,
             preemptive_generation=preemptive_generation,
             preemptive_min_stable_ms=preemptive_min_stable_ms,
@@ -2350,10 +2393,21 @@ class Patter:
     def _unpack_engine(engine: Any) -> tuple[str, dict]:
         """Convert an engine instance to ``(kind, {voice, model, api_key, agent_id})``."""
         from getpatter.engines.elevenlabs import ConvAI as _ConvAI
+        from getpatter.engines.gemini import GeminiLive as _GeminiLive
         from getpatter.engines.openai import Realtime as _Realtime
         from getpatter.engines.openai_realtime_2 import Realtime2 as _Realtime2
         from getpatter.engines.xai import XaiRealtime as _XaiRealtime
 
+        if isinstance(engine, _GeminiLive):
+            return "gemini_live", {
+                "api_key": engine.api_key,
+                "voice": engine.voice,
+                "model": engine.model,
+                "language": engine.language,
+                "temperature": engine.temperature,
+                "input_sample_rate": engine.input_sample_rate,
+                "output_sample_rate": engine.output_sample_rate,
+            }
         if isinstance(engine, _XaiRealtime):
             return "xai_realtime", {
                 "api_key": engine.api_key,
@@ -2403,7 +2457,8 @@ class Patter:
             }
         raise TypeError(
             "engine= must be an OpenAIRealtime(...), OpenAIRealtime2(...), "
-            "XaiRealtime(...), or ElevenLabsConvAI(...) instance, got "
+            "XaiRealtime(...), GeminiLive(...), or ElevenLabsConvAI(...) "
+            "instance, got "
             f"{type(engine).__name__}"
         )
 

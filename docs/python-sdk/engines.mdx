@@ -1,6 +1,6 @@
 ---
 title: "Engines"
-description: "End-to-end speech-to-speech runtimes (OpenAI Realtime, OpenAI Realtime 2, ElevenLabs ConvAI)."
+description: "End-to-end speech-to-speech runtimes (OpenAI Realtime, OpenAI Realtime 2, ElevenLabs ConvAI, xAI Grok Voice, Gemini Live)."
 icon: "bolt"
 ---
 
@@ -14,6 +14,7 @@ Patter ships several engine classes:
 - [`OpenAIRealtime2`](#openairealtime2) — OpenAI's GA Realtime API (`gpt-realtime-2`), separate marker because the GA endpoint speaks a different `session.update` wire shape
 - [`ElevenLabsConvAI`](#elevenlabsconvai) — ElevenLabs Conversational AI
 - [`XaiRealtime`](#xairealtime) — xAI Grok Voice Agent (OpenAI-GA-compatible)
+- [`GeminiLive`](#geminilive) — Google Gemini Live native audio
 
 Each class ships as both a **flat alias** (`from getpatter import OpenAIRealtime`) and a **namespaced** class (`from getpatter.engines import openai` → `openai.Realtime()`). They are equivalent.
 
@@ -203,6 +204,75 @@ For the full session-option surface — VAD tuning, language hint, keyterms, pro
 <Note>
 **Beta** — spec-validated, not yet live-call-validated.
 </Note>
+
+## GeminiLive
+
+Google's **Gemini Live** native-audio API — audio in, audio out, no separate STT or TTS.
+
+```python
+import asyncio
+from getpatter import Patter, Twilio, GeminiLive
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")   # TWILIO_* from env
+
+agent = phone.agent(
+    engine=GeminiLive(voice="Puck"),                            # GEMINI_API_KEY from env
+    system_prompt="You are a friendly receptionist.",
+    first_message="Hello! How can I help?",
+)
+
+async def main():
+    await phone.serve(agent)
+
+asyncio.run(main())
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `api_key` | `str` | `""` | Google AI Studio key. Reads from `GEMINI_API_KEY`, then `GOOGLE_API_KEY`, when empty. |
+| `model` | `str` | `"gemini-3.1-flash-live-preview"` | Gemini Live model ID. See [supported models](/python-sdk/providers/gemini-live#models). |
+| `voice` | `str` | `"Puck"` | One of `"Puck"`, `"Charon"`, `"Kore"`, `"Fenrir"`, `"Aoede"`. |
+| `language` | `str \| None` | `None` | BCP-47 language for the spoken reply. `None` falls back to `agent(language=...)` and then `"en-US"`. |
+| `temperature` | `float \| None` | `None` | Sampling temperature. `None` keeps the adapter default (`0.8`). |
+| `input_sample_rate` | `int` | `16000` | PCM16 mono rate sent to Gemini. |
+| `output_sample_rate` | `int` | `24000` | PCM16 mono rate Gemini returns. |
+
+Namespaced form:
+
+```python
+from getpatter.engines import gemini
+
+engine = gemini.GeminiLive()                          # reads GEMINI_API_KEY / GOOGLE_API_KEY
+engine = gemini.GeminiLive(voice="Kore", temperature=0.4)
+```
+
+<Note>
+**Telephony audio.** Gemini Live only speaks PCM16. Patter transcodes at the
+boundary: the carrier's mulaw 8 kHz is decoded and resampled up to
+`input_sample_rate` on the way in, and Gemini's `output_sample_rate` PCM is
+resampled down and mulaw-encoded on the way out. You don't configure anything.
+</Note>
+
+<Note>
+**Install the extra.** Native-audio Gemini Live needs `google-genai`:
+`pip install "getpatter[gemini-live]"`.
+</Note>
+
+Requires `pip install "getpatter[gemini-live]"`. For the adapter-level surface — event
+types, tool wiring, and model notes — see
+[Gemini Live — full reference](/python-sdk/providers/gemini-live).
+
+<Warning>
+**Not yet metered.** Gemini Live calls report a `$0` AI cost: the adapter does not
+surface Gemini's token usage, so there is nothing to price. Telephony cost is
+unaffected. Same gap in the TypeScript SDK.
+</Warning>
+
+<Warning>
+**Mid-call limits.** Gemini Live fixes the prompt and tool list at connect time, so
+[multi-agent handoff](/python-sdk/agents) cannot swap them — a `handoff_to` call logs a
+warning and the call continues under the original agent. Barge-in is server-side only.
+</Warning>
 
 ## What's Next
 

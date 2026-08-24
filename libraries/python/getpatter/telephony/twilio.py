@@ -434,6 +434,7 @@ async def twilio_stream_bridge(
     agent,
     openai_key: str,
     xai_key: str = "",
+    gemini_key: str = "",
     on_call_start=None,
     on_call_end=None,
     on_transcript=None,
@@ -667,7 +668,14 @@ async def twilio_stream_bridge(
                 # to emit g711_ulaw @ 8 kHz directly (see below), so for that
                 # provider we skip the built-in PCM→mulaw transcoding path.
                 # Pipeline / ConvAI still produce PCM16 @ 16 kHz.
-                _input_is_mulaw = provider in ("openai_realtime", "openai_realtime_2")
+                # ``gemini_live`` is included because its boundary shim
+                # (providers/gemini_live_bridge) mu-law-encodes Gemini's
+                # PCM output down to 8 kHz before the handler sees it.
+                _input_is_mulaw = provider in (
+                    "openai_realtime",
+                    "openai_realtime_2",
+                    "gemini_live",
+                )
                 audio_sender = TwilioAudioSender(
                     websocket, stream_sid, input_is_mulaw_8k=_input_is_mulaw
                 )
@@ -787,6 +795,7 @@ async def twilio_stream_bridge(
                         metrics=metrics,
                         openai_key=openai_key,
                         xai_key=xai_key,
+                        gemini_key=gemini_key,
                         transfer_fn=_twilio_transfer,
                         hangup_fn=_twilio_hangup,
                         on_transcript=on_transcript,
