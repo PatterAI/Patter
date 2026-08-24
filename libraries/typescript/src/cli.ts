@@ -112,12 +112,12 @@ function parseArgs(argv: string[]): { port: number } {
 async function runEvalCommand(args: string[]): Promise<number> {
   if (args[0] !== 'run' || !args[1]) {
     console.log('Usage: getpatter eval run <suite> [--agent module:export]');
-    console.log('       [--judge-model gpt-4o-mini] [--pass-threshold 0.7] [--output report.json]');
+    console.log('       [--judge-model gpt-5.6-luna] [--pass-threshold 0.7] [--output report.json]');
     return 2;
   }
   const suitePath = args[1];
   let agentSpec = '';
-  let judgeModel = 'gpt-4o-mini';
+  let judgeModel = 'gpt-5.6-luna';
   let passThreshold = 0.7;
   let output = '';
   for (let i = 2; i < args.length; i++) {

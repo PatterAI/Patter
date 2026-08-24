@@ -29,7 +29,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 PRICING_VERSION: str = "2026.3"
-PRICING_LAST_UPDATED: str = "2026-05-08"
+PRICING_LAST_UPDATED: str = "2026-08-24"
 
 
 def _resolve_provider_rates(provider_config: dict, model: str | None) -> dict:
@@ -122,6 +122,11 @@ DEFAULT_PRICING: dict[str, dict] = {
             "gpt-4o-mini-transcribe": {"price": 0.003},
             # Streaming Whisper variant used inside Realtime sessions.
             "gpt-realtime-whisper": {"price": 0.017},
+            # gpt-transcribe / gpt-live-transcribe — next-gen standalone/
+            # streaming transcription models. Source:
+            # https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+            "gpt-transcribe": {"price": 0.0045},
+            "gpt-live-transcribe": {"price": 0.017},
         },
     },
     # OpenAI standalone transcription endpoint (separate ``provider_key``
@@ -133,6 +138,9 @@ DEFAULT_PRICING: dict[str, dict] = {
             "gpt-4o-transcribe": {"price": 0.006},
             "gpt-4o-mini-transcribe": {"price": 0.003},
             "whisper-1": {"price": 0.006},
+            # Source: https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+            "gpt-transcribe": {"price": 0.0045},
+            "gpt-live-transcribe": {"price": 0.017},
         },
     },
     # AssemblyAI Universal-Streaming: $0.15/hr = $0.0025/min
@@ -321,6 +329,33 @@ DEFAULT_PRICING: dict[str, dict] = {
                 "cached_audio_input_per_token": 0.0000004,
                 "cached_text_input_per_token": 0.0000004,
             },
+            # gpt-realtime-2.1: point release of gpt-realtime-2, same published
+            # per-token rates (audio in $32/M, audio out $64/M, text in $4/M,
+            # text out $24/M, cached $0.40/M). gpt-realtime-2 remains the
+            # SDK's realtime engine default — this entry only makes the rate
+            # resolvable when a caller opts into the newer model id. Source:
+            # https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+            "gpt-realtime-2.1": {
+                "audio_input_per_token": 0.000032,
+                "audio_output_per_token": 0.000064,
+                "text_input_per_token": 0.000004,
+                "text_output_per_token": 0.000024,
+                "cached_audio_input_per_token": 0.0000004,
+                "cached_text_input_per_token": 0.0000004,
+            },
+            # gpt-realtime-2.1-mini: point release of gpt-realtime-mini, same
+            # published per-token rates (audio in $10/M, audio out $20/M,
+            # text in $0.60/M, text out $2.40/M, cached audio $0.30/M, cached
+            # text $0.06/M). Source: https://developers.openai.com/api/docs/pricing
+            # (verified 2026-08-24).
+            "gpt-realtime-2.1-mini": {
+                "audio_input_per_token": 0.00001,
+                "audio_output_per_token": 0.00002,
+                "text_input_per_token": 0.0000006,
+                "text_output_per_token": 0.0000024,
+                "cached_audio_input_per_token": 0.0000003,
+                "cached_text_input_per_token": 0.00000006,
+            },
             # gpt-realtime-mini and gpt-4o-mini-realtime-preview share the
             # provider defaults. Listed explicitly so tooling can introspect.
             "gpt-realtime-mini": {
@@ -331,6 +366,10 @@ DEFAULT_PRICING: dict[str, dict] = {
                 "cached_audio_input_per_token": 0.0000003,
                 "cached_text_input_per_token": 0.00000006,
             },
+            # gpt-4o-mini-realtime-preview: LEGACY — no longer listed on
+            # https://developers.openai.com/api/docs/pricing as of 2026-08-24.
+            # Entry kept (rates unchanged since last verified) for existing
+            # callers; do not route new integrations to it.
             "gpt-4o-mini-realtime-preview": {
                 "audio_input_per_token": 0.00001,
                 "audio_output_per_token": 0.00002,
@@ -647,6 +686,15 @@ LLM_PRICING: dict[str, dict[str, dict[str, float]]] = {
         "gpt-4.1-mini": {"input": 0.40, "output": 1.60, "cache_read": 0.10},
         "o3": {"input": 2.00, "output": 8.00, "cache_read": 0.50},
         "o4-mini": {"input": 1.10, "output": 4.40, "cache_read": 0.275},
+        # GPT-5.6 family — Patter's chat LLM default is gpt-5.6-luna (see
+        # llm/openai.py). "gpt-5.6" is an alias for gpt-5.6-sol and is listed
+        # as its own key (not a prefix-derived match) so a caller passing the
+        # bare alias resolves correctly. Source:
+        # https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+        "gpt-5.6": {"input": 4.00, "output": 20.00, "cache_read": 0.40},  # alias for gpt-5.6-sol
+        "gpt-5.6-sol": {"input": 4.00, "output": 20.00, "cache_read": 0.40},
+        "gpt-5.6-terra": {"input": 2.00, "output": 12.00, "cache_read": 0.20},
+        "gpt-5.6-luna": {"input": 0.20, "output": 1.20, "cache_read": 0.02},
     },
     "anthropic": {
         "claude-opus-4-7": {

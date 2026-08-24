@@ -120,6 +120,10 @@ const stt3 = new OpenAITranscribeSTT({ apiKey: "sk-...", language: "es" });
 | `model` | `string` | `"gpt-4o-transcribe"` | Either `"gpt-4o-transcribe"` or `"gpt-4o-mini-transcribe"`. |
 | `responseFormat` | `string` | `"json"` | Pass `"verbose_json"` to expose segment-level confidence and timestamps. |
 
+<Note>
+OpenAI's pricing catalog also lists two newer transcription models: `gpt-transcribe` ($0.0045/min, successor to `gpt-4o-transcribe`) and `gpt-live-transcribe` ($0.017/min, streaming-optimised, successor to `gpt-realtime-whisper`). Both rates are in Patter's pricing catalog (`openai_transcribe` / `whisper` providers). `OpenAITranscribeSTT` does not yet accept them as a `model` override — to route the Realtime engine's built-in transcription through them today, pass `inputAudioTranscriptionModel: "gpt-transcribe"` (or `"gpt-live-transcribe"`) on [`OpenAIRealtime`](/typescript-sdk/providers/openai-realtime#streaming-transcription).
+</Note>
+
 ## Cartesia
 
 Streaming STT using Cartesia's `ink-whisper`. See [Cartesia setup](/typescript-sdk/providers/cartesia).

@@ -4167,7 +4167,7 @@ class PipelineStreamHandler(StreamHandler):
             tool_executor = ToolExecutor() if combined_tools else None
             llm_model = self.agent.model
             if "realtime" in llm_model:
-                llm_model = "gpt-4o-mini"
+                llm_model = "gpt-5.6-luna"
             self._llm_loop = LLMLoop(
                 openai_key=self._openai_key,
                 model=llm_model,

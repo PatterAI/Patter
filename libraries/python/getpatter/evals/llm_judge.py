@@ -35,7 +35,7 @@ class LLMJudge:
 
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-5.6-luna",
         api_key: str | None = None,
         pass_threshold: float = 0.7,
         backend: Any = None,

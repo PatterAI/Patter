@@ -371,4 +371,14 @@ describe("flat re-exports from getpatter (LLM)", () => {
     expect(new flat.CerebrasLLM()).toBeDefined();
     expect(new flat.GoogleLLM()).toBeDefined();
   });
+
+  it("OpenAILLM defaults to gpt-5.6-luna when model is omitted", () => {
+    const llm = new openaiLlm.LLM({ apiKey: "sk-x" });
+    expect(llm.model).toBe("gpt-5.6-luna");
+  });
+
+  it("OpenAILLM honours an explicit model override", () => {
+    const llm = new openaiLlm.LLM({ apiKey: "sk-x", model: "gpt-5.6-sol" });
+    expect(llm.model).toBe("gpt-5.6-sol");
+  });
 });

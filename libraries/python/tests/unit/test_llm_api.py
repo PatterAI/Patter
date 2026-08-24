@@ -286,6 +286,19 @@ class TestFlatReExports:
         assert GoogleLLM is ns_google
 
 
+@pytest.mark.unit
+class TestOpenAILLMDefaultModel:
+    """``OpenAILLM`` (``getpatter.llm.openai.LLM``) defaults to gpt-5.6-luna."""
+
+    def test_defaults_to_gpt_5_6_luna_when_model_omitted(self) -> None:
+        llm = OpenAILLM(api_key="sk-x")
+        assert llm._model == "gpt-5.6-luna"
+
+    def test_honours_explicit_model_override(self) -> None:
+        llm = OpenAILLM(api_key="sk-x", model="gpt-5.6-sol")
+        assert llm._model == "gpt-5.6-sol"
+
+
 # ---------------------------------------------------------------------------
 # OpenAILLMProvider — sampling kwargs forwarding (Wave 10A refactor)
 # ---------------------------------------------------------------------------

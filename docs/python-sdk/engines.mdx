@@ -56,7 +56,7 @@ and converts on the carrier leg — you don't configure anything.
 | `voice` | `str` | `"alloy"` | One of `"alloy"`, `"ash"`, `"ballad"`, `"coral"`, `"echo"`, `"fable"`, `"nova"`, `"onyx"`, `"sage"`, `"shimmer"`, `"verse"`. |
 | `model` | `str` | `"gpt-realtime-mini"` | OpenAI Realtime model ID. See [supported models](/python-sdk/providers/openai-realtime#models). |
 | `reasoning_effort` | `"minimal" \| "low" \| "medium" \| "high" \| None` | `None` | Reasoning tier for `gpt-realtime-2`. `None` leaves the field unset (server default). OpenAI recommends `"low"` for production voice flows; higher tiers add measurable per-turn latency. No-op on models that ignore it. |
-| `input_audio_transcription_model` | `str \| None` | `None` | Override the Realtime session's `input_audio_transcription.model`. `None` keeps the adapter default (`"whisper-1"`). Use `"gpt-realtime-whisper"` for low-latency partials, `"gpt-4o-transcribe"` for higher accuracy. |
+| `input_audio_transcription_model` | `str \| None` | `None` | Override the Realtime session's `input_audio_transcription.model`. `None` keeps the adapter default (`"whisper-1"`). Use `"gpt-realtime-whisper"` or `"gpt-live-transcribe"` for low-latency partials, `"gpt-4o-transcribe"` or `"gpt-transcribe"` for higher accuracy. |
 
 ### Supported model identifiers
 
@@ -67,6 +67,8 @@ The `model` argument accepts any OpenAI Realtime model ID. Common values:
 | `"gpt-realtime-mini"` | Default. Lowest latency / lowest cost. |
 | `"gpt-realtime"` | GA realtime model (Aug 2025). |
 | `"gpt-realtime-2"` | Most-capable: stronger instruction following, configurable `reasoning_effort`, 128K context. |
+| `"gpt-realtime-2.1"` | Point release of `gpt-realtime-2`; same published per-token rates. |
+| `"gpt-realtime-2.1-mini"` | Point release of `gpt-realtime-mini`; same published per-token rates. |
 | `"gpt-4o-realtime-preview"` | Earlier preview line; ~10x the per-token cost of mini. |
 | `"gpt-4o-mini-realtime-preview"` | Earlier preview line. |
 
@@ -107,7 +109,7 @@ asyncio.run(main())
 |-----------|------|---------|-------------|
 | `api_key` | `str` | `""` | OpenAI API key. Reads from `OPENAI_API_KEY` when empty. |
 | `voice` | `str` | `"alloy"` | Same voice set as `OpenAIRealtime`. |
-| `model` | `str` | `"gpt-realtime-2"` | Pinned to the GA model. Override only if OpenAI ships future GA-shaped models. |
+| `model` | `str` | `"gpt-realtime-2"` | Pinned to the GA model. `"gpt-realtime-2.1"` is also available — pass `model="gpt-realtime-2.1"` to opt in. Override only if OpenAI ships future GA-shaped models. |
 | `reasoning_effort` | `"minimal" \| "low" \| "medium" \| "high" \| None` | `None` | `gpt-realtime-2` reasoning tier. `"low"` is OpenAI's recommendation for production voice flows. |
 | `input_audio_transcription_model` | `str \| None` | `None` | Override for `audio.input.transcription.model`. `None` keeps the adapter default (`"whisper-1"`). |
 

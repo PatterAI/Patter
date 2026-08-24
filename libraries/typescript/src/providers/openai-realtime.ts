@@ -51,6 +51,8 @@ export type OpenAIRealtimeAudioFormat =
 export const OpenAIRealtimeModel = {
   GPT_REALTIME: 'gpt-realtime',
   GPT_REALTIME_2: 'gpt-realtime-2',
+  GPT_REALTIME_2_1: 'gpt-realtime-2.1',
+  GPT_REALTIME_2_1_MINI: 'gpt-realtime-2.1-mini',
   GPT_REALTIME_MINI: 'gpt-realtime-mini',
   GPT_4O_REALTIME_PREVIEW: 'gpt-4o-realtime-preview',
   GPT_4O_MINI_REALTIME_PREVIEW: 'gpt-4o-mini-realtime-preview',
@@ -90,6 +92,8 @@ export const OpenAITranscriptionModel = {
   GPT_4O_TRANSCRIBE: 'gpt-4o-transcribe',
   GPT_4O_MINI_TRANSCRIBE: 'gpt-4o-mini-transcribe',
   GPT_REALTIME_WHISPER: 'gpt-realtime-whisper',
+  GPT_TRANSCRIBE: 'gpt-transcribe',
+  GPT_LIVE_TRANSCRIBE: 'gpt-live-transcribe',
 } as const;
 /** Union of {@link OpenAITranscriptionModel} string values. */
 export type OpenAITranscriptionModel =

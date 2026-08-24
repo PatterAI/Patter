@@ -4026,8 +4026,8 @@ export class StreamHandler {
       const llmLabel = this.deps.agent.llm.constructor?.name ?? 'custom';
       getLogger().debug(`Built-in LLM loop active (pipeline, ${label}, llm=${llmLabel})`);
     } else if (!this.deps.onMessage && this.deps.config.openaiKey) {
-      let llmModel = this.deps.agent.model || 'gpt-4o-mini';
-      if (llmModel.includes('realtime')) llmModel = 'gpt-4o-mini';
+      let llmModel = this.deps.agent.model || 'gpt-5.6-luna';
+      if (llmModel.includes('realtime')) llmModel = 'gpt-5.6-luna';
       const augmentedTools = this.buildPipelineLlmTools();
       this.llmLoop = new LLMLoop(
         this.deps.config.openaiKey,

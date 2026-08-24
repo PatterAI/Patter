@@ -107,7 +107,7 @@ class TestSession:
             tool_executor = ToolExecutor() if agent.tools else None
             llm_model = agent.model
             if "realtime" in llm_model:
-                llm_model = "gpt-4o-mini"
+                llm_model = "gpt-5.6-luna"
 
             # Resolve variables in system prompt
             resolved_prompt = agent.system_prompt

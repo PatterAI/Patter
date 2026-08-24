@@ -448,3 +448,121 @@ describe('LLM cost billing — Cerebras + Groq silent under-billing regression',
     expect(specCost).toBeGreaterThan(verCost);
   });
 });
+
+describe('GPT-5.6 chat LLM pricing (Patter default: gpt-5.6-luna)', () => {
+  // Source: https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+  it('gpt-5.6-sol bills $4/M input, $20/M output, $0.40/M cached', () => {
+    expect(llmPricing.openai['gpt-5.6-sol']).toEqual({ input: 4.0, output: 20.0, cache_read: 0.4 });
+    const cost = calculateLlmCost('openai', 'gpt-5.6-sol', 1_000_000, 1_000_000);
+    expect(cost).toBeCloseTo(4.0 + 20.0, 6);
+  });
+
+  it('gpt-5.6-terra bills $2/M input, $12/M output, $0.20/M cached', () => {
+    expect(llmPricing.openai['gpt-5.6-terra']).toEqual({ input: 2.0, output: 12.0, cache_read: 0.2 });
+    const cost = calculateLlmCost('openai', 'gpt-5.6-terra', 1_000_000, 1_000_000);
+    expect(cost).toBeCloseTo(2.0 + 12.0, 6);
+  });
+
+  it('gpt-5.6-luna (the chat LLM default) bills $0.20/M input, $1.20/M output, $0.02/M cached', () => {
+    expect(llmPricing.openai['gpt-5.6-luna']).toEqual({ input: 0.2, output: 1.2, cache_read: 0.02 });
+    const cost = calculateLlmCost('openai', 'gpt-5.6-luna', 1_000_000, 1_000_000);
+    expect(cost).toBeCloseTo(0.2 + 1.2, 6);
+  });
+
+  it('"gpt-5.6" (bare alias) resolves to the same rate as gpt-5.6-sol', () => {
+    const aliasCost = calculateLlmCost('openai', 'gpt-5.6', 1_000_000, 1_000_000);
+    const solCost = calculateLlmCost('openai', 'gpt-5.6-sol', 1_000_000, 1_000_000);
+    expect(aliasCost).toBeCloseTo(solCost, 9);
+    expect(aliasCost).toBeCloseTo(24.0, 6);
+  });
+
+  it('a dated gpt-5.6-luna id resolves via longest-prefix match, not the bare alias', () => {
+    // "gpt-5.6-luna-2026-08" starts with both "gpt-5.6" and "gpt-5.6-luna" —
+    // the longer, more specific key must win so luna's cheap rate applies.
+    const cost = calculateLlmCost('openai', 'gpt-5.6-luna-2026-08', 1_000_000, 1_000_000);
+    expect(cost).toBeCloseTo(0.2 + 1.2, 6);
+  });
+
+  it('cached (read) tokens bill at the discounted rate', () => {
+    const cost = calculateLlmCost('openai', 'gpt-5.6-luna', 0, 0, 1_000_000);
+    expect(cost).toBeCloseTo(0.02, 6);
+  });
+});
+
+describe('gpt-realtime-2.1 / gpt-realtime-2.1-mini pricing', () => {
+  // Source: https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+  it('exposes gpt-realtime-2.1 and gpt-realtime-2.1-mini under openai_realtime.models', () => {
+    const models = DEFAULT_PRICING.openai_realtime.models!;
+    expect(models['gpt-realtime-2.1']).toBeDefined();
+    expect(models['gpt-realtime-2.1-mini']).toBeDefined();
+  });
+
+  it('gpt-realtime-2.1 matches gpt-realtime-2 published per-1M-token rates', () => {
+    const e = DEFAULT_PRICING.openai_realtime.models!['gpt-realtime-2.1'];
+    expect(e.text_input_per_token).toBeCloseTo(4 / 1_000_000, 12);
+    expect(e.text_output_per_token).toBeCloseTo(24 / 1_000_000, 12);
+    expect(e.audio_input_per_token).toBeCloseTo(32 / 1_000_000, 12);
+    expect(e.audio_output_per_token).toBeCloseTo(64 / 1_000_000, 12);
+    expect(e.cached_audio_input_per_token).toBeCloseTo(0.4 / 1_000_000, 12);
+    expect(e.cached_text_input_per_token).toBeCloseTo(0.4 / 1_000_000, 12);
+  });
+
+  it('gpt-realtime-2.1-mini matches gpt-realtime-mini published per-1M-token rates', () => {
+    const e = DEFAULT_PRICING.openai_realtime.models!['gpt-realtime-2.1-mini'];
+    expect(e.text_input_per_token).toBeCloseTo(0.6 / 1_000_000, 12);
+    expect(e.text_output_per_token).toBeCloseTo(2.4 / 1_000_000, 12);
+    expect(e.audio_input_per_token).toBeCloseTo(10 / 1_000_000, 12);
+    expect(e.audio_output_per_token).toBeCloseTo(20 / 1_000_000, 12);
+    expect(e.cached_audio_input_per_token).toBeCloseTo(0.3 / 1_000_000, 12);
+    expect(e.cached_text_input_per_token).toBeCloseTo(0.06 / 1_000_000, 12);
+  });
+
+  it('calculateRealtimeCost auto-resolves gpt-realtime-2.1 without an override', () => {
+    const pricing = mergePricing();
+    // 1000 audio input tokens at $32/M = $0.032
+    const cost = calculateRealtimeCost(
+      {
+        input_token_details: { audio_tokens: 1000, text_tokens: 0 },
+        output_token_details: { audio_tokens: 0, text_tokens: 0 },
+      },
+      pricing,
+      'gpt-realtime-2.1',
+    );
+    expect(cost).toBeCloseTo(0.032, 6);
+  });
+
+  it('calculateRealtimeCost auto-resolves gpt-realtime-2.1-mini without an override', () => {
+    const pricing = mergePricing();
+    // 1000 audio input tokens at $10/M = $0.01
+    const cost = calculateRealtimeCost(
+      {
+        input_token_details: { audio_tokens: 1000, text_tokens: 0 },
+        output_token_details: { audio_tokens: 0, text_tokens: 0 },
+      },
+      pricing,
+      'gpt-realtime-2.1-mini',
+    );
+    expect(cost).toBeCloseTo(0.01, 6);
+  });
+});
+
+describe('gpt-transcribe / gpt-live-transcribe pricing', () => {
+  // Source: https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+  it('resolves under the whisper provider', () => {
+    const pricing = mergePricing();
+    expect(calculateSttCost('whisper', 60, pricing, 'gpt-transcribe')).toBeCloseTo(0.0045, 6);
+    expect(calculateSttCost('whisper', 60, pricing, 'gpt-live-transcribe')).toBeCloseTo(0.017, 6);
+  });
+
+  it('resolves under the openai_transcribe provider', () => {
+    const pricing = mergePricing();
+    expect(calculateSttCost('openai_transcribe', 60, pricing, 'gpt-transcribe')).toBeCloseTo(
+      0.0045,
+      6,
+    );
+    expect(calculateSttCost('openai_transcribe', 60, pricing, 'gpt-live-transcribe')).toBeCloseTo(
+      0.017,
+      6,
+    );
+  });
+});

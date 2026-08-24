@@ -5,7 +5,7 @@ import { OpenAILLMProvider as _OpenAILLM } from "../llm-loop";
 export interface OpenAILLMOptions {
   /** API key. Falls back to OPENAI_API_KEY env var when omitted. */
   apiKey?: string;
-  /** Chat Completions model id. Defaults to ``"gpt-4o-mini"``. */
+  /** Chat Completions model id. Defaults to ``"gpt-5.6-luna"``. */
   model?: string;
   /** Sampling temperature [0, 2]. */
   temperature?: number;
@@ -36,7 +36,7 @@ export interface OpenAILLMOptions {
  * ```ts
  * import * as openai from "getpatter/llm/openai";
  * const llm = new openai.LLM();                           // reads OPENAI_API_KEY
- * const llm = new openai.LLM({ apiKey: "sk-...", model: "gpt-4o-mini", temperature: 0.4 });
+ * const llm = new openai.LLM({ apiKey: "sk-...", model: "gpt-5.6-luna", temperature: 0.4 });
  * ```
  */
 export class LLM extends _OpenAILLM {
@@ -48,7 +48,7 @@ export class LLM extends _OpenAILLM {
         "OpenAI LLM requires an apiKey. Pass { apiKey: 'sk-...' } or set OPENAI_API_KEY.",
       );
     }
-    super(key, opts.model ?? "gpt-4o-mini", {
+    super(key, opts.model ?? "gpt-5.6-luna", {
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
       responseFormat: opts.responseFormat,

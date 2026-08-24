@@ -55,6 +55,11 @@ async def test_llm_judge_parses_score_and_reasoning():
     assert result.reasoning == "great"
 
 
+def test_llm_judge_defaults_to_gpt_5_6_luna_when_model_omitted():
+    judge = LLMJudge()
+    assert judge.model == "gpt-5.6-luna"
+
+
 @pytest.mark.asyncio
 async def test_llm_judge_tolerates_code_fences():
     judge = LLMJudge(backend=FakeBackend({"score": 0.5, "passed": False, "reasoning": "meh"}))

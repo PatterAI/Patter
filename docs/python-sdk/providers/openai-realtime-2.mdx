@@ -10,6 +10,8 @@ icon: "bolt"
 
 For the legacy beta endpoint and the lower-cost `gpt-realtime-mini` model, keep using [`OpenAIRealtime`](/python-sdk/providers/openai-realtime). The two engines coexist — pick `OpenAIRealtime2` only when you specifically want the GA endpoint or the `gpt-realtime-2` model.
 
+`gpt-realtime-2.1` — a point release of `gpt-realtime-2` at the same published rates — is also available; pass `model="gpt-realtime-2.1"` to opt in. `gpt-realtime-2` remains the default.
+
 <Note>
 The GA endpoint rejects the legacy `OpenAI-Beta: realtime=v1` header and expects `output_modalities`, nested `audio.{input,output}` blocks with MIME-type strings, and `session.type = "realtime"`. These wire-shape differences are why GA needs its own adapter — the beta `OpenAIRealtimeAdapter` cannot reach `gpt-realtime-2` reliably.
 </Note>

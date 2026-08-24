@@ -20,6 +20,8 @@ Pass any of these to `model:` on `new OpenAIRealtime(...)`. Pricing is auto-reso
 | `"gpt-realtime-mini"` | $10 / $20 | GA mini — recommended cheap default for new deployments. Pass `model: "gpt-realtime-mini"` explicitly. |
 | `"gpt-realtime"` | $32 / $64 | GA realtime model (Aug 2025). |
 | `"gpt-realtime-2"` | $32 / $64 | Most-capable. Stronger instruction following, 128K context, supports `reasoningEffort`. Use the [`OpenAIRealtime2`](/typescript-sdk/providers/openai-realtime-2) engine for the GA wire shape. |
+| `"gpt-realtime-2.1"` | $32 / $64 | Point release of `gpt-realtime-2` — same published rates. |
+| `"gpt-realtime-2.1-mini"` | $10 / $20 | Point release of `gpt-realtime-mini` — same published rates. |
 | `"gpt-4o-realtime-preview"` | $100 / $200 | Earlier preview, retained for compatibility. |
 
 The same identifiers are exposed as a const object for editor autocomplete:
@@ -60,7 +62,9 @@ The Realtime session can run an inline Whisper-family model on inbound audio so 
 | `"whisper-1"` (default) | $0.006/min | Established Whisper. Slower partials. |
 | `"gpt-4o-mini-transcribe"` | $0.003/min | Cheapest. |
 | `"gpt-4o-transcribe"` | $0.006/min | Higher accuracy. |
+| `"gpt-transcribe"` | $0.0045/min | Next-gen standalone transcription model. |
 | `"gpt-realtime-whisper"` | $0.017/min | Streaming-optimised. Lowest-latency partials. Use when you need fast deltas in the dashboard or for live captioning. |
+| `"gpt-live-transcribe"` | $0.017/min | Next-gen streaming-optimised transcription model. |
 
 Same const-object form:
 

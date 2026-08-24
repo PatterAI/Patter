@@ -2,6 +2,37 @@
 
 ### Added
 
+- **OpenAI GPT-5.6 chat catalog + `gpt-realtime-2.1` / `gpt-transcribe` pricing,
+  both SDKs** — pricing catalog and default-model updates for OpenAI's latest
+  releases, verified against the published rate card 2026-08-24. No enum
+  members removed; all additions.
+  - **Behaviour change — `OpenAILLM` default model is now `"gpt-5.6-luna"`**
+    (was `"gpt-4o-mini"`), in `getpatter.llm.openai.LLM` (Python) and
+    `getpatter/llm/openai.ts` (TS). Same default flows through the eval
+    `LLMJudge` (`--judge-model`), `PipelineStreamHandler`/`stream_handler.ts`,
+    and `test_mode.py`/`test-mode.ts`'s realtime-engine LLM fallback. Existing
+    callers who don't pass `model=` get the new model and new (lower) price on
+    upgrade.
+  - **`LLM_PRICING["openai"]` / `llmPricing.openai`** gains the GPT-5.6 family:
+    `gpt-5.6-sol` ($4/$20/$0.40 per 1M in/out/cached), `gpt-5.6-terra`
+    ($2/$12/$0.20), `gpt-5.6-luna` ($0.20/$1.20/$0.02), plus a bare `gpt-5.6`
+    alias entry (same rate as `-sol`) kept separate from the prefix-matched
+    dated-suffix ids.
+  - **`OpenAIRealtimeModel`** (Python `StrEnum` / TS const object) gains
+    `GPT_REALTIME_2_1` (`"gpt-realtime-2.1"`) and `GPT_REALTIME_2_1_MINI`
+    (`"gpt-realtime-2.1-mini"`), point releases of `gpt-realtime-2` /
+    `gpt-realtime-mini` at the same published per-token rates in
+    `DEFAULT_PRICING["openai_realtime"]`. `gpt-realtime-2` remains the
+    `OpenAIRealtime2` default; the new ids are opt-in only.
+  - **`OpenAITranscriptionModel`** gains `GPT_TRANSCRIBE`
+    (`"gpt-transcribe"`, $0.0045/min) and `GPT_LIVE_TRANSCRIBE`
+    (`"gpt-live-transcribe"`, $0.017/min), priced under both the
+    `openai_realtime` (inline Whisper-family) and `openai_transcribe`
+    provider tables.
+  `libraries/python/getpatter/{llm/openai.py,pricing.py,providers/openai_realtime.py,stream_handler.py,test_mode.py,evals/{cli.py,llm_judge.py}}`,
+  `libraries/typescript/src/{llm/openai.ts,pricing.ts,providers/openai-realtime.ts,stream-handler.ts,test-mode.ts,cli.ts,evals/llm-judge.ts}`,
+  docs updated in `docs/{python-sdk,typescript-sdk}/{engines,llm,stt,providers/openai-realtime,providers/openai-realtime-2}.mdx`.
+
 - **xAI (Grok) voice catalog wired into both SDKs** — the 26 built-in Grok
   voices (`eve` default, `ara`, `rex`, `sal`, `leo`, `carina`, ...) are now a
   typed, immutable catalog instead of docs-only prose:
