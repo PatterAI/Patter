@@ -501,3 +501,132 @@ class TestLLMCostBilling:
         assert spec_cost == pytest.approx(0.99)
         assert ver_cost == pytest.approx(0.79)
         assert spec_cost > ver_cost
+
+
+class TestGpt56ChatPricing:
+    """GPT-5.6 chat LLM family — Patter's default is gpt-5.6-luna.
+
+    Source: https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+    """
+
+    def test_gpt_5_6_sol_rate(self):
+        assert LLM_PRICING["openai"]["gpt-5.6-sol"] == {
+            "input": 4.0,
+            "output": 20.0,
+            "cache_read": 0.4,
+        }
+        cost = calculate_llm_cost("openai", "gpt-5.6-sol", 1_000_000, 1_000_000)
+        assert cost == pytest.approx(4.0 + 20.0)
+
+    def test_gpt_5_6_terra_rate(self):
+        assert LLM_PRICING["openai"]["gpt-5.6-terra"] == {
+            "input": 2.0,
+            "output": 12.0,
+            "cache_read": 0.2,
+        }
+        cost = calculate_llm_cost("openai", "gpt-5.6-terra", 1_000_000, 1_000_000)
+        assert cost == pytest.approx(2.0 + 12.0)
+
+    def test_gpt_5_6_luna_rate(self):
+        """luna is the chat LLM default (see getpatter/llm/openai.py)."""
+        assert LLM_PRICING["openai"]["gpt-5.6-luna"] == {
+            "input": 0.2,
+            "output": 1.2,
+            "cache_read": 0.02,
+        }
+        cost = calculate_llm_cost("openai", "gpt-5.6-luna", 1_000_000, 1_000_000)
+        assert cost == pytest.approx(0.2 + 1.2)
+
+    def test_bare_alias_resolves_to_sol(self):
+        alias_cost = calculate_llm_cost("openai", "gpt-5.6", 1_000_000, 1_000_000)
+        sol_cost = calculate_llm_cost("openai", "gpt-5.6-sol", 1_000_000, 1_000_000)
+        assert alias_cost == pytest.approx(sol_cost)
+        assert alias_cost == pytest.approx(24.0)
+
+    def test_dated_luna_id_resolves_via_longest_prefix_not_bare_alias(self):
+        """``gpt-5.6-luna-2026-08`` starts with both ``gpt-5.6`` and
+        ``gpt-5.6-luna`` — the longer, more specific key must win.
+        """
+        cost = calculate_llm_cost("openai", "gpt-5.6-luna-2026-08", 1_000_000, 1_000_000)
+        assert cost == pytest.approx(0.2 + 1.2)
+
+    def test_cached_tokens_bill_at_discounted_rate(self):
+        cost = calculate_llm_cost(
+            "openai", "gpt-5.6-luna", 0, 0, cache_read_tokens=1_000_000
+        )
+        assert cost == pytest.approx(0.02)
+
+
+class TestRealtime21Pricing:
+    """gpt-realtime-2.1 / gpt-realtime-2.1-mini — point releases of
+    gpt-realtime-2 / gpt-realtime-mini at the same published rates.
+
+    Source: https://developers.openai.com/api/docs/pricing (verified 2026-08-24).
+    gpt-realtime-2 remains the SDK's realtime engine default.
+    """
+
+    def test_model_entries_present(self):
+        models = DEFAULT_PRICING["openai_realtime"]["models"]
+        assert "gpt-realtime-2.1" in models
+        assert "gpt-realtime-2.1-mini" in models
+
+    def test_gpt_realtime_2_1_matches_gpt_realtime_2_rates(self):
+        entry = DEFAULT_PRICING["openai_realtime"]["models"]["gpt-realtime-2.1"]
+        assert entry["text_input_per_token"] == pytest.approx(4.0 / 1_000_000)
+        assert entry["text_output_per_token"] == pytest.approx(24.0 / 1_000_000)
+        assert entry["audio_input_per_token"] == pytest.approx(32.0 / 1_000_000)
+        assert entry["audio_output_per_token"] == pytest.approx(64.0 / 1_000_000)
+        assert entry["cached_audio_input_per_token"] == pytest.approx(0.4 / 1_000_000)
+        assert entry["cached_text_input_per_token"] == pytest.approx(0.4 / 1_000_000)
+
+    def test_gpt_realtime_2_1_mini_matches_gpt_realtime_mini_rates(self):
+        entry = DEFAULT_PRICING["openai_realtime"]["models"]["gpt-realtime-2.1-mini"]
+        assert entry["text_input_per_token"] == pytest.approx(0.6 / 1_000_000)
+        assert entry["text_output_per_token"] == pytest.approx(2.4 / 1_000_000)
+        assert entry["audio_input_per_token"] == pytest.approx(10.0 / 1_000_000)
+        assert entry["audio_output_per_token"] == pytest.approx(20.0 / 1_000_000)
+        assert entry["cached_audio_input_per_token"] == pytest.approx(0.3 / 1_000_000)
+        assert entry["cached_text_input_per_token"] == pytest.approx(0.06 / 1_000_000)
+
+    def test_realtime_cost_auto_resolves_gpt_realtime_2_1(self):
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {"audio_tokens": 1000, "text_tokens": 0},
+            "output_token_details": {"audio_tokens": 0, "text_tokens": 0},
+        }
+        cost = calculate_realtime_cost(usage, pricing, model="gpt-realtime-2.1")
+        assert cost == pytest.approx(0.032)
+
+    def test_realtime_cost_auto_resolves_gpt_realtime_2_1_mini(self):
+        pricing = merge_pricing(None)
+        usage = {
+            "input_token_details": {"audio_tokens": 1000, "text_tokens": 0},
+            "output_token_details": {"audio_tokens": 0, "text_tokens": 0},
+        }
+        cost = calculate_realtime_cost(usage, pricing, model="gpt-realtime-2.1-mini")
+        assert cost == pytest.approx(0.01)
+
+
+class TestGptTranscribeFamilyPricing:
+    """gpt-transcribe / gpt-live-transcribe — next-gen OpenAI transcription
+    models. Source: https://developers.openai.com/api/docs/pricing
+    (verified 2026-08-24).
+    """
+
+    def test_resolves_under_whisper_provider(self):
+        pricing = merge_pricing(None)
+        assert calculate_stt_cost(
+            "whisper", 60.0, pricing, model="gpt-transcribe"
+        ) == pytest.approx(0.0045)
+        assert calculate_stt_cost(
+            "whisper", 60.0, pricing, model="gpt-live-transcribe"
+        ) == pytest.approx(0.017)
+
+    def test_resolves_under_openai_transcribe_provider(self):
+        pricing = merge_pricing(None)
+        assert calculate_stt_cost(
+            "openai_transcribe", 60.0, pricing, model="gpt-transcribe"
+        ) == pytest.approx(0.0045)
+        assert calculate_stt_cost(
+            "openai_transcribe", 60.0, pricing, model="gpt-live-transcribe"
+        ) == pytest.approx(0.017)

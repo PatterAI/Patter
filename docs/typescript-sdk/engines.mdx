@@ -53,7 +53,7 @@ and converts on the carrier leg — you don't configure any of this.
 | `voice` | `string` | `"alloy"` | One of `"alloy"`, `"ash"`, `"ballad"`, `"coral"`, `"echo"`, `"sage"`, `"shimmer"`, `"verse"`. |
 | `model` | `string` | `"gpt-4o-mini-realtime-preview"` | OpenAI Realtime model ID. See [supported models](/typescript-sdk/providers/openai-realtime#models). |
 | `reasoningEffort` | `"minimal" \| "low" \| "medium" \| "high"` | — | Reasoning-effort tier for `gpt-realtime-2`. When omitted, the field is not sent and the server default applies. OpenAI recommends `"low"` for production voice. |
-| `inputAudioTranscriptionModel` | `string` | — | Override for the Realtime session's `input_audio_transcription.model`. Omit to keep `whisper-1`. |
+| `inputAudioTranscriptionModel` | `string` | — | Override for the Realtime session's `input_audio_transcription.model`. Omit to keep `whisper-1`. Use `"gpt-realtime-whisper"` or `"gpt-live-transcribe"` for low-latency partials, `"gpt-4o-transcribe"` or `"gpt-transcribe"` for higher accuracy. |
 
 ### Supported model identifiers
 
@@ -65,6 +65,8 @@ The `model` option accepts any OpenAI Realtime model ID. Common values:
 | `"gpt-realtime-mini"` | GA mini — recommended cheap default for new deployments. |
 | `"gpt-realtime"` | GA realtime model (Aug 2025). |
 | `"gpt-realtime-2"` | Most-capable: stronger instruction following, configurable `reasoningEffort`, 128K context. Use [`OpenAIRealtime2`](#openairealtime2) for the GA wire shape. |
+| `"gpt-realtime-2.1"` | Point release of `gpt-realtime-2`; same published per-token rates. |
+| `"gpt-realtime-2.1-mini"` | Point release of `gpt-realtime-mini`; same published per-token rates. |
 | `"gpt-4o-realtime-preview"` | Earlier preview line; ~10x the per-token cost of mini. |
 
 Pricing is auto-resolved per model — see [Metrics](/typescript-sdk/metrics). For `reasoningEffort`, transcription model, and the full configuration surface, see [OpenAI Realtime — full reference](/typescript-sdk/providers/openai-realtime).
@@ -92,9 +94,9 @@ await phone.serve({ agent });
 |-----------|------|---------|-------------|
 | `apiKey` | `string` | — | OpenAI API key. Reads from `OPENAI_API_KEY` when omitted. |
 | `voice` | `string` | `"alloy"` | Voice preset. |
-| `model` | `string` | `"gpt-realtime-2"` | GA Realtime model. |
+| `model` | `string` | `"gpt-realtime-2"` | GA Realtime model. `"gpt-realtime-2.1"` is also available — pass `model: "gpt-realtime-2.1"` to opt in. |
 | `reasoningEffort` | `"minimal" \| "low" \| "medium" \| "high"` | — | When omitted, the field is not sent and the server default applies. OpenAI recommends `"low"` for production voice. |
-| `inputAudioTranscriptionModel` | `string` | — | Override for `audio.input.transcription.model`. Omit to keep `whisper-1`. |
+| `inputAudioTranscriptionModel` | `string` | — | Override for `audio.input.transcription.model`. Omit to keep `whisper-1`. Use `"gpt-realtime-whisper"` or `"gpt-live-transcribe"` for low-latency partials, `"gpt-4o-transcribe"` or `"gpt-transcribe"` for higher accuracy. |
 
 <Note>
 The GA adapter pins `turn_detection.create_response: false` and `interrupt_response: false` in the `session.update` payload. Patter owns response creation (`response.create`) and barge-in cancellation explicitly so the hallucination filter and barge-in pipeline can decide per turn rather than letting the server VAD auto-trigger. See [`OpenAIRealtime2` — full reference](/typescript-sdk/providers/openai-realtime-2).

@@ -56,13 +56,13 @@ All classes accept an options object with `apiKey?: string` and fall back to the
 
 ### OpenAILLM
 
-OpenAI Chat Completions with streaming + tool calling. Default model `"gpt-4o-mini"`.
+OpenAI Chat Completions with streaming + tool calling. Default model `"gpt-5.6-luna"` (GPT-5.6's cost-optimized tier).
 
 ```typescript
 import { OpenAILLM } from "getpatter";
 
 const llm = new OpenAILLM();                              // reads OPENAI_API_KEY
-const llm2 = new OpenAILLM({ apiKey: "sk-...", model: "gpt-4o-mini" });
+const llm2 = new OpenAILLM({ apiKey: "sk-...", model: "gpt-5.6-luna" });
 ```
 
 ### AnthropicLLM

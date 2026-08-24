@@ -68,8 +68,8 @@ export class TestSession {
     // Set up LLM loop if no onMessage and openaiKey is available
     let llmLoop: LLMLoop | null = null;
     if (!onMessage && openaiKey) {
-      let llmModel = agent.model || 'gpt-4o-mini';
-      if (llmModel.includes('realtime')) llmModel = 'gpt-4o-mini';
+      let llmModel = agent.model || 'gpt-5.6-luna';
+      if (llmModel.includes('realtime')) llmModel = 'gpt-5.6-luna';
 
       let resolvedPrompt = agent.systemPrompt;
       if (agent.variables) {

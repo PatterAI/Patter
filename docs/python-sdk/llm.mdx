@@ -59,14 +59,14 @@ All classes accept `api_key: str | None = None` and fall back to the listed env 
 
 ### OpenAILLM
 
-OpenAI Chat Completions with streaming + tool calling. Default model `"gpt-4o-mini"`. For other OpenAI-compatible endpoints use the dedicated wrappers (`GroqLLM`, `CerebrasLLM`) — they subclass `OpenAILLMProvider` with the right `base_url`.
+OpenAI Chat Completions with streaming + tool calling. Default model `"gpt-5.6-luna"` (GPT-5.6's cost-optimized tier). For other OpenAI-compatible endpoints use the dedicated wrappers (`GroqLLM`, `CerebrasLLM`) — they subclass `OpenAILLMProvider` with the right `base_url`.
 
 ```python
 from getpatter import OpenAILLM                    # flat
 from getpatter.llm import openai                   # namespaced
 
 llm = OpenAILLM()                                   # reads OPENAI_API_KEY
-llm = openai.LLM(api_key="sk-...", model="gpt-4o-mini")
+llm = openai.LLM(api_key="sk-...", model="gpt-5.6-luna")
 ```
 
 ### AnthropicLLM

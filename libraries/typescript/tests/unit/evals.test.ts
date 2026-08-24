@@ -43,6 +43,11 @@ describe('[unit] LLMJudge', () => {
     expect(result.reasoning).toBe('great');
   });
 
+  it('defaults to gpt-5.6-luna when model is omitted', () => {
+    const judge = new LLMJudge();
+    expect(judge.model).toBe('gpt-5.6-luna');
+  });
+
   it('tolerates code fences', async () => {
     const fenced = '```json\n{"score": 0.5, "passed": false, "reasoning": "meh"}\n```';
     const judge = new LLMJudge({

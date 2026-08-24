@@ -34,7 +34,7 @@ def build_eval_parser(subparsers: argparse._SubParsersAction) -> argparse.Argume
         help="Dotted import path to an async agent factory: module:callable",
     )
     run.add_argument(
-        "--judge-model", default="gpt-4o-mini", help="Model the LLM judge should use"
+        "--judge-model", default="gpt-5.6-luna", help="Model the LLM judge should use"
     )
     run.add_argument(
         "--pass-threshold", type=float, default=0.7, help="Score threshold for pass"

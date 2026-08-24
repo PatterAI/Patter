@@ -28,7 +28,7 @@ export interface JudgeBackend {
 
 /** Options for {@link LLMJudge}. Defaults match the Python SDK byte-for-byte. */
 export interface LLMJudgeOptions {
-  /** Model the judge should use. Default: ``gpt-4o-mini``. */
+  /** Model the judge should use. Default: ``gpt-5.6-luna``. */
   readonly model?: string;
   /** OpenAI API key. Falls back to ``OPENAI_API_KEY`` when unset. */
   readonly apiKey?: string;
@@ -46,7 +46,7 @@ export class LLMJudge {
   private readonly backend?: JudgeBackend;
 
   constructor(options: LLMJudgeOptions = {}) {
-    this.model = options.model ?? 'gpt-4o-mini';
+    this.model = options.model ?? 'gpt-5.6-luna';
     this.apiKey = options.apiKey;
     this.passThreshold = options.passThreshold ?? 0.7;
     this.backend = options.backend;

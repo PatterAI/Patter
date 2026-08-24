@@ -18,7 +18,7 @@ class LLM(_OpenAILLM):
         from getpatter.llm import openai
 
         llm = openai.LLM()                            # reads OPENAI_API_KEY
-        llm = openai.LLM(api_key="sk-...", model="gpt-4o-mini")
+        llm = openai.LLM(api_key="sk-...", model="gpt-5.6-luna")
     """
 
     provider_key: ClassVar[str] = "openai"
@@ -27,7 +27,7 @@ class LLM(_OpenAILLM):
         self,
         api_key: str | None = None,
         *,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-5.6-luna",
         **kwargs,
     ) -> None:
         key = api_key or os.environ.get("OPENAI_API_KEY")
