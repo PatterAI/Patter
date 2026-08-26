@@ -162,6 +162,29 @@ This is a tool-call integration for caller-provided media URLs and text. It
 does not inspect live caller audio or replace application-specific escalation
 policy.
 
+## Optional hosted MCP example - Parallel web search
+
+Opt in to Parallel's hosted Search MCP when a caller needs current web research
+or wants the agent to look up a specific URL during a voice call. This gives the
+caller useful, sourced web context without a custom search wrapper and does not
+require an API key. Learn more in the [Parallel Search MCP
+documentation](https://docs.parallel.ai/integrations/mcp/search-mcp).
+
+```typescript
+const agent = phone.agent({
+  engine: new OpenAIRealtime(),
+  systemPrompt:
+    "When the caller asks for current web information, use the Parallel " +
+    "search tools. When they provide a URL, use the URL lookup tool.",
+  mcpServers: ["https://search.parallel.ai/mcp"],
+});
+```
+
+This optional configuration does not change Patter's provider, default, or
+runtime behavior. Only after you explicitly opt in and the agent uses these
+tools, submitted search objectives, search queries, and requested URLs are sent
+to third-party Parallel.
+
 ## Real-world example — Postgres MCP server
 
 Connect a phone agent to a Postgres MCP server so the caller can query an orders table by phone number.
