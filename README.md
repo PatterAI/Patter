@@ -44,7 +44,7 @@ Patter is the **full voice stack** between your application and the phone networ
 | Layer | Choose from |
 |---|---|
 | **LLM** — text generation | OpenAI · Anthropic · Google Gemini · Groq · Cerebras |
-| **STT** — speech-to-text | Deepgram · AssemblyAI · Cartesia · Soniox · Speechmatics · Whisper · Fish Audio |
+| **STT** — speech-to-text | Deepgram · AssemblyAI · Cartesia · Soniox · Speechmatics · Whisper · Fish Audio · Telnyx |
 | **TTS** — text-to-speech | ElevenLabs · OpenAI · Cartesia · LMNT · Rime · Telnyx · Fish Audio |
 | **Realtime** — all-in-one voice | OpenAI Realtime · Gemini Live · Ultravox · ElevenLabs ConvAI |
 | **Telephony** — phone carriers | Twilio · Telnyx · Plivo |

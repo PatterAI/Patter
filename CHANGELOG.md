@@ -23,6 +23,13 @@
   - Docs: `xai-tts.mdx` Voices section links the catalog and helpers in
     both SDKs.
 
+- **Telnyx STT/TTS parity in `patter init`** — the setup wizard now lists
+  `TelnyxSTT` and `TelnyxTTS` in the pipeline provider tables (both SDKs),
+  so picking Telnyx as the carrier no longer hides on-network speech as a
+  pipeline option. Both reuse `TELNYX_API_KEY` (the same key the carrier
+  already reads) and the existing `telnyx-ai` pip extra. README provider
+  table and `.env.example` updated to match.
+
 - **Fish Audio voice provider suite** — TTS (S2.1-Pro / S2-Pro) and ASR land in
   both SDKs, wired end-to-end with real pricing. One `FISH_AUDIO_API_KEY`
   covers both directions of the call:
