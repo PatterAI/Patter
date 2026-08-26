@@ -141,6 +141,12 @@ PIPELINE_STT: dict[str, dict] = {
         "env": ("XAI_API_KEY",),
         "extra": "xai",
     },
+    "telnyx": {
+        "class": "TelnyxSTT",
+        "label": "Telnyx (on-network — telnyx/google/deepgram/azure)",
+        "env": ("TELNYX_API_KEY",),
+        "extra": "telnyx-ai",
+    },
 }
 DEFAULT_STT = "deepgram"
 
@@ -228,6 +234,12 @@ PIPELINE_TTS: dict[str, dict] = {
         "label": "xAI Grok",
         "env": ("XAI_API_KEY",),
         "extra": "xai",
+    },
+    "telnyx": {
+        "class": "TelnyxTTS",
+        "label": "Telnyx (NaturalHD — on-network)",
+        "env": ("TELNYX_API_KEY",),
+        "extra": "telnyx-ai",
     },
 }
 DEFAULT_TTS = "elevenlabs"

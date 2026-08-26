@@ -131,6 +131,12 @@ const PIPELINE_STT: Record<string, ProviderEntry> = {
     env: ['XAI_API_KEY'],
     extra: 'xai',
   },
+  telnyx: {
+    cls: 'TelnyxSTT',
+    label: 'Telnyx (on-network — telnyx/google/deepgram/azure)',
+    env: ['TELNYX_API_KEY'],
+    extra: 'telnyx-ai',
+  },
 };
 const DEFAULT_STT = 'deepgram';
 
@@ -218,6 +224,12 @@ const PIPELINE_TTS: Record<string, ProviderEntry> = {
     label: 'xAI Grok (eve default)',
     env: ['XAI_API_KEY'],
     extra: 'xai',
+  },
+  telnyx: {
+    cls: 'TelnyxTTS',
+    label: 'Telnyx (NaturalHD — on-network)',
+    env: ['TELNYX_API_KEY'],
+    extra: 'telnyx-ai',
   },
 };
 const DEFAULT_TTS = 'elevenlabs';
