@@ -50,6 +50,7 @@ Tool calling works across every provider — each adapter normalizes its vendor-
 | `AnthropicLLM` | `ANTHROPIC_API_KEY` | included |
 | `GroqLLM` | `GROQ_API_KEY` | included |
 | `CerebrasLLM` | `CEREBRAS_API_KEY` | included |
+| `AtlasCloudLLM` | `ATLASCLOUD_API_KEY` | included |
 | `GoogleLLM` | `GEMINI_API_KEY` (falls back to `GOOGLE_API_KEY`) | included |
 
 All classes accept an options object with `apiKey?: string` and fall back to the listed env var when it is omitted.
@@ -92,6 +93,21 @@ import { GroqLLM } from "getpatter";
 const llm = new GroqLLM();                                // reads GROQ_API_KEY
 const llm2 = new GroqLLM({ apiKey: "gsk_...", model: "llama-3.3-70b-versatile" });
 ```
+
+### AtlasCloudLLM
+
+[Atlas Cloud](https://www.atlascloud.ai) aggregator (OpenAI-compatible) at `https://api.atlascloud.ai/v1` — one key and one endpoint in front of 100+ open and frontier models, so changing model is a `model` string rather than a new provider. Default model `"openai/gpt-4.1-mini"`; `GET /v1/models` lists every routable id with its live per-token rates.
+
+Streaming, tool calling and all OpenAI sampling options (`responseFormat`, `parallelToolCalls`, `toolChoice`, `seed`, `topP`, `frequencyPenalty`, `presencePenalty`, `stop`) behave as on `OpenAILLM`. Prompt-cache hits are reported in `usage.prompt_tokens_details.cached_tokens` and billed once at the `cache_read` rate.
+
+```typescript
+import { AtlasCloudLLM } from "getpatter";
+
+const llm = new AtlasCloudLLM();                          // reads ATLASCLOUD_API_KEY
+const llm2 = new AtlasCloudLLM({ apiKey: "apikey-...", model: "deepseek-ai/deepseek-v3.2" });
+```
+
+See the [Atlas Cloud provider page](/typescript-sdk/providers/atlascloud) for the model/pricing table.
 
 ### CerebrasLLM
 
@@ -196,7 +212,7 @@ import { LLMChunk, DefaultToolExecutor, LLMLoop, OpenAILLMProvider } from "getpa
 
 - `LLMChunk` — the streaming-output type yielded by every `LLMProvider.stream(...)` implementation. Carries either a partial text delta, a tool-call delta, or a stream-end marker.
 - `DefaultToolExecutor` — the default tool dispatcher used by `LLMLoop`. Constructs from a `tools` array and resolves both inline `handler` callables and `webhookUrl` HTTP tools. Override its hooks to swap in custom error handling, telemetry, or authentication.
-- `OpenAILLMProvider` — the parent class shared by `OpenAILLM`, `GroqLLM`, `CerebrasLLM`. Sampling options (`temperature`, `topP`, `seed`, `toolChoice`, `responseFormat`, …) live here and are forwarded by every subclass.
+- `OpenAILLMProvider` — the parent class shared by `OpenAILLM`, `GroqLLM`, `CerebrasLLM`, `AtlasCloudLLM`. Sampling options (`temperature`, `topP`, `seed`, `toolChoice`, `responseFormat`, …) live here and are forwarded by every subclass.
 - `LLMLoop` — the orchestration loop wiring an `LLMProvider`, a `DefaultToolExecutor`, and the streaming output back to TTS.
 
 These are stable public symbols mirrored byte-for-byte by the Python SDK.

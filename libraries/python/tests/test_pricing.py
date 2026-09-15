@@ -474,6 +474,17 @@ class TestLLMCostBilling:
             assert cost > 0.0, f"cerebras model {model!r} silently billed $0"
             assert model in LLM_PRICING["cerebras"], f"missing rate for {model!r}"
 
+    def test_atlascloud_all_models_billed(self):
+        """Every model in the AtlasCloudModel enum has a pricing entry (no $0 holes)."""
+        # Driven off the enum itself so adding a model without a rate fails here
+        # rather than silently billing $0 in production.
+        from getpatter.providers.atlascloud_llm import AtlasCloudModel
+
+        for model in (m.value for m in AtlasCloudModel):
+            cost = calculate_llm_cost("atlascloud", model, 10_000, 10_000)
+            assert cost > 0.0, f"atlascloud model {model!r} silently billed $0"
+            assert model in LLM_PRICING["atlascloud"], f"missing rate for {model!r}"
+
     def test_groq_all_models_billed(self):
         """Every model in the GroqModel enum has a pricing entry (no $0 holes)."""
         # Mirrors libraries/python/getpatter/providers/groq_llm.py GroqModel.

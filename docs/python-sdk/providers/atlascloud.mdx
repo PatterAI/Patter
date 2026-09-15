@@ -1,0 +1,161 @@
+---
+title: "Atlas Cloud"
+description: "Atlas Cloud LLM provider — one OpenAI-compatible endpoint in front of 100+ open and frontier models."
+icon: "cloud"
+---
+
+# Atlas Cloud LLM
+
+`AtlasCloudLLM` plugs Atlas Cloud's OpenAI-compatible Chat Completions API at `https://api.atlascloud.ai/v1` into Patter's pipeline mode. It is a thin wrapper around `OpenAILLMProvider` with an Atlas-specific base URL, so streaming, tool calling and every OpenAI sampling parameter behave exactly as they do on `OpenAILLM`.
+
+## Why an aggregator for voice
+
+A phone agent usually needs one model, but rarely the *same* model forever: you tune for latency, then a cheaper open-weights model lands, then one vendor rate-limits you at 6pm. Atlas Cloud fronts 100+ models — OpenAI, DeepSeek, Qwen, GLM, Kimi, MiniMax — behind a single key and a single endpoint, so switching is a `model=` string rather than a new provider, a new key and a new pricing table.
+
+Two things matter specifically for voice:
+
+- **Tool calling works across the catalog.** The models listed below were all verified to emit a streaming `tool_calls` delta for a `transfer_call` function — the pattern Patter's builtin tools rely on.
+- **Reasoning tokens are dead air.** On a phone call, tokens the caller never hears are silence. The default `openai/gpt-4.1-mini` answered a transfer request in 14 completion tokens with zero reasoning tokens; the reasoning-tuned models in the catalog (`kimi-k2.5`, `minimax-m2.5`, `qwen3.5-35b-a3b`) spent 28–64 reasoning tokens first. Pick those deliberately, for the turns that need them.
+
+## Install
+
+```bash
+pip install "getpatter[atlascloud]"
+```
+
+```bash
+npm install getpatter
+```
+
+## Usage
+
+<CodeGroup>
+
+```python Python
+# Namespaced import
+from getpatter.llm import atlascloud
+
+llm = atlascloud.LLM()                                      # reads ATLASCLOUD_API_KEY
+llm = atlascloud.LLM(api_key="apikey-...", model="deepseek-ai/deepseek-v3.2")
+llm = atlascloud.LLM(
+    model="Qwen/Qwen3-235B-A22B-Instruct-2507",
+    temperature=0.4,
+    response_format={"type": "json_object"},                # OpenAI-style structured outputs
+)
+
+# Flat alias (equivalent)
+from getpatter import AtlasCloudLLM
+
+llm = AtlasCloudLLM()
+```
+
+```ts TypeScript
+// Namespaced import
+import * as atlascloud from "getpatter/llm/atlascloud";
+
+const llm = new atlascloud.LLM();                           // reads ATLASCLOUD_API_KEY
+const llm2 = new atlascloud.LLM({ apiKey: "apikey-...", model: "deepseek-ai/deepseek-v3.2" });
+const llm3 = new atlascloud.LLM({
+  model: "Qwen/Qwen3-235B-A22B-Instruct-2507",
+  temperature: 0.4,
+  responseFormat: { type: "json_object" },
+});
+
+// Flat alias (equivalent)
+import { AtlasCloudLLM } from "getpatter";
+
+const llm4 = new AtlasCloudLLM();
+```
+
+</CodeGroup>
+
+<Note>
+The namespaced import (`from getpatter.llm import atlascloud` / `import * as atlascloud from "getpatter/llm/atlascloud"`) auto-resolves the API key from `ATLASCLOUD_API_KEY` and exposes a uniform `LLM` class — the same pattern Patter uses for STT and TTS namespaces.
+</Note>
+
+Plug it into an agent:
+
+<CodeGroup>
+
+```python Python
+import asyncio
+from getpatter import Patter, Twilio, DeepgramSTT, AtlasCloudLLM, ElevenLabsTTS
+
+phone = Patter(carrier=Twilio(), phone_number="+15550001234")
+
+agent = phone.agent(
+    stt=DeepgramSTT(),
+    llm=AtlasCloudLLM(),                                    # ATLASCLOUD_API_KEY from env
+    tts=ElevenLabsTTS(voice_id="rachel"),
+    system_prompt="You are a helpful assistant.",
+    first_message="Hi, how can I help?",
+)
+
+asyncio.run(phone.serve(agent))
+```
+
+```ts TypeScript
+import { Patter, Twilio, DeepgramSTT, AtlasCloudLLM, ElevenLabsTTS } from "getpatter";
+
+const phone = new Patter({ carrier: new Twilio(), phoneNumber: "+15550001234" });
+
+const agent = phone.agent({
+  stt: new DeepgramSTT(),
+  llm: new AtlasCloudLLM(),                                 // ATLASCLOUD_API_KEY from env
+  tts: new ElevenLabsTTS({ voiceId: "rachel" }),
+  systemPrompt: "You are a helpful assistant.",
+  firstMessage: "Hi, how can I help?",
+});
+
+await phone.serve(agent);
+```
+
+</CodeGroup>
+
+Or scaffold a project with it preselected:
+
+```bash
+getpatter init --mode pipeline --llm atlascloud
+```
+
+## Supported models
+
+These are the ids in the `AtlasCloudModel` enum and the ones carrying rates in `LLM_PRICING` / `llmPricing`. Pricing is USD per 1M tokens, read from the gateway's own catalog (`GET /v1/models` → `pricing.prompt` / `pricing.completion` / `pricing.input_cache_read`, in USD per token).
+
+| Model | Input | Output | Cache read | Context | Notes |
+|---|---|---|---|---|---|
+| `openai/gpt-4.1-mini` (default) | $0.40 | $1.60 | $0.10 | 1,047,576 | No reasoning tokens — lowest dead air per turn. |
+| `openai/gpt-5.4-mini` | $0.75 | $4.50 | $0.075 | 400,000 | Deepest cache discount (10× off input). |
+| `deepseek-ai/deepseek-v3.2` | $0.26 | $0.38 | $0.13 | 163,840 | Cheapest output in the set. |
+| `Qwen/Qwen3-235B-A22B-Instruct-2507` | $0.20 | $0.88 | $0.20 | 131,072 | Cheapest input; no cache discount. |
+| `qwen/qwen3.5-35b-a3b` | $0.225 | $1.80 | $0.225 | 262,144 | Reasoning-tuned; no cache discount. |
+| `zai-org/GLM-4.6` | $0.60 | $2.20 | $0.11 | 202,752 | |
+| `moonshotai/kimi-k2.5` | $0.49 | $2.50 | $0.20 | 262,144 | Reasoning-tuned. |
+| `minimaxai/minimax-m2.5` | $0.295 | $1.20 | $0.06 | 196,608 | Reasoning-tuned. |
+
+<Note>
+The gateway routes far more models than these — `GET https://api.atlascloud.ai/v1/models` lists everything currently available, with its live per-token rates. Any id there works as `model=`; models outside the table above simply bill $0 in the dashboard until you add a `pricing={...}` override.
+</Note>
+
+## Environment variables
+
+| Variable | Required | Notes |
+|---|---|---|
+| `ATLASCLOUD_API_KEY` | yes | Auto-loaded when `api_key` / `apiKey` is omitted. |
+
+## Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `api_key` / `apiKey` | `None` | Reads from `ATLASCLOUD_API_KEY` when omitted. |
+| `model` | `"openai/gpt-4.1-mini"` | Any id from `GET /v1/models`. |
+| `base_url` / `baseUrl` | `https://api.atlascloud.ai/v1` | Override the Atlas Cloud endpoint (rarely needed). |
+| `temperature`, `max_tokens`, `top_p`, `seed`, `frequency_penalty`, `presence_penalty`, `stop`, `response_format`, `parallel_tool_calls`, `tool_choice` | unset | All forwarded to `chat.completions.create`. |
+
+## Prompt caching
+
+The gateway reports cached input in the standard OpenAI field (`usage.prompt_tokens_details.cached_tokens`). Patter subtracts it from `prompt_tokens` before billing, so cached tokens are charged once at the `cache_read` rate rather than at both rates. Where a model's `cache_read` equals its `input` rate the gateway is applying no cache discount for that model — the entry is still present in the pricing table, because omitting it would bill those tokens at $0.
+
+## Error handling
+
+Errors surface exactly as they do on `OpenAILLM` — the provider is the same engine with a different `base_url`. Failures retry once with exponential backoff; terminal errors raise `PatterError` so the LLM fallback chain can fail over and the spoken error fallback can fire.

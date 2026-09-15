@@ -217,6 +217,12 @@ def _load_groq_llm():
     return GroqLLMProvider
 
 
+def _load_atlascloud_llm():
+    from getpatter.providers.atlascloud_llm import AtlasCloudLLMProvider
+
+    return AtlasCloudLLMProvider
+
+
 def _load_cerebras_llm():
     from getpatter.providers.cerebras_llm import CerebrasLLMProvider
 
@@ -240,6 +246,7 @@ def __getattr__(name: str):
     loaders = {
         "AnthropicLLMProvider": _load_anthropic_llm,
         "GroqLLMProvider": _load_groq_llm,
+        "AtlasCloudLLMProvider": _load_atlascloud_llm,
         "CerebrasLLMProvider": _load_cerebras_llm,
         "GoogleLLMProvider": _load_google_llm,
         "LiteLLMProvider": _load_litellm,
@@ -272,6 +279,7 @@ __all__ = [
     "sarvam",
     "AnthropicLLMProvider",
     "GroqLLMProvider",
+    "AtlasCloudLLMProvider",
     "CerebrasLLMProvider",
     "GoogleLLMProvider",
     "LiteLLMProvider",

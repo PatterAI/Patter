@@ -1273,6 +1273,7 @@ class StreamHandler(ABC):
             "anthropic",
             "cerebras",
             "groq",
+            "atlascloud",
             "google",
             "gemini",
             "openai",

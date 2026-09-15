@@ -686,6 +686,27 @@ LLM_PRICING: dict[str, dict[str, dict[str, float]]] = {
         "mixtral-8x7b-32768": {"input": 0.27, "output": 0.27},
         "gemma2-9b-it": {"input": 0.20, "output": 0.20},
     },
+    "atlascloud": {
+        # USD per 1M tokens, as of 2026-09-15. Read from the gateway's own
+        # catalog rather than a docs page: ``GET
+        # https://api.atlascloud.ai/v1/models`` returns per-model
+        # ``pricing.prompt`` / ``pricing.completion`` /
+        # ``pricing.input_cache_read`` in USD *per token* — multiply by 1e6.
+        # That endpoint lists every routable model (118 at the time of
+        # writing); the entries below are the ones in ``AtlasCloudModel``.
+        # Unlisted models bill $0 here, so add an entry when you point Patter
+        # at one. Where ``cache_read`` equals ``input`` the gateway applies no
+        # cache discount for that model — the key is still required, because
+        # omitting it bills cached tokens at $0.
+        "openai/gpt-4.1-mini": {"input": 0.40, "output": 1.60, "cache_read": 0.10},
+        "openai/gpt-5.4-mini": {"input": 0.75, "output": 4.50, "cache_read": 0.075},
+        "deepseek-ai/deepseek-v3.2": {"input": 0.26, "output": 0.38, "cache_read": 0.13},
+        "Qwen/Qwen3-235B-A22B-Instruct-2507": {"input": 0.20, "output": 0.88, "cache_read": 0.20},
+        "qwen/qwen3.5-35b-a3b": {"input": 0.225, "output": 1.80, "cache_read": 0.225},
+        "zai-org/GLM-4.6": {"input": 0.60, "output": 2.20, "cache_read": 0.11},
+        "moonshotai/kimi-k2.5": {"input": 0.49, "output": 2.50, "cache_read": 0.20},
+        "minimaxai/minimax-m2.5": {"input": 0.295, "output": 1.20, "cache_read": 0.06},
+    },
     "cerebras": {
         # Rates as of 2026-05-11 verified against the canonical per-model docs
         # pages at ``https://inference-docs.cerebras.ai/models/<model>``. The
@@ -716,7 +737,7 @@ def calculate_llm_cost(
 
     Args:
         provider: Provider key in :data:`LLM_PRICING` (``"anthropic"``,
-            ``"google"``, ``"groq"``, ``"cerebras"``).
+            ``"google"``, ``"groq"``, ``"cerebras"``, ``"atlascloud"``).
         model: Model identifier under the provider (e.g.
             ``"claude-haiku-4-5"``).
         input_tokens: Non-cached input tokens billed at the full rate.

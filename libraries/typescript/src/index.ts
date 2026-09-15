@@ -267,6 +267,8 @@ export { LLM as AnthropicLLM } from "./llm/anthropic";
 export type { AnthropicLLMOptions } from "./llm/anthropic";
 export { LLM as GroqLLM } from "./llm/groq";
 export type { GroqLLMOptions } from "./llm/groq";
+export { LLM as AtlasCloudLLM } from "./llm/atlascloud";
+export type { AtlasCloudLLMOptions } from "./llm/atlascloud";
 export { LLM as CerebrasLLM } from "./llm/cerebras";
 export type { CerebrasLLMOptions } from "./llm/cerebras";
 export { LLM as InworldLLM } from "./llm/inworld";

@@ -139,6 +139,10 @@ anthropic = [
 groq = [
     "openai>=1.0",
 ]
+# Atlas Cloud LLM provider (OpenAI-compatible aggregator gateway).
+atlascloud = [
+    "openai>=1.0",
+]
 # Cerebras LLM provider (OpenAI-compatible with optional msgpack/gzip payload compression).
 cerebras = [
     "openai>=1.0",

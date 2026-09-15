@@ -21,6 +21,7 @@ __all__ = [
     "cerebras",
     "google",
     "litellm",
+    "atlascloud",
     "openai_compatible",
     "custom",
     "hermes",

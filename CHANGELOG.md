@@ -2,6 +2,37 @@
 
 ### Added
 
+- **Atlas Cloud LLM provider** — `AtlasCloudLLM` lands in both SDKs, adding an
+  OpenAI-compatible aggregator gateway (`https://api.atlascloud.ai/v1`) that
+  fronts 100+ open and frontier models behind one key, so swapping models is a
+  `model` string rather than a new provider, key and pricing table:
+  - **`AtlasCloudLLMProvider` / `AtlasCloudLLM`** (Python
+    `getpatter.llm.atlascloud`, TS `getpatter/llm/atlascloud`, plus the flat
+    `AtlasCloudLLM` alias on the package root). It is `OpenAILLMProvider` with
+    an Atlas base URL, so streaming, tool calling and every OpenAI sampling
+    knob (`response_format`, `parallel_tool_calls`, `tool_choice`, `seed`,
+    `top_p`, `frequency_penalty`, `presence_penalty`, `stop`) are inherited
+    unchanged. Credentials come from `ATLASCLOUD_API_KEY` when `api_key` /
+    `apiKey` is omitted. Default model `openai/gpt-4.1-mini` — it answered a
+    tool-calling turn in 14 completion tokens with **zero reasoning tokens**,
+    where the reasoning-tuned models in the catalog spent 28–64 first; on a
+    phone call those are dead air.
+  - **Pricing for all eight `AtlasCloudModel` ids**, read from the gateway's
+    own catalog (`GET /v1/models` → `pricing.prompt` / `pricing.completion` /
+    `pricing.input_cache_read`) rather than a docs snapshot. `cache_read` is
+    populated even where it equals `input` (the gateway applies no discount for
+    those models) — omitting the key would have billed cached tokens at $0.
+    Both pricing tests are driven off the enum, so adding a model without a
+    rate fails CI instead of silently under-billing.
+  - **`atlascloud` extra** (`pip install 'getpatter[atlascloud]'`), an
+    `ATLASCLOUD_API_KEY` line in both `.env.example` files, an **Atlas Cloud
+    entry in `patter init`**'s pipeline LLM table (both runtimes), and
+    `atlascloud` added to the telemetry vendor allowlist so the stack field
+    reports the real vendor instead of collapsing to `other`.
+  - Docs: `providers/atlascloud.mdx` in both SDK sections (model + live
+    pricing table, prompt-cache semantics) and an `AtlasCloudLLM` entry in each
+    `llm.mdx`.
+
 - **xAI (Grok) voice catalog wired into both SDKs** — the 26 built-in Grok
   voices (`eve` default, `ara`, `rex`, `sal`, `leo`, `carina`, ...) are now a
   typed, immutable catalog instead of docs-only prose:

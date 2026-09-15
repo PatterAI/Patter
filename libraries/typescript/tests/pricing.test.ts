@@ -10,6 +10,7 @@ import {
   calculateLlmCost,
   llmPricing,
 } from '../src/pricing';
+import { AtlasCloudModel } from '../src/providers/atlascloud-llm';
 
 describe('DEFAULT_PRICING', () => {
   it('includes all expected providers', () => {
@@ -416,6 +417,16 @@ describe('LLM cost billing — Cerebras + Groq silent under-billing regression',
       const cost = calculateLlmCost('cerebras', model, 10_000, 10_000);
       expect(cost, `cerebras model ${model} silently billed $0`).toBeGreaterThan(0);
       expect(llmPricing.cerebras[model], `missing rate for ${model}`).toBeDefined();
+    }
+  });
+
+  it('every AtlasCloudModel enum value has a pricing entry (no $0 holes)', () => {
+    // Driven off the enum itself so adding a model without a rate fails here
+    // rather than silently billing $0 in production.
+    for (const model of Object.values(AtlasCloudModel)) {
+      const cost = calculateLlmCost('atlascloud', model, 10_000, 10_000);
+      expect(cost, `atlascloud model ${model} silently billed $0`).toBeGreaterThan(0);
+      expect(llmPricing.atlascloud[model], `missing rate for ${model}`).toBeDefined();
     }
   });
 
