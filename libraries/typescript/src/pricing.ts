@@ -754,6 +754,25 @@ export const llmPricing: Record<string, Record<string, LlmModelPricing>> = {
     'gemini-live-2.5-flash-native-audio': { input: 0.30, output: 2.50 },
     'gemini-3.1-flash-live-preview': { input: 0.30, output: 2.50 },
   },
+  atlascloud: {
+    // USD per 1M tokens, as of 2026-09-15. Read from the gateway's own catalog
+    // rather than a docs page: GET https://api.atlascloud.ai/v1/models returns
+    // per-model pricing.prompt / pricing.completion / pricing.input_cache_read
+    // in USD *per token* — multiply by 1e6. That endpoint lists every routable
+    // model (118 at the time of writing); the entries below are the ones in
+    // AtlasCloudModel. Unlisted models bill $0 here, so add an entry when you
+    // point Patter at one. Where cache_read equals input the gateway applies no
+    // cache discount for that model — the key is still required, because
+    // omitting it bills cached tokens at $0.
+    'openai/gpt-4.1-mini': { input: 0.4, output: 1.6, cache_read: 0.1 },
+    'openai/gpt-5.4-mini': { input: 0.75, output: 4.5, cache_read: 0.075 },
+    'deepseek-ai/deepseek-v3.2': { input: 0.26, output: 0.38, cache_read: 0.13 },
+    'Qwen/Qwen3-235B-A22B-Instruct-2507': { input: 0.2, output: 0.88, cache_read: 0.2 },
+    'qwen/qwen3.5-35b-a3b': { input: 0.225, output: 1.8, cache_read: 0.225 },
+    'zai-org/GLM-4.6': { input: 0.6, output: 2.2, cache_read: 0.11 },
+    'moonshotai/kimi-k2.5': { input: 0.49, output: 2.5, cache_read: 0.2 },
+    'minimaxai/minimax-m2.5': { input: 0.295, output: 1.2, cache_read: 0.06 },
+  },
   groq: {
     // Rates as of 2026-05-08; verify against groq.com/pricing.
     // ``llama-3.3-70b-versatile`` is the Patter default for Groq. The

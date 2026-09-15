@@ -160,6 +160,7 @@ from getpatter.llm.cerebras import LLM as CerebrasLLM
 from getpatter.llm.inworld import LLM as InworldLLM
 from getpatter.llm.google import LLM as GoogleLLM
 from getpatter.llm.litellm import LLM as LiteLLMLLM
+from getpatter.llm.atlascloud import LLM as AtlasCloudLLM
 from getpatter.llm.openai_compatible import (
     LLM as OpenAICompatibleLLM,
     OpenAICompatibleLLMProvider,
@@ -577,6 +578,7 @@ __all__ = [
     "InworldLLM",
     "GoogleLLM",
     "LiteLLMLLM",
+    "AtlasCloudLLM",
     "OpenAICompatibleLLM",
     "OpenAICompatibleLLMProvider",
     "CustomLLM",

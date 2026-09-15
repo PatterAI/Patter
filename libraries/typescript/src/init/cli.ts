@@ -160,6 +160,12 @@ const PIPELINE_LLM: Record<string, ProviderEntry> = {
     env: ['GROQ_API_KEY'],
     extra: 'groq',
   },
+  atlascloud: {
+    cls: 'AtlasCloudLLM',
+    label: 'Atlas Cloud',
+    env: ['ATLASCLOUD_API_KEY'],
+    extra: 'atlascloud',
+  },
   google: {
     cls: 'GoogleLLM',
     label: 'Google Gemini',

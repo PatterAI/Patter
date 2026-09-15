@@ -170,6 +170,12 @@ PIPELINE_LLM: dict[str, dict] = {
         "env": ("GROQ_API_KEY",),
         "extra": "groq",
     },
+    "atlascloud": {
+        "class": "AtlasCloudLLM",
+        "label": "Atlas Cloud",
+        "env": ("ATLASCLOUD_API_KEY",),
+        "extra": "atlascloud",
+    },
     "google": {
         "class": "GoogleLLM",
         "label": "Google Gemini",

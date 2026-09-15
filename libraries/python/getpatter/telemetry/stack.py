@@ -32,6 +32,7 @@ STACK_VENDORS: frozenset[str] = frozenset(
         "google",
         "cerebras",
         "groq",
+        "atlascloud",
         "deepgram",
         "elevenlabs",
         "cartesia",

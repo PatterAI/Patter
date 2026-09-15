@@ -24,6 +24,7 @@ export const STACK_VENDORS: ReadonlySet<string> = new Set([
   'google',
   'cerebras',
   'groq',
+  'atlascloud',
   'deepgram',
   'elevenlabs',
   'cartesia',
