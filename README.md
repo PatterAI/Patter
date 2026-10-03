@@ -159,3 +159,7 @@ Thanks to all our amazing contributors!
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+## Project background
+
+For the product background, developer discovery work and implementation examples, see [Nicolò Tognoni’s Patter case study](https://nicolotognoni.com/projects/patter).
