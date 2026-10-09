@@ -110,7 +110,7 @@ function assertCommonScaffold(target: string): void {
 
   // SECURITY: .env owner-only (0600).
   const mode = fs.statSync(path.join(target, '.env')).mode & 0o777;
-  expect(mode).toBe(0o600);
+  expect(mode).toBe(process.platform === 'win32' ? 0o666 : 0o600);
 
   // .gitignore keeps .env (and its variants) out of version control, while
   // explicitly un-ignoring the committable example.

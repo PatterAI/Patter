@@ -125,7 +125,10 @@ def test_realtime_default_scaffold_is_complete_and_valid(tmp_path, monkeypatch):
 
     # .env is 0600.
     mode = stat.S_IMODE(os.stat(target / ".env").st_mode)
-    assert mode == 0o600, f".env mode {oct(mode)} != 0o600"
+    if os.name == "nt":
+        assert mode == 0o666, f".env mode {oct(mode)} != 0o666"
+    else:
+        assert mode == 0o600, f".env mode {oct(mode)} != 0o600"
 
     # main.py parses via ast and imports the realtime symbols.
     main_src = (target / "main.py").read_text(encoding="utf-8")
@@ -206,7 +209,10 @@ def test_pipeline_default_scaffold_is_complete_and_valid(tmp_path, monkeypatch):
 
     # .env is 0600.
     mode = stat.S_IMODE(os.stat(target / ".env").st_mode)
-    assert mode == 0o600
+    if os.name == "nt":
+        assert mode == 0o666, f".env mode {oct(mode)} != 0o666"
+    else:
+        assert mode == 0o600, f".env mode {oct(mode)} != 0o600"
 
     # main.py parses and imports the default pipeline stack (Deepgram/Cerebras/ElevenLabs).
     main_src = (target / "main.py").read_text(encoding="utf-8")
@@ -352,7 +358,11 @@ def test_skip_keys_writes_placeholder_env_at_0600(tmp_path, monkeypatch, capsys)
         if "=" in line and not line.startswith("#"):
             assert line.endswith("="), f"placeholder line should be blank: {line!r}"
     mode = stat.S_IMODE(os.stat(target / ".env").st_mode)
-    assert mode == 0o600
+
+    if os.name == "nt":
+        assert mode == 0o666, f".env mode {oct(mode)} != 0o666"
+    else:
+        assert mode == 0o600, f".env mode {oct(mode)} != 0o600"
 
 
 @pytest.mark.unit

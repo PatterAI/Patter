@@ -246,7 +246,8 @@ describe('[unit] init wizard — full scaffold to disk via runInit', () => {
 
     // SECURITY: .env must be owner-only (0600).
     const mode = fs.statSync(path.join(target, '.env')).mode & 0o777;
-    expect(mode).toBe(0o600);
+    
+    expect(mode).toBe(process.platform === 'win32' ? 0o666 : 0o600);
   });
 
   it('blocks scaffolding into a non-empty dir without --force', async () => {
@@ -339,7 +340,7 @@ describe('[unit] init wizard — .env created 0600 atomically (no race)', () => 
       ]);
       expect(code).toBe(0);
       const mode = fs.statSync(path.join(target, '.env')).mode & 0o777;
-      expect(mode).toBe(0o600);
+      expect(mode).toBe(process.platform === 'win32' ? 0o666 : 0o600);
     } finally {
       process.umask(prevUmask);
       fs.rmSync(target, { recursive: true, force: true });

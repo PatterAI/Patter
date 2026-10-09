@@ -110,7 +110,11 @@ describe('CallLogger (enabled)', () => {
       agent: { provider: 'openai_realtime', voice: 'nova' },
     });
     const file = findFile(tmp, 'metadata.json')!;
-    expect(file).toMatch(/calls\/\d{4}\/\d{2}\/\d{2}\/call-123\/metadata\.json$/);
+    if (process.platform === 'win32') {
+      expect(file).toMatch(/calls\\\d{4}\\\d{2}\\\d{2}\\call-123\\metadata\.json$/,);
+    } else {
+      expect(file).toMatch(/calls\/\d{4}\/\d{2}\/\d{2}\/call-123\/metadata\.json$/,);
+}
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
     expect(parsed.schema_version).toBe(SCHEMA_VERSION);
     expect(parsed.call_id).toBe('call-123');

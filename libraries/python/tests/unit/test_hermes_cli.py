@@ -288,7 +288,10 @@ def test_doctor_autoloads_env_file(tmp_path: Path, monkeypatch, capsys) -> None:
     assert os.environ.get("DEEPGRAM_API_KEY") == "dg-from-file"
     out = capsys.readouterr().out
     assert "dg-from-file" not in out  # secrets aren't echoed
-    assert str(env) in out  # but the loaded path is reported
+    if os.name == "nt":
+        assert str(env).replace("\\", "\\\\") in out # but the loaded path is reported
+    else:
+        assert str(env) in out  # but the loaded path is reported
 
 
 def test_parser_wires_subcommands() -> None:

@@ -96,6 +96,8 @@
 
 ### Fixed
 
+- **`getpatter init` works on Windows** — the Python scaffold now avoids
+  POSIX-only `fchmod` when writing the generated `.env` file.
 - **`gemini-3.1-flash-live-preview` is now actually usable** (field-debugged on
   the Pillar demo line; fixed in both SDKs):
   - Setup: `enableAffectiveDialog`/`proactivity` are dated-2.5-native-audio-only

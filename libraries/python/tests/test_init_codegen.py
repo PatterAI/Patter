@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import stat
+import os
 
 import pytest
 
@@ -205,7 +206,10 @@ def test_non_interactive_scaffold_writes_files_with_0600_env(tmp_path, capsys):
 
     # SECURITY: .env must be owner-only (0600).
     mode = stat.S_IMODE((target / ".env").stat().st_mode)
-    assert mode == 0o600
+    if os.name == "nt":
+        assert mode == 0o666, f".env mode {oct(mode)} != 0o666"
+    else:
+        assert mode == 0o600, f".env mode {oct(mode)} != 0o600"
 
     # .gitignore must keep .env out of version control.
     gi = (target / ".gitignore").read_text()
@@ -361,6 +365,13 @@ def test_env_created_with_0600_never_world_readable(tmp_path, monkeypatch):
     )
     assert dispatch_init(args) == 0
     mode = stat.S_IMODE((target / ".env").stat().st_mode)
-    assert mode == 0o600
+    if os.name == "nt":
+        assert mode == 0o666, f".env mode {oct(mode)} != 0o666"
+    else:
+        assert mode == 0o600, f".env mode {oct(mode)} != 0o600"
+    
     # No path-based chmod on .env — the mode is set at creation (fchmod on fd).
-    assert not any(p.endswith(".env") for p in chmodded_paths)
+    if hasattr(init_cli.os, "fchmod"):
+        assert not any(p.endswith(".env") for p in chmodded_paths)
+    else:
+        assert any(p.endswith(".env") for p in chmodded_paths)

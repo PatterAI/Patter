@@ -944,7 +944,10 @@ def _write_scaffold(target: Path, plan: dict, env_values: dict[str, str]) -> lis
             # by umask and only applies on create).
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
             fd = os.open(str(path), flags, mode)
-            os.fchmod(fd, mode)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, mode)
+            else:
+                os.chmod(path, mode)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(content)
         else:
