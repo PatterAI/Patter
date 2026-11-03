@@ -29,7 +29,9 @@
 
 ## About
 
-**Patter** is the open-source SDK that gives your AI agent a phone number. You build the agent; Patter handles everything between it and the phone network — the agent loop, the language model, speech-to-text, text-to-speech, real-time voice, audio processing, and the telephony carrier.
+**Patter sells Callables:** agentic telephony lines that can answer and make calls, understand the conversation, and take action. The **Patter SDK** is the open-source developer layer for teams that need to build, customize, or self-host the engine behind a Callable.
+
+You build the agent; the SDK handles everything between it and the phone network — the agent loop, the language model, speech-to-text, text-to-speech, real-time voice, audio processing, and the telephony carrier.
 
 - **Build** with one API in [Python](https://pypi.org/project/getpatter/) or [TypeScript](https://www.npmjs.com/package/getpatter) — same surface, same hooks, same events, at full parity.
 - **Choose** the provider for every layer — LLM, STT, TTS, realtime engine, carrier — and swap any of them with one line.

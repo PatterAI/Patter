@@ -2,7 +2,7 @@
 
 Vite + React + TypeScript. Bundled by `vite-plugin-singlefile` into one
 self-contained `dist/index.html` (JS, CSS, assets all inlined) which both the
-Python and TypeScript SDKs embed as the dashboard UI served from `GET /`.
+Python and TypeScript SDKs embed as the local Callable dashboard served from `GET /`.
 
 ## Scripts
 

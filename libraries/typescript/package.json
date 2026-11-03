@@ -1,7 +1,7 @@
 {
   "name": "getpatter",
   "version": "0.7.1",
-  "description": "Open-source voice AI SDK — connect any AI agent to real phone calls in 4 lines of code",
+  "description": "Open-source TypeScript developer layer for building and customizing Patter Callables",
   "license": "MIT",
   "author": {
     "name": "PatterAI",

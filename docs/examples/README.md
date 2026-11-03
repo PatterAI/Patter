@@ -1,7 +1,7 @@
-# Patter Examples
+# Patter SDK Examples
 
-Runnable examples for both SDKs. Each example ships as a Python / TypeScript
-pair with identical behavior.
+Runnable examples for building and customizing **Callables** with both SDKs. Each
+example ships as a Python / TypeScript pair with identical behavior.
 
 Run the Python examples with `pip install getpatter` + `python <file>.py`,
 and the TypeScript examples with `npm install getpatter` + `npx tsx <file>.ts`.

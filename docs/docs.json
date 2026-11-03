@@ -82,7 +82,7 @@
       },
       {
         "product": "Python SDK",
-        "description": "Voice AI SDK for Python",
+        "description": "Python developer layer for building Patter Callables",
         "icon": "python",
         "tabs": [
           {
@@ -222,7 +222,7 @@
       },
       {
         "product": "TypeScript SDK",
-        "description": "Voice AI SDK for TypeScript",
+        "description": "TypeScript developer layer for building Patter Callables",
         "icon": "js",
         "tabs": [
           {

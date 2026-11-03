@@ -1,5 +1,8 @@
 # create-getpatter
 
+Project generator for the Patter SDK, the open-source developer layer used to build
+and customize Callables.
+
 The npm `create` shim that powers:
 
 ```sh

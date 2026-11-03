@@ -1,6 +1,8 @@
 # Hermes phone agent
 
-A self-hosted phone line for your [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+A self-hosted **Callable** for your [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+A Callable is Patter's agentic telephony line; this example uses the SDK to customize
+one around a local Hermes agent.
 Patter is the **voice shell** (carrier, speech-to-text, turn-taking, barge-in,
 text-to-speech); Hermes is the **brain** on the line. Each conversation turn is
 one `POST http://127.0.0.1:8642/v1/chat/completions` against your local Hermes

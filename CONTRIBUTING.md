@@ -2,6 +2,10 @@
 
 Thank you for your interest in contributing to Patter!
 
+This repository is the open-source developer layer for building and customizing
+**Callables**, Patter's agentic telephony lines. Contributions here improve the SDK;
+the customer-facing product positioning remains Callable-first.
+
 ## Development Setup
 
 ### Python SDK

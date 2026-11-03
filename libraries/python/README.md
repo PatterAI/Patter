@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">Patter Python SDK</h1>
-  <p align="center">Connect AI agents to phone numbers in four lines of code</p>
+  <p align="center">Build and customize Callables in four lines of Python</p>
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 
 ---
 
-Patter is the open-source SDK that gives your AI agent a phone number. Point it at any function that returns a string, and Patter handles the rest: telephony, speech-to-text, text-to-speech, and real-time audio streaming. You build the agent — we connect it to the phone.
+The Patter Python SDK is the open-source developer layer for building and customizing **Callables** — agentic telephony lines that answer and make calls, understand the conversation, and take action. You build the agent; the SDK handles telephony, speech-to-text, text-to-speech, and real-time audio streaming.
 
 ## Quickstart
 

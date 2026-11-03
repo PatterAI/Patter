@@ -1,6 +1,7 @@
 # OpenClaw phone agent (inbound receptionist + outbound dialer)
 
-Give one scoped [OpenClaw](https://openclaw.ai) agent a phone with Patter.
+Build a **Callable** around one scoped [OpenClaw](https://openclaw.ai) agent with the
+Patter SDK. A Callable is Patter's agentic telephony line.
 Patter is the **voice shell** (carrier, speech-to-text, turn-taking, barge-in,
 text-to-speech); the OpenClaw agent is the **brain** on the line. Every turn is
 one `POST http://127.0.0.1:18789/v1/chat/completions` with

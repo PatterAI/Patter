@@ -4,8 +4,10 @@ Guidance for AI coding agents (Claude Code, Cursor, Codex, OpenClaw, …) workin
 in this repository. Humans: see [`CONTRIBUTING.md`](./CONTRIBUTING.md) — this
 file is the same contract in agent-readable form. Read this before opening a PR.
 
-Patter is open-source telephony infrastructure that connects AI agents to phone
-calls. It ships **two SDKs with full parity**: Python (`pip install getpatter`,
+The Patter SDK is the open-source developer layer for building and customizing
+**Callables** — agentic telephony lines that can answer and make calls, understand the
+conversation, and take action. Patter sells Callables; this repository supplies the
+technical layer for developers who need direct control. It ships **two SDKs with full parity**: Python (`pip install getpatter`,
 `libraries/python/`) and TypeScript (`npm install getpatter`,
 `libraries/typescript/`).
 
