@@ -116,6 +116,8 @@ class FallbackLLMProvider:
         *,
         cancel_event: asyncio.Event | None = None,
         call_id: str | None = None,
+        caller: str | None = None,
+        callee: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream only the text deltas, flattening the chunk envelope.
 

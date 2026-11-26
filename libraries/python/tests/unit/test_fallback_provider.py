@@ -373,3 +373,49 @@ class TestFallbackLLMProvider:
             {"type": "text", "content": "done"},
         ]
         provider.destroy()
+
+
+class TestCompleteStream:
+    """complete_stream flattens text chunks and forwards call metadata."""
+
+    @pytest.mark.asyncio
+    async def test_complete_stream_yields_text_and_forwards_call_metadata(self) -> None:
+        received: dict = {}
+
+        class RecordingProvider:
+            async def stream(
+                self, messages: list[dict], tools: list[dict] | None = None, **kwargs
+            ) -> AsyncIterator[dict]:
+                received.update(kwargs)
+                yield {"type": "text", "content": "Hello"}
+                yield {"type": "tool_call", "index": 0}
+                yield {"type": "text", "content": " world"}
+
+        provider = FallbackLLMProvider([RecordingProvider()])
+        texts = [
+            text
+            async for text in provider.complete_stream(
+                [{"role": "user", "content": "hi"}],
+                call_id="call-1",
+                caller="+15550001",
+                callee="+15550002",
+            )
+        ]
+
+        assert texts == ["Hello", " world"]
+        assert received["call_id"] == "call-1"
+        assert received["caller"] == "+15550001"
+        assert received["callee"] == "+15550002"
+        provider.destroy()
+
+    @pytest.mark.asyncio
+    async def test_complete_stream_without_call_metadata(self) -> None:
+        provider = FallbackLLMProvider(
+            [SucceedingProvider([{"type": "text", "content": "ok"}])]
+        )
+        texts = [
+            t
+            async for t in provider.complete_stream([{"role": "user", "content": "hi"}])
+        ]
+        assert texts == ["ok"]
+        provider.destroy()
