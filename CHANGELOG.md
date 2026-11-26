@@ -113,6 +113,12 @@
     matching the exported `GEMINI_LIVE_3_1_FLASH_PREVIEW` constant in TypeScript.
   `libraries/typescript/src/providers/gemini-live.ts`,
   `libraries/python/getpatter/providers/gemini_live.py`.
+- **`FallbackLLMProvider.complete_stream` no longer raises `NameError` in
+  Python.** It forwarded `caller=` / `callee=` to `stream()` without accepting
+  them, so every call failed on the first chunk. It now takes both as optional
+  keyword arguments and passes them to the delegate providers, matching
+  TypeScript's `completeStream(messages, tools, opts)`.
+  `libraries/python/getpatter/services/fallback_provider.py`.
 
 ## 0.7.1 (2026-07-03)
 
